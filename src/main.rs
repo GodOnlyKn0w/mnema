@@ -17,6 +17,52 @@ use fs2::FileExt;
 const JOURNAL_DIR: &str = ".tasktree";
 const JOURNAL_FILE: &str = ".tasktree/journal.jsonl";
 
+/// Resolve the journal directory with priority:
+///   1. TASKTREE_HOME env var (explicit override; must contain .tasktree/)
+///   2. Walk-up from cwd: nearest ancestor containing .tasktree/
+///   3. Error if neither found (no silent fallback)
+///
+/// Walk-up enables shared journal across git worktrees: any worktree cwd
+/// walk-ups to the project root .tasktree/. See architecture.md s15.7.
+fn resolve_journal_dir() -> Result<PathBuf, String> {
+    // 1. Explicit override
+    if let Ok(home) = std::env::var("TASKTREE_HOME") {
+        let p = PathBuf::from(&home);
+        let resolved = if p.is_absolute() {
+            p
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("cannot get cwd: {}", e))?
+                .join(p)
+        };
+        let journal = resolved.join(JOURNAL_DIR);
+        if !journal.is_dir() {
+            return Err(format!(
+                "TASKTREE_HOME={} does not contain {}",
+                resolved.display(),
+                JOURNAL_DIR
+            ));
+        }
+        return Ok(journal);
+    }
+
+    // 2. Walk-up from cwd
+    let mut current = std::env::current_dir()
+        .map_err(|e| format!("cannot get cwd: {}", e))?;
+    loop {
+        let candidate = current.join(JOURNAL_DIR);
+        if candidate.is_dir() {
+            return Ok(candidate);
+        }
+        if !current.pop() {
+            return Err(format!(
+                "{}/ not found in cwd or any parent directory. Run tasktree init in project root.",
+                JOURNAL_DIR
+            ));
+        }
+    }
+}
+
 fn version_info() -> &'static str {
     concat!(
         env!("CARGO_PKG_VERSION"),
@@ -125,6 +171,9 @@ Examples:
         /// Read content from a file
         #[arg(long, value_name = "PATH", verbatim_doc_comment)]
         file: Option<String>,
+        /// Output format: text (default) or json
+        #[arg(short, long, default_value = "text")]
+        format: Option<String>,
         /// Append to a specific strand
         #[arg(long = "id", value_name = "ID", verbatim_doc_comment)]
         explicit_id: Option<String>,
@@ -350,36 +399,12 @@ enum DoctorTarget {
 }
 
 fn ensure_journal() -> Result<PathBuf, String> {
-    let home = std::env::var("TASKTREE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let base = if home.has_root() && home.join(JOURNAL_DIR).exists() {
-        home
-    } else if PathBuf::from(JOURNAL_DIR).exists() {
-        PathBuf::from(".")
-    } else {
-        return Err(
-            ".tasktree/ not found. Set TASKTREE_HOME or run from project root.".to_string(),
-        );
-    };
-    Ok(base.join(JOURNAL_FILE))
+    Ok(resolve_journal_dir()?.join("journal.jsonl"))
 }
 
 /// Return path to .tasktree/journal.lock (dedicated lock file, not the journal itself).
 fn journal_lock_path() -> Result<PathBuf, String> {
-    let home = std::env::var("TASKTREE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let base = if home.has_root() && home.join(JOURNAL_DIR).exists() {
-        home
-    } else if PathBuf::from(JOURNAL_DIR).exists() {
-        PathBuf::from(".")
-    } else {
-        return Err(
-            ".tasktree/ not found. Set TASKTREE_HOME or run from project root.".to_string(),
-        );
-    };
-    Ok(base.join(JOURNAL_DIR).join("journal.lock"))
+    Ok(resolve_journal_dir()?.join("journal.lock"))
 }
 
 /// Acquire exclusive lock on journal.lock, open journal.jsonl, run closure, flush, unlock.
@@ -626,17 +651,7 @@ fn find_strand(events: &[(usize, Event)], id: &str) -> Option<String> {
 
 fn cmd_doctor_journal() -> Result<bool, String> {
     let started = Instant::now();
-    let path = match std::env::var("TASKTREE_HOME").map(PathBuf::from) {
-        Ok(home) if home.join(JOURNAL_FILE).exists() => home.join(JOURNAL_FILE),
-        _ => {
-            let local = PathBuf::from(JOURNAL_FILE);
-            if local.exists() {
-                local
-            } else {
-                return Err(".tasktree/journal.jsonl not found. Set TASKTREE_HOME or run from project root.".to_string());
-            }
-        }
-    };
+    let path = resolve_journal_dir()?.join("journal.jsonl");
 
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read journal: {}", e))?;
@@ -675,7 +690,7 @@ fn cmd_doctor_journal() -> Result<bool, String> {
         if line.contains("git_head") || line.contains("git.head") { git_head_count += 1; }
     }
 
-    let state_path = PathBuf::from(JOURNAL_DIR).join("doctor-state.json");
+    let state_path = resolve_journal_dir()?.join("doctor-state.json");
     let timeline_status = if state_path.exists() {
         match std::fs::read_to_string(&state_path) {
             Ok(content) => {
@@ -936,10 +951,7 @@ fn cmd_unhide(id: &str) -> Result<(), String> {
 
 
 fn cmd_export(out: &str) -> Result<(), String> {
-    let journal_path = PathBuf::from(JOURNAL_FILE);
-    if !journal_path.exists() {
-        return Err(format!("journal not found at {} (run tasktree init first)", JOURNAL_FILE));
-    }
+    let journal_path = resolve_journal_dir()?.join("journal.jsonl");
 
     let out_path = PathBuf::from(out);
     if let Some(parent) = out_path.parent() {
@@ -1016,6 +1028,36 @@ fn looks_like_strand_id(value: &str) -> bool {
     (6..=32).contains(&len) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+fn validate_lifecycle_marker(content: &str) -> Result<(), String> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("[") { return Ok(()); }
+    if let Some(end) = trimmed.find("]") {
+        let marker = &trimmed[..=end];
+        if is_convention_marker(marker) { return Ok(()); }
+        if is_known_marker(marker) { return Ok(()); }
+        if "mcfvder".contains(marker.chars().nth(1).unwrap_or(' ')) {
+            return Err(format!(
+                "unknown lifecycle marker {} - valid: [merged] [cancelled] [failed] [verified] [done] [ended] [dispatched] [registered]",
+                marker
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_convention_marker(marker: &str) -> bool {
+    matches!(marker,
+        "[observed]" | "[check]" | "[friction]" | "[progress]" |
+        "[decision]" | "[grill]" | "[insight]" | "[lesson]" | "[fixed]" |
+        "[deliverable]" | "[skill]" | "[guide]" | "[covers]" |
+        "[waiting:human]" | "[checkpoint]" | "[session]" | "[task]"
+    )
+}
+
+fn is_known_marker(marker: &str) -> bool {
+    matches!(marker, "[merged]" | "[cancelled]" | "[failed]" | "[verified]" | "[done]" | "[ended]" | "[dispatched]" | "[registered]")
+}
+
 fn cmd_append(
     content: Option<&str>,
     legacy_id: Option<&str>,
@@ -1023,6 +1065,7 @@ fn cmd_append(
     stdin: bool,
     file: Option<&str>,
     explicit_id: Option<&str>,
+    format: Option<&str>,
 ) -> Result<(), String> {
     // ---- Content Source Resolution ----
     if (stdin || file.is_some())
@@ -1082,6 +1125,7 @@ fn cmd_append(
 
     // Normalize: strip at most one trailing newline/CRLF, preserve leading whitespace
     let stored = normalize_content(&raw);
+    validate_lifecycle_marker(&stored)?;
 
     // Load journal for target resolution
     let path = ensure_journal()?;
@@ -1154,7 +1198,19 @@ fn cmd_append(
     with_journal_write_lock(|journal| {
         append_event_unlocked(journal, &event)
     })?;
-    println!("appended to {}", shorten(&full_id));
+    if format == Some("json") {
+        let append_id = match &event {
+            Event::LogAppended { append_id, .. } => append_id.clone(),
+            _ => None,
+        };
+        println!("{}", serde_json::to_string(&serde_json::json!({
+            "strand_id": full_id,
+            "append_id": append_id,
+            "content_preview": stored.chars().take(120).collect::<String>(),
+        })).unwrap());
+    } else {
+        println!("appended to {}", shorten(&full_id));
+    }
     Ok(())
 }
 
@@ -2042,6 +2098,7 @@ fn main() {
             stdin,
             file,
             explicit_id,
+            format,
         } => cmd_append(
             content.as_deref(),
             id.as_deref(),
@@ -2049,6 +2106,7 @@ fn main() {
             *stdin,
             file.as_deref(),
             explicit_id.as_deref(),
+            format.as_deref(),
         ),
         Commands::List { all, links, backlinks, state, list_type, stale, stale_offset, since_offset, format } => {
             let fmt = format.as_deref() == Some("json");
@@ -2165,6 +2223,126 @@ mod tests {
         TestEnv::new()
     }
 
+    // ─────────────────────────────────────────────────────────────────
+    // resolve_journal_dir() tests (architecture.md §15.7)
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Mutex for serializing env-var-touching tests (TASKTREE_HOME).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Save and restore TASKTREE_HOME around a closure, returning its result.
+    fn with_tasktree_home<F: FnOnce() -> R, R>(new_value: Option<&str>, f: F) -> R {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var("TASKTREE_HOME").ok();
+        match new_value {
+            Some(v) => unsafe { std::env::set_var("TASKTREE_HOME", v) },
+            None => unsafe { std::env::remove_var("TASKTREE_HOME") },
+        }
+        let result = f();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("TASKTREE_HOME", v) },
+            None => unsafe { std::env::remove_var("TASKTREE_HOME") },
+        }
+        result
+    }
+
+    #[test]
+    fn test_resolve_journal_walkup_finds_parent() {
+        // TestEnv sets cwd to temp dir with .tasktree/ (the "project root").
+        // Create a subdir and verify walk-up still finds the project journal.
+        let env = setup();
+        let subdir = env.path().join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        let prev_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&subdir).unwrap();
+        let result = with_tasktree_home(None, || resolve_journal_dir());
+        std::env::set_current_dir(&prev_cwd).unwrap();
+        let resolved = result.unwrap();
+        // The resolved journal must be the project one, NOT a subdir one.
+        assert!(resolved.is_dir(), "resolved path must be a directory");
+        assert!(resolved.join("journal.jsonl").exists() || resolved.join("journal.lock").exists(),
+            "resolved dir must look like a journal dir");
+    }
+
+    #[test]
+    fn test_resolve_journal_no_journal_errors() {
+        // Set cwd to a temp dir with NO .tasktree/, no parent has one either.
+        let _lock = CWD_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prev_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let result = with_tasktree_home(None, || resolve_journal_dir());
+        std::env::set_current_dir(&prev_cwd).unwrap();
+        assert!(result.is_err(), "should error when no .tasktree/ found");
+        let err = result.unwrap_err();
+        assert!(err.contains(".tasktree/ not found"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn test_resolve_journal_tasktree_home_absolute() {
+        // TASKTREE_HOME pointing to a dir with .tasktree/ must win over walk-up.
+        let env = setup();
+        with_tasktree_home(Some(env.path().to_str().unwrap()), || {
+            let resolved = resolve_journal_dir().unwrap();
+            assert!(resolved.ends_with(JOURNAL_DIR),
+                "resolved should end with .tasktree, got {:?}", resolved);
+        });
+    }
+
+    #[test]
+    fn test_resolve_journal_tasktree_home_missing_dir_errors() {
+        // TASKTREE_HOME pointing to a dir WITHOUT .tasktree/ must error.
+        let _lock = CWD_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        with_tasktree_home(Some(dir.path().to_str().unwrap()), || {
+            let result = resolve_journal_dir();
+            assert!(result.is_err(), "should error when TASKTREE_HOME dir has no .tasktree/");
+            let err = result.unwrap_err();
+            assert!(err.contains("TASKTREE_HOME"), "error must mention TASKTREE_HOME: {}", err);
+        });
+    }
+
+    #[test]
+    fn test_resolve_journal_tasktree_home_relative() {
+        // Relative TASKTREE_HOME must resolve against cwd.
+        let env = setup();
+        let dir_name = env.path().file_name().unwrap().to_str().unwrap();
+        let prev_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(env.path().parent().unwrap()).unwrap();
+        let result = with_tasktree_home(Some(dir_name), || resolve_journal_dir());
+        std::env::set_current_dir(&prev_cwd).unwrap();
+        assert!(result.is_ok(), "relative TASKTREE_HOME should resolve: {:?}", result);
+    }
+
+    #[test]
+    fn test_resolve_journal_walkup_stops_at_root() {
+        // Walk-up must terminate (not infinite loop) even when no .tasktree/ exists.
+        let _lock = CWD_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prev_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let result = with_tasktree_home(None, || resolve_journal_dir());
+        std::env::set_current_dir(&prev_cwd).unwrap();
+        assert!(result.is_err(), "should error, not infinite loop");
+    }
+
+    #[test]
+    fn test_ensure_journal_uses_resolver() {
+        // After refactor, ensure_journal must go through resolve_journal_dir().
+        // Smoke test: from a subdir, it returns a path inside the project .tasktree/.
+        let env = setup();
+        let subdir = env.path().join("nested").join("deeper");
+        fs::create_dir_all(&subdir).unwrap();
+        let prev_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&subdir).unwrap();
+        let path = with_tasktree_home(None, || ensure_journal());
+        std::env::set_current_dir(&prev_cwd).unwrap();
+        let path = path.unwrap();
+        assert!(path.ends_with("journal.jsonl"), "must end with journal.jsonl, got {:?}", path);
+        assert!(path.parent().unwrap().file_name().unwrap() == ".tasktree",
+            "parent must be .tasktree/, got {:?}", path.parent());
+    }
+
         #[test]
     fn test_context_text_output_contract() {
         let _env = setup();
@@ -2242,7 +2420,7 @@ fn create_strand(content: &str) -> String {
         let _id1 = create_strand("first strand");
         let id2 = create_strand("second strand");
         // Positional content, no ID → most recent active strand
-        let result = cmd_append(Some("hello world"), None, false, false, None, None);
+        let result = cmd_append(Some("hello world"), None, false, false, None, None, None);
         assert!(result.is_ok());
         // Verify content appears in most recent strand (id2)
         let path = ensure_journal().unwrap();
@@ -2261,7 +2439,7 @@ fn create_strand(content: &str) -> String {
     fn positional_with_legacy_id() {
         let _env = setup();
         let id1 = create_strand("first strand");
-        let result = cmd_append(Some("legacy id test"), Some(&id1), false, false, None, None);
+        let result = cmd_append(Some("legacy id test"), Some(&id1), false, false, None, None, None);
         assert!(result.is_ok());
     }
 
@@ -2275,7 +2453,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             None,
-            Some(&id1),
+            Some(&id1), None,
         );
         assert!(result.is_ok());
     }
@@ -2284,7 +2462,7 @@ fn create_strand(content: &str) -> String {
     fn positional_empty_rejected() {
         let _env = setup();
         create_strand("first strand");
-        let result = cmd_append(Some("   "), None, false, false, None, None);
+        let result = cmd_append(Some("   "), None, false, false, None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("empty"));
     }
@@ -2299,7 +2477,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             None,
-            None,
+            None, None,
         );
         assert!(result.is_ok());
         let path = ensure_journal().unwrap();
@@ -2342,7 +2520,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             Some(file_path.to_str().unwrap()),
-            Some(&id),
+            Some(&id), None,
         );
         assert!(result.is_ok());
     }
@@ -2379,7 +2557,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             Some(file_path.to_str().unwrap()),
-            None,
+            None, None,
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -2393,7 +2571,7 @@ fn create_strand(content: &str) -> String {
     fn content_source_none() {
         let _env = setup();
         create_strand("first strand");
-        let result = cmd_append(None, None, false, false, None, None);
+        let result = cmd_append(None, None, false, false, None, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("content source"));
@@ -2403,7 +2581,7 @@ fn create_strand(content: &str) -> String {
     fn content_source_conflict_positional_and_stdin() {
         let _env = setup();
         create_strand("first strand");
-        let result = cmd_append(Some("content"), None, false, true, None, None);
+        let result = cmd_append(Some("content"), None, false, true, None, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("only one content source"));
@@ -2422,7 +2600,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             Some(file_path.to_str().unwrap()),
-            None,
+            None, None,
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one content source"));
@@ -2432,7 +2610,7 @@ fn create_strand(content: &str) -> String {
     fn stdin_positional_strand_id_warns_to_use_explicit_id() {
         let _env = setup();
         create_strand("first strand");
-        let result = cmd_append(Some("0000019dd34b"), None, false, true, None, None);
+        let result = cmd_append(Some("0000019dd34b"), None, false, true, None, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.starts_with("warn:"));
@@ -2452,7 +2630,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             Some(file_path.to_str().unwrap()),
-            None,
+            None, None,
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -2473,7 +2651,7 @@ fn create_strand(content: &str) -> String {
             false,
             true,
             Some(file_path.to_str().unwrap()),
-            None,
+            None, None,
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one content source"));
@@ -2492,7 +2670,7 @@ fn create_strand(content: &str) -> String {
             false,
             true,
             Some(file_path.to_str().unwrap()),
-            None,
+            None, None,
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one content source"));
@@ -2510,7 +2688,7 @@ fn create_strand(content: &str) -> String {
             true,
             false,
             None,
-            Some("0000019dd34b"),
+            Some("0000019dd34b"), None,
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one target"));
@@ -2520,7 +2698,7 @@ fn create_strand(content: &str) -> String {
     fn target_conflict_new_and_legacy_id() {
         let _env = setup();
         let id = create_strand("first strand");
-        let result = cmd_append(Some("content"), Some(&id), true, false, None, None);
+        let result = cmd_append(Some("content"), Some(&id), true, false, None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one target"));
     }
@@ -2529,7 +2707,7 @@ fn create_strand(content: &str) -> String {
     fn reversed_positional_append_gets_helpful_error() {
         let _env = setup();
         let id = create_strand("first strand");
-        let result = cmd_append(Some(&id), Some("[observed] finding"), false, false, None, None);
+        let result = cmd_append(Some(&id), Some("[observed] finding"), false, false, None, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("arguments look reversed"));
@@ -2540,7 +2718,7 @@ fn create_strand(content: &str) -> String {
     fn target_conflict_new_legacy_and_explicit() {
         let _env = setup();
         let id = create_strand("first strand");
-        let result = cmd_append(Some("content"), Some(&id), true, false, None, Some(&id));
+        let result = cmd_append(Some("content"), Some(&id), true, false, None, Some(&id), None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one target"));
     }
@@ -2550,7 +2728,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id = create_strand("first strand");
         // --id <id> "content" <id> — both explicit and legacy ID provided
-        let result = cmd_append(Some("content"), Some(&id), false, false, None, Some(&id));
+        let result = cmd_append(Some("content"), Some(&id), false, false, None, Some(&id), None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one target"));
     }
@@ -2569,7 +2747,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             Some(file_path.to_str().unwrap()),
-            None,
+            None, None,
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("positional strand id"));
@@ -2580,7 +2758,7 @@ fn create_strand(content: &str) -> String {
     #[test]
     fn new_with_positional_content() {
         let _env = setup();
-        let result = cmd_append(Some("brand new strand"), None, true, false, None, None);
+        let result = cmd_append(Some("brand new strand"), None, true, false, None, None, None);
         assert!(result.is_ok());
     }
 
@@ -2596,7 +2774,7 @@ fn create_strand(content: &str) -> String {
             true,
             false,
             Some(file_path.to_str().unwrap()),
-            None,
+            None, None,
         );
         assert!(result.is_ok());
     }
@@ -2682,8 +2860,8 @@ fn create_strand(content: &str) -> String {
     fn checkpoint_tail_does_not_change_observed_entry_count() {
         let _env = setup();
         let id = create_strand("checkpoint target");
-        cmd_append(Some("step one"), Some(&id), false, false, None, None).unwrap();
-        cmd_append(Some("step two"), Some(&id), false, false, None, None).unwrap();
+        cmd_append(Some("step one"), Some(&id), false, false, None, None, None).unwrap();
+        cmd_append(Some("step two"), Some(&id), false, false, None, None, None).unwrap();
 
         let result = cmd_checkpoint(Some(&id), "commit after three entries", Some(1), false);
         assert!(result.is_ok());
