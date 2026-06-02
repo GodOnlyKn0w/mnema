@@ -1,0 +1,260 @@
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sha2::{Sha256, Digest};
+use std::process::Command;
+use std::sync::atomic::{AtomicU16, Ordering};
+
+static ID_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+/// Git context captured at append time — optional, never blocks append.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitContext {
+    pub head: String,
+    pub branch: String,
+    pub status: String,
+}
+
+pub fn get_git_context() -> Option<GitContext> {
+    let head = run_cmd(&["git", "rev-parse", "--short", "HEAD"]);
+    let branch = run_cmd(&["git", "branch", "--show-current"])
+        .unwrap_or_else(|_| "detached".to_string());
+    let status = run_cmd(&["git", "status", "--porcelain"])
+        .map(|s| if s.trim().is_empty() { "clean".to_string() } else { "dirty".to_string() })
+        .unwrap_or_else(|_| "unknown".to_string());
+    head.map(|h| GitContext { head: h, branch, status }).ok()
+}
+
+fn run_cmd(args: &[&str]) -> Result<String, String> {
+    let output = Command::new(args[0])
+        .args(&args[1..])
+        .output()
+        .map_err(|e| format!("cannot run git: {}", e))?;
+    if !output.status.success() {
+        return Err("git command failed".to_string());
+    }
+    String::from_utf8(output.stdout)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| format!("invalid utf-8: {}", e))
+}
+
+/// Event types for the append-only journal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Event {
+    #[serde(rename = "strand_created", alias = "node_created")]
+    StrandCreated {
+        id: String,
+        ts: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        strand_type: Option<String>,
+    },
+    #[serde(rename = "log_appended")]
+    LogAppended {
+        id: String,
+        ts: String,
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ref_: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        append_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        git: Option<GitContext>,
+    },
+    #[serde(rename = "edge_linked")]
+    EdgeLinked {
+        id: String,
+        ts: String,
+        to: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        edge_type: Option<String>,
+    },
+    #[serde(rename = "edge_unlinked")]
+    EdgeUnlinked {
+        id: String,
+        ts: String,
+        to: String,
+    },
+    #[serde(rename = "strand_hidden", alias = "node_hidden")]
+    StrandHidden {
+        id: String,
+        ts: String,
+    },
+    #[serde(rename = "strand_unhidden", alias = "node_unhidden")]
+    StrandUnhidden {
+        id: String,
+        ts: String,
+    },
+    #[serde(rename = "checkpoint")]
+    CheckpointCreated {
+        id: String,
+        ts: String,
+        observed: String,
+        action: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        append_id: Option<String>,
+    },
+}
+
+impl Event {
+    pub fn strand_id(&self) -> &str {
+        match self {
+            Event::StrandCreated { id, .. }
+            | Event::LogAppended { id, .. }
+            | Event::EdgeLinked { id, .. }
+            | Event::EdgeUnlinked { id, .. }
+            | Event::StrandHidden { id, .. }
+            | Event::StrandUnhidden { id, .. }
+            | Event::CheckpointCreated { id, .. } => id,
+        }
+    }
+
+}
+
+fn now() -> String {
+    Utc::now().to_rfc3339()
+}
+
+/// ID format: 24 hex digits = microsecond timestamp (16) + PID (4) + counter (4).
+/// PID prevents collision across processes on a single machine; counter prevents
+/// collision within a process in the same microsecond.
+///
+/// Collision probability per microsecond per machine: ~2^-64 (negligible).
+/// Sufficient for single-machine use. Insufficient for distributed deployment:
+/// two machines may independently assign the same PID in the same microsecond.
+/// If per-agent sub-journals on different machines are introduced, switch to a
+/// random nonce or machine-level unique identifier.
+fn generate_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+    let pid = std::process::id() as u16;
+    let counter = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    format!("{:016x}{:04x}{:04x}", ts, pid, counter)
+}
+
+/// Stable content-derived ID for a log append.
+/// sha256(strand_id + ts + content) — deterministic, survives journal repairs.
+pub fn compute_append_id(strand_id: &str, ts: &str, content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(strand_id.as_bytes());
+    hasher.update(ts.as_bytes());
+    hasher.update(content.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+pub fn make_strand_created(content: &str, strand_type: Option<&str>) -> (Event, Event) {
+    let ts = now();
+    let id = generate_id();
+    let append_id = compute_append_id(&id, &ts, content);
+    let git = get_git_context();
+    let created = Event::StrandCreated {
+        id: id.clone(),
+        ts: ts.clone(),
+        strand_type: strand_type.map(|s| s.to_string()),
+    };
+    let appended = Event::LogAppended {
+        id,
+        ts,
+        content: content.to_string(),
+        ref_: None,
+        append_id: Some(append_id),
+        git,
+    };
+    (created, appended)
+}
+
+pub fn make_log_appended(id: &str, content: &str) -> Event {
+    let ts = now();
+    let append_id = compute_append_id(id, &ts, content);
+    let git = get_git_context();
+    Event::LogAppended {
+        id: id.to_string(),
+        ts,
+        content: content.to_string(),
+        ref_: None,
+        append_id: Some(append_id),
+        git,
+    }
+}
+
+pub fn make_checkpoint(id: &str, observed: &str, action: &str) -> Event {
+    let ts = now();
+    let content = format!("observed={} action={}", observed, action);
+    let append_id = compute_append_id(id, &ts, &content);
+    Event::CheckpointCreated {
+        id: id.to_string(),
+        ts,
+        observed: observed.to_string(),
+        action: action.to_string(),
+        append_id: Some(append_id),
+    }
+}
+
+pub fn make_edge_linked(source_id: &str, target_id: &str, edge_type: Option<&str>) -> Event {
+    Event::EdgeLinked {
+        id: source_id.to_string(),
+        ts: now(),
+        to: target_id.to_string(),
+        edge_type: edge_type.map(|s| s.to_string()),
+    }
+}
+
+pub fn make_strand_hidden(id: &str) -> Event {
+    Event::StrandHidden {
+        id: id.to_string(),
+        ts: now(),
+    }
+}
+
+pub fn make_strand_unhidden(id: &str) -> Event {
+    Event::StrandUnhidden {
+        id: id.to_string(),
+        ts: now(),
+    }
+}
+
+// ── Timeline Projection types ────────────────────────────
+
+/// A single event in timeline projection.
+///
+/// Data model only — serialization lives in `output.rs` DTOs.
+#[derive(Debug, Clone, Serialize)]
+pub struct TimelineEntry {
+    pub journal_offset: usize,
+    pub ts: String,
+    pub strand_id: String,
+    pub strand_type: Option<String>,
+    pub kind: TimelineEventKind,
+    pub ts_skew: bool,
+}
+
+/// Event kind in timeline projection.
+///
+/// Data model only — serialization (tagged union) lives in `output.rs` DTOs.
+/// Pattern matching on this enum is the intended consumer interface.
+#[derive(Debug, Clone, Serialize)]
+pub enum TimelineEventKind {
+    StrandCreated {
+        summary: Option<String>,
+    },
+    LogAppended {
+        content: String,
+        append_id: Option<String>,
+    },
+    EdgeLinked {
+        target_id: String,
+        edge_type: Option<String>,
+    },
+    EdgeUnlinked {
+        target_id: String,
+    },
+    StrandHidden,
+    StrandUnhidden,
+    CheckpointCreated {
+        observed: String,
+        action: String,
+        append_id: Option<String>,
+    },
+}
