@@ -1729,7 +1729,7 @@ fn cmd_timeline(
 fn cmd_agent_context(format_json: Option<&str>, include_hidden: bool) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
-    let strands = projection::project_strands(&events, true);
+    let strands = projection::project_strands(&events, include_hidden);
 
     let mut prompt_strands: Vec<_> = strands
         .iter()
@@ -1831,7 +1831,7 @@ fn cmd_context(
 ) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
-    let strands = projection::project_strands(&events, true);
+    let strands = projection::project_strands(&events, include_hidden);
 
     let target_type = context_type.unwrap_or("prompt-strand");
     let is_json = format_json == Some("json");
@@ -3277,5 +3277,49 @@ fn create_strand(content: &str) -> String {
         let result = cmd_checkpoint(Some(&id), "explicit id on hidden", None, false, false);
         assert!(result.is_ok(), "explicit --id must resolve a hidden strand");
     }
+
+    /// cmd_context default (include_hidden=false) MUST NOT surface hidden
+    /// prompt-strands via the cmd_context call path. Regression for the
+    /// 'flag plumbed but projection ignores it' bug caught during
+    /// hygiene review of 66f668e.
+    #[test]
+    fn cmd_context_default_excludes_hidden_via_cmd_path() {
+        let _env = setup();
+        let (c, a) = event::make_strand_created("[covers] audit/", Some("prompt-strand"));
+        let id = c.strand_id().to_string();
+        with_journal_write_lock(|j| {
+            append_event_unlocked(j, &c)?;
+            append_event_unlocked(j, &a)
+        }).unwrap();
+        cmd_hide(&id, Some("noise")).unwrap();
+        let result = cmd_context(None, &[], None, None, false, false);
+        assert!(result.is_ok());
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let visible = projection::project_strands(&events, false);
+        assert!(!visible.iter().any(|s| s.id == id),
+            "cmd_context default must use include_hidden=false in projection");
+    }
+
+    /// cmd_agent_context default must also exclude hidden strands.
+    #[test]
+    fn cmd_agent_context_default_excludes_hidden_via_cmd_path() {
+        let _env = setup();
+        let (c, a) = event::make_strand_created("[covers] audit2/", Some("prompt-strand"));
+        let id = c.strand_id().to_string();
+        with_journal_write_lock(|j| {
+            append_event_unlocked(j, &c)?;
+            append_event_unlocked(j, &a)
+        }).unwrap();
+        cmd_hide(&id, Some("noise")).unwrap();
+        let result = cmd_agent_context(None, false);
+        assert!(result.is_ok());
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let visible = projection::project_strands(&events, false);
+        assert!(!visible.iter().any(|s| s.id == id),
+            "cmd_agent_context default must use include_hidden=false in projection");
+    }
 }
+
 
