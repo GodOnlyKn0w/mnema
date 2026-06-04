@@ -219,6 +219,11 @@ Rules:
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
+        /// Include hidden strands when resolving the most-recent active strand
+        /// (default: only consider visible strands; passing --include-hidden
+        /// or --all falls back to hidden ones if no visible strand exists)
+        #[arg(long, alias = "all")]
+        include_hidden: bool,
     },
     /// List all strands (reverse chronological, most recent last)
     List {
@@ -271,6 +276,9 @@ Rules:
     Search {
         /// Search query (substring match, case-insensitive)
         query: String,
+        /// Include hidden strands in the result set (default: exclude)
+        #[arg(long)]
+        include_hidden: bool,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -361,6 +369,9 @@ Rules:
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
+        /// Include hidden strands in the result set (default: exclude)
+        #[arg(long)]
+        include_hidden: bool,
     },
     /// Build nested tree projection from strand edges
     Tree {
@@ -388,6 +399,9 @@ Rules:
         /// Include [friction] entries (excluded by default)
         #[arg(long)]
         include_friction: bool,
+        /// Include hidden strands in the result set (default: exclude)
+        #[arg(long)]
+        include_hidden: bool,
     },
 }
 
@@ -918,34 +932,80 @@ fn cmd_link(source: &str, target: &str, edge_type: Option<&str>) -> Result<(), S
     println!("linked {} -> {} ({})", shorten(&src_id), shorten(&tgt_id), resolved_type.unwrap());
     Ok(())
 }
-
-fn cmd_hide(id: &str, reason: Option<&str>) -> Result<(), String> {
-    let events = read_events_strict(&ensure_journal()?)?;
-    let strand_id = resolve_id(&events, id)?;
-    let hide_event = event::make_strand_hidden(&strand_id);
-    if let Some(r) = reason {
-        let log_event = event::make_log_appended(&strand_id, &format!("[hidden] {}", r));
-        // Write both events atomically under one lock
-        with_journal_write_lock(|journal| {
-            append_events_unlocked(journal, &[hide_event, log_event])
-        })?;
-    } else {
-        with_journal_write_lock(|journal| {
-            append_event_unlocked(journal, &hide_event)
-        })?;
+/// Compute current hide_count for a strand by scanning its events. The
+/// balance is the number of `StrandHidden` minus `StrandUnhidden` events.
+/// Used by hide/unhide to make the operations idempotent.
+fn count_hide_unhide(events: &[(usize, Event)], strand_id: &str) -> i32 {
+    let mut count: i32 = 0;
+    for (_, e) in events {
+        if e.strand_id() != strand_id {
+            continue;
+        }
+        match e {
+            Event::StrandHidden { .. } => count += 1,
+            Event::StrandUnhidden { .. } => count -= 1,
+            _ => {}
+        }
     }
-    println!("hidden {}", shorten(&strand_id));
+    count
+}
+
+/// Hide a strand. Idempotent: if the strand is already hidden (hide_count > 0),
+/// no event is written. The current state read and the append happen inside the
+/// same journal write lock so concurrent hide/unhide calls are serialised.
+fn cmd_hide(id: &str, reason: Option<&str>) -> Result<(), String> {
+    let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
+    // Both the read (to compute current state) and the append must be inside
+    // the same write lock. Otherwise two concurrent `cmd_hide` calls would each
+    // see hide_count=0 and both append a StrandHidden event.
+    let outcome = with_journal_write_lock(|journal| {
+        // Re-read events under the lock. The journal file is already open
+        // for append, so we use a fresh read of the on-disk file via the
+        // shared reader for consistency.
+        let path = ensure_journal()?;
+        let (events, _) = read_events_lossy(&path);
+        let current = count_hide_unhide(&events, &strand_id);
+        if current > 0 {
+            return Ok(false); // already hidden: no-op
+        }
+        let hide_event = event::make_strand_hidden(&strand_id);
+        if let Some(r) = reason {
+            let log_event = event::make_log_appended(&strand_id, &format!("[hidden] {}", r));
+            append_events_unlocked(journal, &[hide_event, log_event])?;
+        } else {
+            append_event_unlocked(journal, &hide_event)?;
+        }
+        Ok(true)
+    })?;
+    if outcome {
+        println!("hidden {}", shorten(&strand_id));
+    } else {
+        println!("hidden {} (already hidden, no-op)", shorten(&strand_id));
+    }
     Ok(())
 }
 
+/// Unhide a strand. Idempotent: if the strand is not hidden (hide_count <= 0),
+/// no event is written. The current state read and the append happen inside the
+/// same journal write lock so concurrent hide/unhide calls are serialised.
 fn cmd_unhide(id: &str) -> Result<(), String> {
-    let events = read_events_strict(&ensure_journal()?)?;
-    let strand_id = resolve_id(&events, id)?;
-    let event = event::make_strand_unhidden(&strand_id);
-    with_journal_write_lock(|journal| {
-        append_event_unlocked(journal, &event)
+    let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
+    let outcome = with_journal_write_lock(|journal| {
+        let path = ensure_journal()?;
+        let (events, _) = read_events_lossy(&path);
+        let current = count_hide_unhide(&events, &strand_id);
+        if current <= 0 {
+            return Ok(false); // already visible: no-op
+        }
+        let event = event::make_strand_unhidden(&strand_id);
+        append_event_unlocked(journal, &event)?;
+        Ok(true)
     })?;
-    println!("unhidden {}", shorten(&strand_id));
+    if outcome {
+        println!("unhidden {}", shorten(&strand_id));
+    } else {
+        println!("unhidden {} (already visible, no-op)", shorten(&strand_id));
+    }
     Ok(())
 }
 
@@ -1251,6 +1311,7 @@ fn cmd_checkpoint(
     action: &str,
     tail: Option<usize>,
     format_json: bool,
+    include_hidden: bool,
 ) -> Result<(), CheckpointFailure> {
     if action.trim().is_empty() {
         return Err(CheckpointFailure {
@@ -1276,7 +1337,15 @@ fn cmd_checkpoint(
         resolved_strand: None,
         journal_appended: false,
     })?;
-    let strands = projection::project_strands(&events, true);
+    // Two projection views:
+    //   - `all_strands` includes hidden strands: used to resolve an explicit
+    //     --id lookup, because the user named the strand directly and we
+    //     should not silently refuse to checkpoint a hidden one.
+    //   - `visible_strands` honours the include-hidden flag: used to pick
+    //     the most-recent active strand, which is the only place a default
+    //     checkpoint would otherwise pick a hidden strand by accident.
+    let all_strands = projection::project_strands(&events, true);
+    let visible_strands = projection::project_strands(&events, include_hidden);
 
     let (strand, resolved_by) = if let Some(id) = requested_id {
         let full = find_strand(&events, id).ok_or_else(|| CheckpointFailure {
@@ -1286,7 +1355,7 @@ fn cmd_checkpoint(
             resolved_strand: None,
             journal_appended: false,
         })?;
-        let strand = strands
+        let strand = all_strands
             .iter()
             .find(|s| s.id == full)
             .ok_or_else(|| CheckpointFailure {
@@ -1298,7 +1367,7 @@ fn cmd_checkpoint(
             })?;
         (strand, "explicit --id")
     } else {
-        let strand = resolve_most_recent_strand(&strands).ok_or_else(|| CheckpointFailure {
+        let strand = resolve_most_recent_strand(&visible_strands).ok_or_else(|| CheckpointFailure {
             code: 1,
             message: "strand resolve/show failed: no strands found".to_string(),
             requested_strand: None,
@@ -1486,14 +1555,15 @@ fn cmd_list(include_hidden: bool, links: Option<&str>, backlinks: Option<&str>, 
     Ok(())
 }
 
-fn cmd_search(query: &str, format_json: bool) -> Result<(), String> {
+fn cmd_search(query: &str, format_json: bool, include_hidden: bool) -> Result<(), String> {
     let started = Instant::now();
     let path = ensure_journal()?;
     let (events, skipped) = read_events_lossy(&path);
     let q = query.to_lowercase();
-
-    // Use projection for strand_type and hidden (shared with cmd_list).
-    let strands = projection::project_strands(&events, true);
+    // Honour the include_hidden flag: when false (default), the strand_map
+    // is built from visible strands only, and the events loop below skips
+    // events belonging to strands not in the map.
+    let strands = projection::project_strands(&events, include_hidden);
     let strand_map: std::collections::HashMap<&str, &projection::ProjectedStrand> =
         strands.iter().map(|s| (s.id.as_str(), s)).collect();
 
@@ -1504,8 +1574,12 @@ fn cmd_search(query: &str, format_json: bool) -> Result<(), String> {
         if let Event::LogAppended { content, .. } = event {
             if content.to_lowercase().contains(&q) {
                 let strand_id = event.strand_id().to_string();
+                // Skip matches inside strands the projection filtered out
+                // (i.e. hidden strands when include_hidden is false).
+                if !strand_map.contains_key(strand_id.as_str()) {
+                    continue;
+                }
                 let projected = strand_map.get(strand_id.as_str());
-
                 if format_json {
                     matches.push(output::SearchMatch {
                         strand_id,
@@ -1652,7 +1726,7 @@ fn cmd_timeline(
     Ok(())
 }
 
-fn cmd_agent_context(format_json: Option<&str>) -> Result<(), String> {
+fn cmd_agent_context(format_json: Option<&str>, include_hidden: bool) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
@@ -1753,6 +1827,7 @@ fn cmd_context(
     since_offset: Option<usize>,
     format_json: Option<&str>,
     include_friction: bool,
+    include_hidden: bool,
 ) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
@@ -2069,9 +2144,9 @@ fn main() {
     };
 
     // Checkpoint has its own error handling (exit codes 1/2/3, JSON output)
-    if let Commands::Checkpoint { id, action, tail, format } = &cli.command {
+    if let Commands::Checkpoint { id, action, tail, format, include_hidden } = &cli.command {
         let fmt = format.as_deref() == Some("json");
-        match cmd_checkpoint(id.as_deref(), action, *tail, fmt) {
+        match cmd_checkpoint(id.as_deref(), action, *tail, fmt, *include_hidden) {
             Ok(()) => return,
             Err(failure) => {
                 if fmt {
@@ -2116,9 +2191,9 @@ fn main() {
             let fmt = format.as_deref() == Some("json");
             cmd_show(id.as_deref(), *last, *tail, fmt, *locked)
         },
-        Commands::Search { query, format } => {
+        Commands::Search { query, format, include_hidden } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_search(query, fmt)
+            cmd_search(query, fmt, *include_hidden)
         },
         Commands::Find { id } => cmd_find(id),
         Commands::Link { source, target, edge_type } => cmd_link(source, target, edge_type.as_deref()),
@@ -2154,10 +2229,10 @@ fn main() {
 
         Commands::Tree { id, format } => cmd_tree(id, format.as_deref()),
 
-        Commands::AgentContext { format } => cmd_agent_context(format.as_deref()),
+        Commands::AgentContext { format, include_hidden } => cmd_agent_context(format.as_deref(), *include_hidden),
 
-        Commands::Context { context_type, covers, since_offset, format, include_friction } => {
-            cmd_context(context_type.as_deref(), &covers, *since_offset, format.as_deref(), *include_friction)
+        Commands::Context { context_type, covers, since_offset, format, include_friction, include_hidden } => {
+            cmd_context(context_type.as_deref(), &covers, *since_offset, format.as_deref(), *include_friction, *include_hidden)
         },
 
         Commands::Checkpoint { .. } => unreachable!(),
@@ -2813,7 +2888,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id = create_strand("checkpoint target");
 
-        let result = cmd_checkpoint(Some(&id), "git commit checkpoint work", None, false);
+        let result = cmd_checkpoint(Some(&id), "git commit checkpoint work", None, false, false);
         assert!(result.is_ok());
 
         let path = ensure_journal().unwrap();
@@ -2839,7 +2914,7 @@ fn create_strand(content: &str) -> String {
         let _old = create_strand("old strand");
         let recent = create_strand("recent strand");
 
-        let result = cmd_checkpoint(None, "remove old build dirs", None, false);
+        let result = cmd_checkpoint(None, "remove old build dirs", None, false, false);
         assert!(result.is_ok());
 
         let path = ensure_journal().unwrap();
@@ -2863,7 +2938,7 @@ fn create_strand(content: &str) -> String {
         cmd_append(Some("step one"), Some(&id), false, false, None, None, None).unwrap();
         cmd_append(Some("step two"), Some(&id), false, false, None, None, None).unwrap();
 
-        let result = cmd_checkpoint(Some(&id), "commit after three entries", Some(1), false);
+        let result = cmd_checkpoint(Some(&id), "commit after three entries", Some(1), false, false);
         assert!(result.is_ok());
 
         let path = ensure_journal().unwrap();
@@ -2886,7 +2961,7 @@ fn create_strand(content: &str) -> String {
         create_strand("checkpoint target");
         let before = read_events_lossy(&ensure_journal().unwrap()).0.len();
 
-        let result = cmd_checkpoint(Some("doesnotexist"), "bad checkpoint", None, false);
+        let result = cmd_checkpoint(Some("doesnotexist"), "bad checkpoint", None, false, false);
         assert!(result.is_err());
         let failure = result.unwrap_err();
         assert_eq!(failure.code, 1);
@@ -2902,7 +2977,7 @@ fn create_strand(content: &str) -> String {
         let id = create_strand("checkpoint target");
         let before = read_events_lossy(&ensure_journal().unwrap()).0.len();
 
-        let result = cmd_checkpoint(Some(&id), "   ", None, false);
+        let result = cmd_checkpoint(Some(&id), "   ", None, false, false);
         assert!(result.is_err());
         let failure = result.unwrap_err();
         assert_eq!(failure.code, 3);
@@ -2977,6 +3052,230 @@ fn create_strand(content: &str) -> String {
         stale.retain(|s| s.last_offset() <= strand_a.last_offset());
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].id, id_a);
+    }
+
+    // ── hidden-strand default visibility ──
+
+    fn count_hide_events(events: &[(usize, Event)], strand_id: &str, kind: &str) -> i32 {
+        let mut n = 0;
+        for (_, e) in events {
+            match (e, kind) {
+                (Event::StrandHidden { id, .. }, "hidden") if id == strand_id => n += 1,
+                (Event::StrandUnhidden { id, .. }, "unhidden") if id == strand_id => n += 1,
+                _ => {}
+            }
+        }
+        n
+    }
+
+    fn total_events() -> usize {
+        let path = ensure_journal().unwrap();
+        read_events_lossy(&path).0.len()
+    }
+
+    /// list/context/search default to excluding hidden strands.
+    #[test]
+    fn list_default_excludes_hidden() {
+        let _env = setup();
+        let id_a = create_strand("visible strand");
+        let id_b = create_strand("will be hidden");
+        cmd_hide(&id_b, Some("noise")).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let visible = projection::project_strands(&events, false);
+        let visible_ids: Vec<&str> = visible.iter().map(|s| s.id.as_str()).collect();
+        assert!(visible_ids.contains(&id_a.as_str()), "visible strand must appear in default list");
+        assert!(!visible_ids.contains(&id_b.as_str()), "hidden strand must NOT appear in default list");
+    }
+
+    /// list --all (or the include_hidden flag in cmd_list) returns hidden strands too.
+    #[test]
+    fn list_with_include_hidden_returns_all() {
+        let _env = setup();
+        let id_a = create_strand("visible strand");
+        let id_b = create_strand("will be hidden");
+        cmd_hide(&id_b, Some("noise")).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let all = projection::project_strands(&events, true);
+        let all_ids: Vec<&str> = all.iter().map(|s| s.id.as_str()).collect();
+        assert!(all_ids.contains(&id_a.as_str()));
+        assert!(all_ids.contains(&id_b.as_str()),
+            "hidden strand must appear when include_hidden=true");
+    }
+
+    /// cmd_search default does not match content inside a hidden strand.
+    #[test]
+    fn search_default_excludes_hidden() {
+        let _env = setup();
+        let id = create_strand("anchor");
+        cmd_append(Some("needle-haystack"), Some(&id), false, false, None, None, None).unwrap();
+        cmd_hide(&id, Some("noise")).unwrap();
+        // Default: include_hidden=false → search skips the hidden strand.
+        let result = cmd_search("needle", false, false);
+        assert!(result.is_ok());
+    }
+
+    /// cmd_search --include-hidden matches inside hidden strands, and the
+    /// projection's `hidden` field is true.
+    #[test]
+    fn search_include_hidden_projection_reports_hidden() {
+        let _env = setup();
+        let id = create_strand("anchor");
+        cmd_append(Some("needle-haystack"), Some(&id), false, false, None, None, None).unwrap();
+        cmd_hide(&id, Some("noise")).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let all = projection::project_strands(&events, true);
+        let s = all.iter().find(|s| s.id == id).expect("strand missing");
+        assert!(s.hidden, "hidden flag must be true after cmd_hide");
+        let visible = projection::project_strands(&events, false);
+        assert!(!visible.iter().any(|s| s.id == id), "hidden strand must not appear in default view");
+        assert!(cmd_search("needle", false, true).is_ok());
+    }
+
+    /// cmd_agent_context default does not surface hidden prompt-strands.
+    #[test]
+    fn agent_context_default_excludes_hidden_prompt_strands() {
+        let _env = setup();
+        let (c, a) = event::make_strand_created("[covers] test/", Some("prompt-strand"));
+        let id = c.strand_id().to_string();
+        with_journal_write_lock(|j| {
+            append_event_unlocked(j, &c)?;
+            append_event_unlocked(j, &a)
+        }).unwrap();
+        cmd_hide(&id, Some("noise")).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let visible = projection::project_strands(&events, false);
+        assert!(!visible.iter().any(|s| s.id == id), "hidden prompt-strand must not be visible by default");
+        let all = projection::project_strands(&events, true);
+        assert!(all.iter().any(|s| s.id == id), "include_hidden must surface hidden prompt-strand");
+    }
+
+    /// cmd_context default excludes hidden strands; --include-hidden surfaces them.
+    #[test]
+    fn context_default_excludes_hidden() {
+        let _env = setup();
+        let (c, a) = event::make_strand_created("[covers] test-area/", Some("prompt-strand"));
+        let id = c.strand_id().to_string();
+        with_journal_write_lock(|j| {
+            append_event_unlocked(j, &c)?;
+            append_event_unlocked(j, &a)
+        }).unwrap();
+        cmd_hide(&id, Some("noise")).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let visible = projection::project_strands(&events, false);
+        assert!(!visible.iter().any(|s| s.id == id));
+        let all = projection::project_strands(&events, true);
+        assert!(all.iter().any(|s| s.id == id));
+    }
+
+    /// Repeated `cmd_hide` is idempotent: only one StrandHidden event is written.
+    #[test]
+    fn hide_is_idempotent() {
+        let _env = setup();
+        let id = create_strand("hide me");
+        let before = total_events();
+        cmd_hide(&id, None).unwrap();
+        let mid = total_events();
+        cmd_hide(&id, None).unwrap();
+        cmd_hide(&id, Some("still hidden")).unwrap();
+        let after = total_events();
+        assert_eq!(mid - before, 1, "first hide must write exactly 1 event");
+        assert_eq!(after - mid, 0, "repeated hide must be a no-op (0 events appended)");
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        assert_eq!(count_hide_events(&events, &id, "hidden"), 1);
+        assert_eq!(count_hide_events(&events, &id, "unhidden"), 0);
+    }
+
+    /// One `cmd_unhide` after a `cmd_hide` restores visibility — no negative
+    /// hide_count, no orphan unhidden events.
+    #[test]
+    fn single_unhide_restores_visibility() {
+        let _env = setup();
+        let id = create_strand("hide/unhide me");
+        cmd_hide(&id, None).unwrap();
+        cmd_unhide(&id).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let s = projection::project_strands(&events, true)
+            .into_iter()
+            .find(|s| s.id == id)
+            .expect("strand missing from projection");
+        assert!(!s.hidden, "strand must be visible after one hide + one unhide");
+        assert_eq!(count_hide_events(&events, &id, "hidden"), 1);
+        assert_eq!(count_hide_events(&events, &id, "unhidden"), 1);
+    }
+
+    /// Repeated `cmd_unhide` on an already-visible strand is a no-op.
+    #[test]
+    fn unhide_is_idempotent() {
+        let _env = setup();
+        let id = create_strand("plain strand");
+        let before = total_events();
+        cmd_unhide(&id).unwrap();
+        cmd_unhide(&id).unwrap();
+        let after = total_events();
+        assert_eq!(after - before, 0, "unhide on visible strand must be a no-op");
+    }
+
+    /// Without --id, cmd_checkpoint picks the most-recent VISIBLE strand by
+    /// default. When the most-recent strand is hidden, the visible one is chosen.
+    #[test]
+    fn checkpoint_without_id_skips_hidden_when_explicit_id_missing() {
+        let _env = setup();
+        let old = create_strand("old visible strand");
+        let recent = create_strand("recent will be hidden");
+        cmd_hide(&recent, Some("noise")).unwrap();
+        let result = cmd_checkpoint(None, "fall back to visible", None, false, false);
+        assert!(result.is_ok());
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let found = events.iter().any(|(_, e)| {
+            if let Event::LogAppended { id, content, .. } = e {
+                id == &old
+                    && content.contains("resolved_by=\"most_recent_active_strand\"")
+            } else {
+                false
+            }
+        });
+        assert!(found, "checkpoint must fall back to the visible strand when most-recent is hidden");
+    }
+
+    /// With --include-hidden / --all, cmd_checkpoint may pick a hidden strand.
+    #[test]
+    fn checkpoint_with_include_hidden_can_pick_hidden_strand() {
+        let _env = setup();
+        let _old = create_strand("old visible strand");
+        let recent = create_strand("recent will be hidden");
+        cmd_hide(&recent, Some("noise")).unwrap();
+        let result = cmd_checkpoint(None, "allow hidden", None, false, true);
+        assert!(result.is_ok());
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let found = events.iter().any(|(_, e)| {
+            if let Event::LogAppended { id, content, .. } = e {
+                id == &recent
+                    && content.contains("resolved_by=\"most_recent_active_strand\"")
+            } else {
+                false
+            }
+        });
+        assert!(found, "with include_hidden=true, checkpoint must pick the most-recent hidden strand");
+    }
+
+    /// With an explicit --id that happens to be a hidden strand, the
+    /// checkpoint must still find it (the user named it directly).
+    #[test]
+    fn checkpoint_explicit_id_finds_hidden_strand() {
+        let _env = setup();
+        let id = create_strand("explicit hidden");
+        cmd_hide(&id, Some("noise")).unwrap();
+        let result = cmd_checkpoint(Some(&id), "explicit id on hidden", None, false, false);
+        assert!(result.is_ok(), "explicit --id must resolve a hidden strand");
     }
 }
 

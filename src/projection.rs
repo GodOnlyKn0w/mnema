@@ -101,7 +101,11 @@ impl ProjectedStrand {
 /// Project raw event stream into a Vec<ProjectedStrand>.
 /// Each strand is aggregated from all its events (created, log entries, edges, hide toggles).
 /// Hidden state is derived from StrandHidden/StrandUnhidden balance, not a stored flag.
-pub fn project_strands(events: &[(usize, Event)], _include_hidden: bool) -> Vec<ProjectedStrand> {
+///
+/// When `include_hidden` is false, strands with `hidden == true` are filtered out of
+/// the returned vector. Callers that need to inspect a known hidden strand explicitly
+/// (e.g. `cmd_show <id>`) should call `project_strands(..., true)` and look up by id.
+pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<ProjectedStrand> {
     use std::collections::BTreeMap;
     let mut by_id: BTreeMap<String, Vec<(usize, &Event)>> = BTreeMap::new();
     for (offset, event) in events {
@@ -171,6 +175,9 @@ pub fn project_strands(events: &[(usize, Event)], _include_hidden: bool) -> Vec<
             }
         });
         let (state, state_marker, state_offset) = compute_state(&logs);
+        if !include_hidden && hidden {
+            continue;
+        }
         nodes.push(ProjectedStrand {
             id: node_events[0].1.strand_id().to_string(),
             log: logs,
