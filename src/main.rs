@@ -153,7 +153,12 @@ Examples:
   tasktree append --file note.md --id 0000019dd34b
 
   echo \"new strand title\" | tasktree append --stdin --new
-  tasktree append --file note.md --new")]
+  tasktree append --file note.md --id 0000019dd34b --provenance '{\"producer\":\"pi\",\"model\":\"gpt-5\"}'
+
+Provenance:
+  --provenance <JSON>  Optional structured metadata. Must be a JSON
+                       object. Stored on the LogAppended event, not in
+                       the entry text. Older journals ignore it.")]
     Append {
         /// Log content
         content: Option<String>,
@@ -175,6 +180,10 @@ Examples:
         /// Append to a specific strand
         #[arg(long = "id", value_name = "ID", verbatim_doc_comment)]
         explicit_id: Option<String>,
+        /// Optional provenance JSON object. Stored as metadata on the
+        /// LogAppended event; the entry text is unchanged.
+        #[arg(long = "provenance", value_name = "JSON")]
+        provenance: Option<String>,
     },
     /// Record context before an irreversible or state-closing action
     #[command(after_help = "\
@@ -222,6 +231,10 @@ Rules:
         /// or --all falls back to hidden ones if no visible strand exists)
         #[arg(long, alias = "all")]
         include_hidden: bool,
+        /// Optional provenance JSON object. Same shape as
+        /// `append --provenance`.
+        #[arg(long = "provenance", value_name = "JSON")]
+        provenance: Option<String>,
     },
     /// List all strands (reverse chronological, most recent last)
     List {
@@ -1057,6 +1070,28 @@ fn cmd_unhide(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ── Provenance helper (pi-strand V1 contract) ─────────────────────
+
+/// Parse a `--provenance` argument. Must be a JSON object when present.
+/// Returns `None` for `None` input; `Err` for malformed JSON or non-object shapes.
+fn parse_provenance_arg(raw: Option<&str>) -> Result<Option<serde_json::Value>, String> {
+    match raw {
+        None => Ok(None),
+        Some(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Err("--provenance must be a non-empty JSON object".to_string());
+            }
+            let v: serde_json::Value = serde_json::from_str(trimmed)
+                .map_err(|e| format!("--provenance is not valid JSON: {}", e))?;
+            if !v.is_object() {
+                return Err("--provenance must be a JSON object".to_string());
+            }
+            Ok(Some(v))
+        }
+    }
+}
+
 // ── Subject binding (pi-strand V1 contract) ─────────────────────
 
 /// Parse a binding input from a single JSON object on stdin.
@@ -1332,6 +1367,7 @@ fn cmd_append(
     file: Option<&str>,
     explicit_id: Option<&str>,
     format: Option<&str>,
+    provenance_raw: Option<&str>,
 ) -> Result<(), String> {
     // ---- Content Source Resolution ----
     if (stdin || file.is_some())
@@ -1460,7 +1496,8 @@ fn cmd_append(
         recent.id.clone()
     };
 
-    let event = event::make_log_appended(&full_id, &stored, None);
+    let provenance = parse_provenance_arg(provenance_raw)?;
+    let event = event::make_log_appended(&full_id, &stored, provenance);
     with_journal_write_lock(|journal| {
         append_event_unlocked(journal, &event)
     })?;
@@ -1518,6 +1555,7 @@ fn cmd_checkpoint(
     tail: Option<usize>,
     format_json: bool,
     include_hidden: bool,
+    provenance_raw: Option<&str>,
 ) -> Result<(), CheckpointFailure> {
     if action.trim().is_empty() {
         return Err(CheckpointFailure {
@@ -1589,7 +1627,14 @@ fn cmd_checkpoint(
         "[checkpoint] ok resolved_by=\"{}\" observed_entries_before_append={} action=\"{}\"",
         resolved_by, observed_entries_before_append, escaped_action
     );
-    let event = event::make_log_appended(&strand.id, &content, None);
+    let provenance = parse_provenance_arg(provenance_raw).map_err(|message| CheckpointFailure {
+        code: 3,
+        message,
+        requested_strand: requested_id.map(str::to_string),
+        resolved_strand: Some(strand.id.clone()),
+        journal_appended: false,
+    })?;
+    let event = event::make_log_appended(&strand.id, &content, provenance);
     let append_id = match &event {
         Event::LogAppended { append_id, .. } => append_id.clone(),
         _ => None,
@@ -2353,9 +2398,9 @@ fn main() {
     };
 
     // Checkpoint has its own error handling (exit codes 1/2/3, JSON output)
-    if let Commands::Checkpoint { id, action, tail, format, include_hidden } = &cli.command {
+    if let Commands::Checkpoint { id, action, tail, format, include_hidden, provenance } = &cli.command {
         let fmt = format.as_deref() == Some("json");
-        match cmd_checkpoint(id.as_deref(), action, *tail, fmt, *include_hidden) {
+        match cmd_checkpoint(id.as_deref(), action, *tail, fmt, *include_hidden, provenance.as_deref()) {
             Ok(()) => return,
             Err(failure) => {
                 if fmt {
@@ -2383,6 +2428,7 @@ fn main() {
             file,
             explicit_id,
             format,
+            provenance,
         } => cmd_append(
             content.as_deref(),
             id.as_deref(),
@@ -2391,6 +2437,7 @@ fn main() {
             file.as_deref(),
             explicit_id.as_deref(),
             format.as_deref(),
+            provenance.as_deref(),
         ),
         Commands::List { all, links, backlinks, state, list_type, stale, stale_offset, since_offset, format } => {
             let fmt = format.as_deref() == Some("json");
@@ -2723,7 +2770,7 @@ fn create_strand(content: &str) -> String {
         let _id1 = create_strand("first strand");
         let id2 = create_strand("second strand");
         // Positional content, no ID → most recent active strand
-        let result = cmd_append(Some("hello world"), None, false, false, None, None, None);
+        let result = cmd_append(Some("hello world"), None, false, false, None, None, None, None);
         assert!(result.is_ok());
         // Verify content appears in most recent strand (id2)
         let path = ensure_journal().unwrap();
@@ -2742,7 +2789,7 @@ fn create_strand(content: &str) -> String {
     fn positional_with_legacy_id() {
         let _env = setup();
         let id1 = create_strand("first strand");
-        let result = cmd_append(Some("legacy id test"), Some(&id1), false, false, None, None, None);
+        let result = cmd_append(Some("legacy id test"), Some(&id1), false, false, None, None, None, None);
         assert!(result.is_ok());
     }
 
@@ -2756,8 +2803,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             None,
-            Some(&id1), None,
-        );
+            Some(&id1), None, None);
         assert!(result.is_ok());
     }
 
@@ -2765,7 +2811,7 @@ fn create_strand(content: &str) -> String {
     fn positional_empty_rejected() {
         let _env = setup();
         create_strand("first strand");
-        let result = cmd_append(Some("   "), None, false, false, None, None, None);
+        let result = cmd_append(Some("   "), None, false, false, None, None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("empty"));
     }
@@ -2780,8 +2826,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             None,
-            None, None,
-        );
+            None, None, None);
         assert!(result.is_ok());
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
@@ -2823,8 +2868,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             Some(file_path.to_str().unwrap()),
-            Some(&id), None,
-        );
+            Some(&id), None, None);
         assert!(result.is_ok());
     }
 
@@ -2860,8 +2904,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             Some(file_path.to_str().unwrap()),
-            None, None,
-        );
+            None, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("empty"));
@@ -2874,7 +2917,7 @@ fn create_strand(content: &str) -> String {
     fn content_source_none() {
         let _env = setup();
         create_strand("first strand");
-        let result = cmd_append(None, None, false, false, None, None, None);
+        let result = cmd_append(None, None, false, false, None, None, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("content source"));
@@ -2884,7 +2927,7 @@ fn create_strand(content: &str) -> String {
     fn content_source_conflict_positional_and_stdin() {
         let _env = setup();
         create_strand("first strand");
-        let result = cmd_append(Some("content"), None, false, true, None, None, None);
+        let result = cmd_append(Some("content"), None, false, true, None, None, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("only one content source"));
@@ -2903,8 +2946,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             Some(file_path.to_str().unwrap()),
-            None, None,
-        );
+            None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one content source"));
     }
@@ -2913,7 +2955,7 @@ fn create_strand(content: &str) -> String {
     fn stdin_positional_strand_id_warns_to_use_explicit_id() {
         let _env = setup();
         create_strand("first strand");
-        let result = cmd_append(Some("0000019dd34b"), None, false, true, None, None, None);
+        let result = cmd_append(Some("0000019dd34b"), None, false, true, None, None, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.starts_with("warn:"));
@@ -2933,8 +2975,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             Some(file_path.to_str().unwrap()),
-            None, None,
-        );
+            None, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.starts_with("warn:"));
@@ -2954,8 +2995,7 @@ fn create_strand(content: &str) -> String {
             false,
             true,
             Some(file_path.to_str().unwrap()),
-            None, None,
-        );
+            None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one content source"));
     }
@@ -2973,8 +3013,7 @@ fn create_strand(content: &str) -> String {
             false,
             true,
             Some(file_path.to_str().unwrap()),
-            None, None,
-        );
+            None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one content source"));
     }
@@ -2991,8 +3030,7 @@ fn create_strand(content: &str) -> String {
             true,
             false,
             None,
-            Some("0000019dd34b"), None,
-        );
+            Some("0000019dd34b"), None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one target"));
     }
@@ -3001,7 +3039,7 @@ fn create_strand(content: &str) -> String {
     fn target_conflict_new_and_legacy_id() {
         let _env = setup();
         let id = create_strand("first strand");
-        let result = cmd_append(Some("content"), Some(&id), true, false, None, None, None);
+        let result = cmd_append(Some("content"), Some(&id), true, false, None, None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one target"));
     }
@@ -3010,7 +3048,7 @@ fn create_strand(content: &str) -> String {
     fn reversed_positional_append_gets_helpful_error() {
         let _env = setup();
         let id = create_strand("first strand");
-        let result = cmd_append(Some(&id), Some("[observed] finding"), false, false, None, None, None);
+        let result = cmd_append(Some(&id), Some("[observed] finding"), false, false, None, None, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("arguments look reversed"));
@@ -3021,7 +3059,7 @@ fn create_strand(content: &str) -> String {
     fn target_conflict_new_legacy_and_explicit() {
         let _env = setup();
         let id = create_strand("first strand");
-        let result = cmd_append(Some("content"), Some(&id), true, false, None, Some(&id), None);
+        let result = cmd_append(Some("content"), Some(&id), true, false, None, Some(&id), None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one target"));
     }
@@ -3031,7 +3069,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id = create_strand("first strand");
         // --id <id> "content" <id> — both explicit and legacy ID provided
-        let result = cmd_append(Some("content"), Some(&id), false, false, None, Some(&id), None);
+        let result = cmd_append(Some("content"), Some(&id), false, false, None, Some(&id), None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only one target"));
     }
@@ -3050,8 +3088,7 @@ fn create_strand(content: &str) -> String {
             false,
             false,
             Some(file_path.to_str().unwrap()),
-            None, None,
-        );
+            None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("positional strand id"));
     }
@@ -3061,7 +3098,7 @@ fn create_strand(content: &str) -> String {
     #[test]
     fn new_with_positional_content() {
         let _env = setup();
-        let result = cmd_append(Some("brand new strand"), None, true, false, None, None, None);
+        let result = cmd_append(Some("brand new strand"), None, true, false, None, None, None, None);
         assert!(result.is_ok());
     }
 
@@ -3077,8 +3114,7 @@ fn create_strand(content: &str) -> String {
             true,
             false,
             Some(file_path.to_str().unwrap()),
-            None, None,
-        );
+            None, None, None);
         assert!(result.is_ok());
     }
 
@@ -3116,7 +3152,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id = create_strand("checkpoint target");
 
-        let result = cmd_checkpoint(Some(&id), "git commit checkpoint work", None, false, false);
+        let result = cmd_checkpoint(Some(&id), "git commit checkpoint work", None, false, false, None);
         assert!(result.is_ok());
 
         let path = ensure_journal().unwrap();
@@ -3142,7 +3178,7 @@ fn create_strand(content: &str) -> String {
         let _old = create_strand("old strand");
         let recent = create_strand("recent strand");
 
-        let result = cmd_checkpoint(None, "remove old build dirs", None, false, false);
+        let result = cmd_checkpoint(None, "remove old build dirs", None, false, false, None);
         assert!(result.is_ok());
 
         let path = ensure_journal().unwrap();
@@ -3163,10 +3199,10 @@ fn create_strand(content: &str) -> String {
     fn checkpoint_tail_does_not_change_observed_entry_count() {
         let _env = setup();
         let id = create_strand("checkpoint target");
-        cmd_append(Some("step one"), Some(&id), false, false, None, None, None).unwrap();
-        cmd_append(Some("step two"), Some(&id), false, false, None, None, None).unwrap();
+        cmd_append(Some("step one"), Some(&id), false, false, None, None, None, None).unwrap();
+        cmd_append(Some("step two"), Some(&id), false, false, None, None, None, None).unwrap();
 
-        let result = cmd_checkpoint(Some(&id), "commit after three entries", Some(1), false, false);
+        let result = cmd_checkpoint(Some(&id), "commit after three entries", Some(1), false, false, None);
         assert!(result.is_ok());
 
         let path = ensure_journal().unwrap();
@@ -3189,7 +3225,7 @@ fn create_strand(content: &str) -> String {
         create_strand("checkpoint target");
         let before = read_events_lossy(&ensure_journal().unwrap()).0.len();
 
-        let result = cmd_checkpoint(Some("doesnotexist"), "bad checkpoint", None, false, false);
+        let result = cmd_checkpoint(Some("doesnotexist"), "bad checkpoint", None, false, false, None);
         assert!(result.is_err());
         let failure = result.unwrap_err();
         assert_eq!(failure.code, 1);
@@ -3205,7 +3241,7 @@ fn create_strand(content: &str) -> String {
         let id = create_strand("checkpoint target");
         let before = read_events_lossy(&ensure_journal().unwrap()).0.len();
 
-        let result = cmd_checkpoint(Some(&id), "   ", None, false, false);
+        let result = cmd_checkpoint(Some(&id), "   ", None, false, false, None);
         assert!(result.is_err());
         let failure = result.unwrap_err();
         assert_eq!(failure.code, 3);
@@ -3363,7 +3399,7 @@ fn create_strand(content: &str) -> String {
     fn search_default_excludes_hidden() {
         let _env = setup();
         let id = create_strand("anchor");
-        cmd_append(Some("needle-haystack"), Some(&id), false, false, None, None, None).unwrap();
+        cmd_append(Some("needle-haystack"), Some(&id), false, false, None, None, None, None).unwrap();
         cmd_hide(&id, Some("noise")).unwrap();
         // Default: include_hidden=false → search skips the hidden strand.
         let result = cmd_search("needle", false, false);
@@ -3376,7 +3412,7 @@ fn create_strand(content: &str) -> String {
     fn search_include_hidden_projection_reports_hidden() {
         let _env = setup();
         let id = create_strand("anchor");
-        cmd_append(Some("needle-haystack"), Some(&id), false, false, None, None, None).unwrap();
+        cmd_append(Some("needle-haystack"), Some(&id), false, false, None, None, None, None).unwrap();
         cmd_hide(&id, Some("noise")).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
@@ -3484,7 +3520,7 @@ fn create_strand(content: &str) -> String {
         let old = create_strand("old visible strand");
         let recent = create_strand("recent will be hidden");
         cmd_hide(&recent, Some("noise")).unwrap();
-        let result = cmd_checkpoint(None, "fall back to visible", None, false, false);
+        let result = cmd_checkpoint(None, "fall back to visible", None, false, false, None);
         assert!(result.is_ok());
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
@@ -3506,7 +3542,7 @@ fn create_strand(content: &str) -> String {
         let _old = create_strand("old visible strand");
         let recent = create_strand("recent will be hidden");
         cmd_hide(&recent, Some("noise")).unwrap();
-        let result = cmd_checkpoint(None, "allow hidden", None, false, true);
+        let result = cmd_checkpoint(None, "allow hidden", None, false, true, None);
         assert!(result.is_ok());
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
@@ -3528,7 +3564,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id = create_strand("explicit hidden");
         cmd_hide(&id, Some("noise")).unwrap();
-        let result = cmd_checkpoint(Some(&id), "explicit id on hidden", None, false, false);
+        let result = cmd_checkpoint(Some(&id), "explicit id on hidden", None, false, false, None);
         assert!(result.is_ok(), "explicit --id must resolve a hidden strand");
     }
 
