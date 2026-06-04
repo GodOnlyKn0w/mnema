@@ -82,14 +82,12 @@ fn version_info() -> &'static str {
 Commands:
   add         Create a new strand
   append      Append an entry to a strand
+  bind        Record a subject binding
   checkpoint  Record context before an irreversible or state-closing action
-
+  current     Project the latest effective subject binding
   doctor      Diagnose journal integrity
-
   explain     Explain a diagnostic code
-
   export      Export journal as standalone audit artifact
-
   list        List strands
   show        Show a strand
   search      Search entries
@@ -310,6 +308,56 @@ Rules:
     Unhide {
         /// Strand ID (prefix match)
         id: String,
+    },
+
+    /// Record a subject binding. Append-only. Newer bindings supersede
+    /// older ones for the same (subject-type, subject-id) pair.
+    #[command(after_help = "\
+Examples:
+  tasktree bind --subject-type pi-session --subject-id abc123 --id 0000019dd34b
+  tasktree bind --subject-type ci-run --subject-id run-42 --id 0000019dd34b --format json
+  echo '{\"subject_type\":\"pi-session\",\"subject_id\":\"abc\",\"strand_id\":\"0000019dd34b\"}' | tasktree bind --stdin
+
+Rules:
+  --subject-type and --subject-id are required, non-empty strings.
+  --id is required and must be a strand id (prefix match).
+  --stdin reads the same fields as a JSON object from standard input.")]
+    Bind {
+        /// Subject type discriminator (generic string, e.g. pi-session, ci-run).
+        #[arg(long = "subject-type", value_name = "TYPE")]
+        subject_type: Option<String>,
+        /// Subject id within the chosen type.
+        #[arg(long = "subject-id", value_name = "ID")]
+        subject_id: Option<String>,
+        /// Target strand id (prefix match). Must already exist in the journal.
+        #[arg(long = "id", value_name = "STRAND_ID")]
+        id: Option<String>,
+        /// Read binding from a single JSON object on stdin.
+        /// Schema: { "subject_type": "...", "subject_id": "...", "strand_id": "..." }
+        #[arg(long)]
+        stdin: bool,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+    },
+    /// Project the latest effective subject binding.
+    #[command(after_help = "\
+Examples:
+  tasktree current --subject-type pi-session --subject-id abc123
+  tasktree current --subject-type pi-session --subject-id abc123 --format json
+
+Rules:
+  --subject-type and --subject-id are required, non-empty strings.
+  Returns the strand_id of the latest SubjectBound event for the pair.
+  No binding -> exit 1 with stderr message, no stdout payload.")]
+    Current {
+        #[arg(long = "subject-type", value_name = "TYPE")]
+        subject_type: Option<String>,
+        #[arg(long = "subject-id", value_name = "ID")]
+        subject_id: Option<String>,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
     },
 
     /// Explain a diagnostic code (E/W codes from lifecycle, health, arch-boundary)
@@ -970,7 +1018,7 @@ fn cmd_hide(id: &str, reason: Option<&str>) -> Result<(), String> {
         }
         let hide_event = event::make_strand_hidden(&strand_id);
         if let Some(r) = reason {
-            let log_event = event::make_log_appended(&strand_id, &format!("[hidden] {}", r));
+            let log_event = event::make_log_appended(&strand_id, &format!("[hidden] {}", r), None);
             append_events_unlocked(journal, &[hide_event, log_event])?;
         } else {
             append_event_unlocked(journal, &hide_event)?;
@@ -1009,6 +1057,164 @@ fn cmd_unhide(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ── Subject binding (pi-strand V1 contract) ─────────────────────
+
+/// Parse a binding input from a single JSON object on stdin.
+/// Schema: { "subject_type": "...", "subject_id": "...", "strand_id": "..." }
+fn read_stdin_binding() -> Result<(String, String, String), String> {
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .map_err(|e| format!("cannot read stdin: {}", e))?;
+    let trimmed = buf.trim();
+    if trimmed.is_empty() {
+        return Err("stdin is empty".to_string());
+    }
+    let v: serde_json::Value = serde_json::from_str(trimmed)
+        .map_err(|e| format!("stdin is not valid JSON: {}", e))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "stdin JSON must be an object".to_string())?;
+    let subject_type = obj
+        .get("subject_type")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "stdin JSON missing string field 'subject_type'".to_string())?
+        .to_string();
+    let subject_id = obj
+        .get("subject_id")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "stdin JSON missing string field 'subject_id'".to_string())?
+        .to_string();
+    let strand_id = obj
+        .get("strand_id")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "stdin JSON missing string field 'strand_id'".to_string())?
+        .to_string();
+    if subject_type.is_empty() || subject_id.is_empty() || strand_id.is_empty() {
+        return Err("stdin JSON has empty subject_type/subject_id/strand_id".to_string());
+    }
+    Ok((subject_type, subject_id, strand_id))
+}
+
+/// Record a subject binding. Append-only. Resolves `--id` against the
+/// existing journal so the caller can use prefix matches; never creates
+/// a strand. Returns the binding's own event id.
+fn cmd_bind(
+    subject_type: Option<&str>,
+    subject_id: Option<&str>,
+    explicit_id: Option<&str>,
+    stdin: bool,
+    format_json: bool,
+) -> Result<(), String> {
+    let (st, sid, raw_strand) = if stdin {
+        read_stdin_binding()?
+    } else {
+        let st = subject_type
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "--subject-type is required and non-empty".to_string())?;
+        let sid = subject_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "--subject-id is required and non-empty".to_string())?;
+        let sid_str = explicit_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "--id is required and non-empty".to_string())?;
+        (st.to_string(), sid.to_string(), sid_str.to_string())
+    };
+
+    // Resolve --id to a full strand id. The strand must already exist
+    // in the journal; bind never auto-creates a strand.
+    let path = ensure_journal()?;
+    let (events, _) = read_events_lossy(&path);
+    let full_strand = find_strand(&events, &raw_strand)
+        .ok_or_else(|| format!("strand {} not found", raw_strand))?;
+
+    let event = event::make_subject_bound(&st, &sid, &full_strand);
+    let binding_id = match &event {
+        Event::SubjectBound { id, .. } => id.clone(),
+        _ => unreachable!(),
+    };
+    with_journal_write_lock(|journal| {
+        append_event_unlocked(journal, &event)
+    })?;
+
+    if format_json {
+        println!(
+            "{}",
+            json!({
+                "binding_id": binding_id,
+                "subject_type": st,
+                "subject_id": sid,
+                "strand_id": full_strand,
+            })
+        );
+    } else {
+        println!("{}", binding_id);
+    }
+    Ok(())
+}
+
+/// Project the latest effective binding for `(subject_type, subject_id)`.
+/// Walks the journal once, keeps the most-recent match. No binding →
+/// exit 1 with stderr message; stdout stays empty so callers can branch
+/// on the absence of a payload.
+fn cmd_current(
+    subject_type: Option<&str>,
+    subject_id: Option<&str>,
+    format_json: bool,
+) -> Result<(), String> {
+    let st = subject_type
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "--subject-type is required and non-empty".to_string())?;
+    let sid = subject_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "--subject-id is required and non-empty".to_string())?;
+
+    let path = ensure_journal()?;
+    let (events, _) = read_events_lossy(&path);
+    let mut latest: Option<(String, String, String)> = None; // (binding_id, ts, strand_id)
+    for (_offset, ev) in &events {
+        if let Event::SubjectBound { id, ts, subject_type: t, subject_id: i, strand_id: s } = ev {
+            if t == st && i == sid {
+                match &latest {
+                    Some((_, prev_ts, _)) if ts.as_str() <= prev_ts.as_str() => {}
+                    _ => latest = Some((id.clone(), ts.clone(), s.clone())),
+                }
+            }
+        }
+    }
+
+    let (binding_id, ts, strand_id) = match latest {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "no binding for subject_type={} subject_id={}",
+                st, sid
+            );
+            return Err("no current binding".to_string());
+        }
+    };
+
+    if format_json {
+        println!(
+            "{}",
+            json!({
+                "binding_id": binding_id,
+                "subject_type": st,
+                "subject_id": sid,
+                "strand_id": strand_id,
+                "ts": ts,
+            })
+        );
+    } else {
+        println!("{}", strand_id);
+    }
+    Ok(())
+}
 
 fn cmd_export(out: &str) -> Result<(), String> {
     let journal_path = resolve_journal_dir()?.join("journal.jsonl");
@@ -1254,7 +1460,7 @@ fn cmd_append(
         recent.id.clone()
     };
 
-    let event = event::make_log_appended(&full_id, &stored);
+    let event = event::make_log_appended(&full_id, &stored, None);
     with_journal_write_lock(|journal| {
         append_event_unlocked(journal, &event)
     })?;
@@ -1383,7 +1589,7 @@ fn cmd_checkpoint(
         "[checkpoint] ok resolved_by=\"{}\" observed_entries_before_append={} action=\"{}\"",
         resolved_by, observed_entries_before_append, escaped_action
     );
-    let event = event::make_log_appended(&strand.id, &content);
+    let event = event::make_log_appended(&strand.id, &content, None);
     let append_id = match &event {
         Event::LogAppended { append_id, .. } => append_id.clone(),
         _ => None,
@@ -1717,6 +1923,9 @@ fn cmd_timeline(
                 TimelineEventKind::StrandUnhidden { .. } => "unhidden".to_string(),
                 TimelineEventKind::CheckpointCreated { action, .. } => {
                     format!("checkpoint: {}", action)
+                }
+                TimelineEventKind::SubjectBound { subject_type, subject_id, strand_id } => {
+                    format!("bind: {}:{} -> {}", subject_type, subject_id, shorten(strand_id))
                 }
             };
             let skew = if e.ts_skew { " ⚠" } else { "" };
@@ -2235,6 +2444,21 @@ fn main() {
             cmd_context(context_type.as_deref(), &covers, *since_offset, format.as_deref(), *include_friction, *include_hidden)
         },
 
+        Commands::Bind { subject_type, subject_id, id, stdin, format } => {
+            let fmt = format.as_deref() == Some("json");
+            cmd_bind(
+                subject_type.as_deref(),
+                subject_id.as_deref(),
+                id.as_deref(),
+                *stdin,
+                fmt,
+            )
+        }
+        Commands::Current { subject_type, subject_id, format } => {
+            let fmt = format.as_deref() == Some("json");
+            cmd_current(subject_type.as_deref(), subject_id.as_deref(), fmt)
+        }
+
         Commands::Checkpoint { .. } => unreachable!(),
     };
     if let Err(e) = result {
@@ -2434,7 +2658,7 @@ mod tests {
             Ok(())
         }).unwrap();
         // Append a [guide] entry
-        let guide = event::make_log_appended(&id, "[guide] how to test");
+        let guide = event::make_log_appended(&id, "[guide] how to test", None);
         with_journal_write_lock(|journal| {
             append_event_unlocked(journal, &guide)?;
             Ok(())
@@ -3054,7 +3278,7 @@ fn create_strand(content: &str) -> String {
         let id_a = create_strand("strand A");
         let id_b = create_strand("strand B");
         // Append to B to give it a later offset
-        let log = event::make_log_appended(&id_b, "extra entry");
+        let log = event::make_log_appended(&id_b, "extra entry", None);
         with_journal_write_lock(|journal| {
             append_event_unlocked(journal, &log)?;
             Ok(())

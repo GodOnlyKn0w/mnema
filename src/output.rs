@@ -165,6 +165,12 @@ pub enum TimelineEventKindOutput {
         #[serde(skip_serializing_if = "Option::is_none")]
         append_id: Option<String>,
     },
+    #[serde(rename = "subject_bound")]
+    SubjectBound {
+        subject_type: String,
+        subject_id: String,
+        strand_id: String,
+    },
 }
 
 fn is_false(b: &bool) -> bool { !b }
@@ -216,6 +222,12 @@ impl From<&crate::event::TimelineEntry> for TimelineEntryOutput {
                         observed: observed.clone(),
                         action: action.clone(),
                         append_id: append_id.clone(),
+                    },
+                crate::event::TimelineEventKind::SubjectBound { subject_type, subject_id, strand_id } =>
+                    TimelineEventKindOutput::SubjectBound {
+                        subject_type: subject_type.clone(),
+                        subject_id: subject_id.clone(),
+                        strand_id: strand_id.clone(),
                     },
             },
             ts_skew: e.ts_skew,

@@ -215,6 +215,7 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
             Event::StrandHidden { ts, .. } => ts,
             Event::StrandUnhidden { ts, .. } => ts,
             Event::CheckpointCreated { ts, .. } => ts,
+            Event::SubjectBound { ts, .. } => ts,
         };
         let ts_str = ts.clone();
         let ts_skew = match &prev_ts {
@@ -242,6 +243,13 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
                     observed: observed.clone(),
                     action: action.clone(),
                     append_id: append_id.clone(),
+                }
+            }
+            Event::SubjectBound { subject_type, subject_id, strand_id, .. } => {
+                TimelineEventKind::SubjectBound {
+                    subject_type: subject_type.clone(),
+                    subject_id: subject_id.clone(),
+                    strand_id: strand_id.clone(),
                 }
             }
         };

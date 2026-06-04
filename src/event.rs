@@ -59,6 +59,13 @@ pub enum Event {
         append_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         git: Option<GitContext>,
+        /// Optional structured provenance attached to the entry.
+        /// Persists alongside the entry as metadata, not content. New
+        /// in this schema; older journals and entries simply omit the
+        /// field. The shape is producer-defined; this crate only
+        /// requires it to be a JSON object when present.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        provenance: Option<serde_json::Value>,
     },
     #[serde(rename = "edge_linked")]
     EdgeLinked {
@@ -92,6 +99,21 @@ pub enum Event {
         action: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         append_id: Option<String>,
+        /// Optional structured provenance shared with `LogAppended`.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        provenance: Option<serde_json::Value>,
+    },
+    /// Subject binding fact. Generic record of `subject_type + subject_id -> strand_id`.
+    /// Consumers (e.g. `pi-strand`) decide what subject types mean; this crate only
+    /// stores the binding, indexes it, and exposes it through `bind` / `current`.
+    #[serde(rename = "subject_bound")]
+    SubjectBound {
+        /// Binding's own event id (24 hex). Distinct from the bound strand id.
+        id: String,
+        ts: String,
+        subject_type: String,
+        subject_id: String,
+        strand_id: String,
     },
 }
 
@@ -105,9 +127,12 @@ impl Event {
             | Event::StrandHidden { id, .. }
             | Event::StrandUnhidden { id, .. }
             | Event::CheckpointCreated { id, .. } => id,
+            // Binding events reference a strand but are not strand events.
+            // Group them under the target strand so projection ignores them
+            // (no StrandCreated match → filtered out by has_created gate).
+            Event::SubjectBound { strand_id, .. } => strand_id,
         }
     }
-
 }
 
 fn now() -> String {
@@ -161,11 +186,20 @@ pub fn make_strand_created(content: &str, strand_type: Option<&str>) -> (Event, 
         ref_: None,
         append_id: Some(append_id),
         git,
+        provenance: None,
     };
     (created, appended)
 }
 
-pub fn make_log_appended(id: &str, content: &str) -> Event {
+/// Build a `LogAppended` event. `provenance` is the optional structured
+/// metadata blob attached to the entry. `None` produces an event identical
+/// to the pre-provenance schema; older consumers see the same JSON shape
+/// thanks to `skip_serializing_if`.
+pub fn make_log_appended(
+    id: &str,
+    content: &str,
+    provenance: Option<serde_json::Value>,
+) -> Event {
     let ts = now();
     let append_id = compute_append_id(id, &ts, content);
     let git = get_git_context();
@@ -176,10 +210,18 @@ pub fn make_log_appended(id: &str, content: &str) -> Event {
         ref_: None,
         append_id: Some(append_id),
         git,
+        provenance,
     }
 }
 
-pub fn make_checkpoint(id: &str, observed: &str, action: &str) -> Event {
+/// Build a `CheckpointCreated` event. `provenance` follows the same
+/// contract as on `LogAppended`; pass `None` for the original behaviour.
+pub fn make_checkpoint(
+    id: &str,
+    observed: &str,
+    action: &str,
+    provenance: Option<serde_json::Value>,
+) -> Event {
     let ts = now();
     let content = format!("observed={} action={}", observed, action);
     let append_id = compute_append_id(id, &ts, &content);
@@ -189,6 +231,7 @@ pub fn make_checkpoint(id: &str, observed: &str, action: &str) -> Event {
         observed: observed.to_string(),
         action: action.to_string(),
         append_id: Some(append_id),
+        provenance,
     }
 }
 
@@ -212,6 +255,24 @@ pub fn make_strand_unhidden(id: &str) -> Event {
     Event::StrandUnhidden {
         id: id.to_string(),
         ts: now(),
+    }
+}
+
+/// Build a `SubjectBound` event. The `id` is the binding's own event id;
+/// `strand_id` is the target strand the subject is bound to. `bind` is
+/// append-only — newer bindings supersede older ones for the same
+/// `(subject_type, subject_id)` pair; there is no unbind event in v1.
+pub fn make_subject_bound(
+    subject_type: &str,
+    subject_id: &str,
+    strand_id: &str,
+) -> Event {
+    Event::SubjectBound {
+        id: generate_id(),
+        ts: now(),
+        subject_type: subject_type.to_string(),
+        subject_id: subject_id.to_string(),
+        strand_id: strand_id.to_string(),
     }
 }
 
@@ -256,5 +317,10 @@ pub enum TimelineEventKind {
         observed: String,
         action: String,
         append_id: Option<String>,
+    },
+    SubjectBound {
+        subject_type: String,
+        subject_id: String,
+        strand_id: String,
     },
 }
