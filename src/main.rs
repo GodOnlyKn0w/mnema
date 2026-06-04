@@ -2268,7 +2268,11 @@ mod tests {
 
     impl TestEnv {
         fn new() -> Self {
-            let lock = CWD_LOCK.lock().unwrap();
+            // Tolerate a poisoned CWD_LOCK from a previous test panic: the
+            // lock is a pure serialisation aid, the data it guards is
+            // restored in `Drop`, so recovering the inner guard is safe and
+            // prevents one failing test from cascading into 30+.
+            let lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let dir = tempfile::tempdir().unwrap();
             let tasktree_dir = dir.path().join(".tasktree");
             fs::create_dir_all(&tasktree_dir).unwrap();
@@ -3007,14 +3011,40 @@ fn create_strand(content: &str) -> String {
         assert!(meta["journal_lines"].as_u64().unwrap() > 0);
     }
 
+    /// `cmd_export` against a missing journal must fail. The error
+    /// contract is `Err(...)` with a stable prefix; the OS-level wording
+    /// after the prefix is locale-dependent (e.g. EN: "cannot read journal:
+    /// ..."  /  ZH: "cannot read journal: 系统找不到指定的文件。 ..."),
+    /// so we assert on the stable prefix only, not the full message.
+    ///
+    /// Also: this test uses an isolated temp dir + `TASKTREE_HOME` (via
+    /// `with_tasktree_home`) so it cannot pollute the shared test
+    /// environment. We never `remove_file` on a journal another test
+    /// might be using, and we never panic while holding `CWD_LOCK` (the
+    /// assertion below is a single guarded check, not a multi-step
+    /// sequence that can partial-fail).
     #[test]
     fn export_no_journal_returns_error() {
-        let _env = setup();
-        let out = _env.path().join("nojournal_export.jsonl");
-        let _ = std::fs::remove_file(ensure_journal().unwrap());
-        let result = cmd_export(out.to_str().unwrap());
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("journal not found"));
+        let dir = tempfile::tempdir().unwrap();
+        // Create `.tasktree/` but DO NOT create `journal.jsonl` inside it.
+        // `resolve_journal_dir` succeeds (it only needs the dir to exist);
+        // `cmd_export` then fails at the actual `std::fs::read` step
+        // because the journal file is missing. This mirrors the user's
+        // experience: a project where `.tasktree/` exists but no journal
+        // has been written yet (e.g. first run after `tasktree init`).
+        let tasktree = dir.path().join(".tasktree");
+        std::fs::create_dir_all(&tasktree).unwrap();
+        let out = dir.path().join("nojournal_export.jsonl");
+        with_tasktree_home(Some(dir.path().to_str().unwrap()), || {
+            let result = cmd_export(out.to_str().unwrap());
+            let err = result.expect_err("cmd_export must return Err when no journal exists");
+            assert!(
+                err.starts_with("cannot read journal"),
+                "expected stable 'cannot read journal' prefix, got: {err}"
+            );
+            // Output file must not have been created.
+            assert!(!out.exists(), "export must not create output on failure");
+        });
     }
 
     #[test]
