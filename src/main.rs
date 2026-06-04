@@ -3610,6 +3610,184 @@ fn create_strand(content: &str) -> String {
         assert!(!visible.iter().any(|s| s.id == id),
             "cmd_agent_context default must use include_hidden=false in projection");
     }
-}
 
+    // ── Subject binding tests (pi-strand V1 contract) ─────────────────
+
+    #[test]
+    fn bind_creates_subject_bound_event() {
+        let _env = setup();
+        let id = create_strand("target");
+        let result = cmd_bind(Some("pi-session"), Some("abc"), Some(&id), false, false);
+        assert!(result.is_ok());
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let has_binding = events.iter().any(|(_, e)| {
+            matches!(e, Event::SubjectBound { subject_type, subject_id, strand_id, .. }
+                if subject_type == "pi-session" && subject_id == "abc" && strand_id == &id)
+        });
+        assert!(has_binding, "bind must write a SubjectBound event");
+    }
+
+    #[test]
+    fn bind_resolves_prefix_id() {
+        let _env = setup();
+        let id = create_strand("target strand");
+        let short = &id[..12];
+        let result = cmd_bind(Some("ci-run"), Some("run-42"), Some(short), false, false);
+        assert!(result.is_ok(), "prefix strand id should resolve: {:?}", result);
+    }
+
+    #[test]
+    fn bind_missing_strand_fails() {
+        let _env = setup();
+        let result = cmd_bind(Some("pi-session"), Some("x"), Some("000000000000"), false, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn current_returns_latest_binding() {
+        let _env = setup();
+        let id_a = create_strand("first");
+        let id_b = create_strand("second");
+        // Bind subject to strand a
+        cmd_bind(Some("pi-session"), Some("user1"), Some(&id_a), false, false).unwrap();
+        // Re-bind to strand b (latest should win)
+        cmd_bind(Some("pi-session"), Some("user1"), Some(&id_b), false, false).unwrap();
+        let result = cmd_current(Some("pi-session"), Some("user1"), false);
+        assert!(result.is_ok());
+        // We can't easily capture stdout here, so we test via the projection
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let mut latest: Option<String> = None;
+        for (_, e) in &events {
+            if let Event::SubjectBound { subject_type: t, subject_id: i, strand_id: s, .. } = e {
+                if t == "pi-session" && i == "user1" {
+                    latest = Some(s.clone());
+                }
+            }
+        }
+        assert_eq!(latest, Some(id_b), "latest binding must point to id_b");
+    }
+
+    #[test]
+    fn current_no_binding_returns_error() {
+        let _env = setup();
+        create_strand("orphan");
+        let result = cmd_current(Some("pi-session"), Some("no-such"), false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn current_requires_non_empty_args() {
+        let _env = setup();
+        let r1 = cmd_current(None, Some("x"), false);
+        assert!(r1.is_err());
+        let r2 = cmd_current(Some("x"), None, false);
+        assert!(r2.is_err());
+        let r3 = cmd_current(Some(""), Some("x"), false);
+        assert!(r3.is_err());
+    }
+
+    #[test]
+    fn bind_requires_non_empty_args() {
+        let _env = setup();
+        let id = create_strand("t");
+        let r1 = cmd_bind(None, Some("x"), Some(&id), false, false);
+        assert!(r1.is_err());
+        let r2 = cmd_bind(Some("x"), None, Some(&id), false, false);
+        assert!(r2.is_err());
+        let r3 = cmd_bind(Some("x"), Some("y"), None, false, false);
+        assert!(r3.is_err());
+    }
+
+    // ── Provenance tests (pi-strand V1 contract) ─────────────────────
+
+    #[test]
+    fn append_with_provenance_stores_it() {
+        let _env = setup();
+        let id = create_strand("target");
+        let prov = Some(serde_json::json!({ "producer": "pi", "model": "gpt-5" }));
+        let event = event::make_log_appended(&id, "provenance test", prov);
+        with_journal_write_lock(|j| {
+            append_event_unlocked(j, &event)
+        }).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let found = events.iter().any(|(_, e)| {
+            if let Event::LogAppended { content, provenance, .. } = e {
+                content == "provenance test" && provenance.is_some()
+            } else {
+                false
+            }
+        });
+        assert!(found, "provenance must be stored on the event");
+    }
+
+    #[test]
+    fn append_without_provenance_has_none() {
+        let _env = setup();
+        let id = create_strand("target");
+        let event = event::make_log_appended(&id, "no provenance", None);
+        with_journal_write_lock(|j| {
+            append_event_unlocked(j, &event)
+        }).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let found = events.iter().any(|(_, e)| {
+            if let Event::LogAppended { content, provenance, .. } = e {
+                content == "no provenance" && provenance.is_none()
+            } else {
+                false
+            }
+        });
+        assert!(found, "append without provenance must have provenance=None");
+    }
+
+    #[test]
+    fn provenance_serializes_only_when_present() {
+        // Verify that serialized JSON doesn't contain provenance key when None.
+        let event = event::make_log_appended("test", "no prov", None);
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("provenance"),
+            "None provenance must not appear in JSON: {}", json);
+        let with_prov = event::make_log_appended("test", "has prov",
+            Some(serde_json::json!({ "k": "v" })));
+        let json2 = serde_json::to_string(&with_prov).unwrap();
+        assert!(json2.contains("provenance"),
+            "Some provenance must appear in JSON: {}", json2);
+    }
+
+    #[test]
+    fn old_journal_line_still_deserializes() {
+        // A LogAppended event serialized by an older version (no provenance field)
+        // must still parse to Event with provenance=None.
+        let old_line = r#"{"type":"log_appended","id":"abc","ts":"2026-01-01T00:00:00Z","content":"old entry","append_id":"deadbeef"}"#;
+        let event: Event = serde_json::from_str(old_line).unwrap();
+        match &event {
+            Event::LogAppended { content, provenance, .. } => {
+                assert_eq!(content, "old entry");
+                assert!(provenance.is_none(), "old journal must deserialize with provenance=None");
+            }
+            _ => panic!("expected LogAppended"),
+        }
+    }
+
+    #[test]
+    fn show_search_context_unchanged() {
+        // Smoke test that existing cmd_show, cmd_search, cmd_context still work.
+        let _env = setup();
+        let id = create_strand("show me");
+        cmd_append(Some("entry"), Some(&id), false, false, None, None, None, None).unwrap();
+        // show
+        let r = cmd_show(Some(&id), false, None, false, false);
+        assert!(r.is_ok());
+        // search
+        let r = cmd_search("entry", false, false);
+        assert!(r.is_ok());
+        // context
+        let r = cmd_context(None, &[], None, None, false, false);
+        assert!(r.is_ok());
+    }
+}
 
