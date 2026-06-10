@@ -490,9 +490,11 @@ Exit codes:
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
-        /// Include [friction] entries (excluded by default)
+        /// Exclude [friction] entries. Default exposes them: an unresolved
+        /// friction still binds future action (exposure axis, scaffolding
+        /// ADR-0002). Hiding is an explicit choice, exposure is the default.
         #[arg(long)]
-        include_friction: bool,
+        exclude_friction: bool,
         /// Include hidden strands in the result set (default: exclude)
         #[arg(long)]
         include_hidden: bool,
@@ -757,6 +759,206 @@ fn find_strand(events: &[(usize, Event)], id: &str) -> Option<String> {
         .find(|nid| nid.starts_with(id))
 }
 
+// ── Journal diagnostics (W-code emitters) ───────────────────
+// Every code emitted here MUST have a catalog entry in diagnostics.rs
+// (two-way closure: no orphan emissions, no dead codes). Warnings are
+// precision-first: a W code that mostly cries wolf teaches agents to
+// ignore the whole channel.
+
+/// One emitted diagnostic: (code, one-line detail). The code resolves via
+/// `tasktree explain <code>`.
+type EmittedDiag = (&'static str, String);
+
+/// Extract comparison tokens for W062 keyword matching: ASCII words of
+/// length >= 5 (lowercased) plus contiguous CJK runs of length >= 3.
+/// Conservative on purpose — shared full runs, not n-grams.
+fn w062_tokens(text: &str) -> std::collections::HashSet<String> {
+    let mut tokens = std::collections::HashSet::new();
+    let mut ascii_word = String::new();
+    let mut cjk_run = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            ascii_word.push(c.to_ascii_lowercase());
+        } else {
+            if ascii_word.len() >= 5 {
+                tokens.insert(ascii_word.clone());
+            }
+            ascii_word.clear();
+        }
+        let is_cjk = ('\u{4e00}'..='\u{9fff}').contains(&c);
+        if is_cjk {
+            cjk_run.push(c);
+        } else {
+            if cjk_run.chars().count() >= 3 {
+                tokens.insert(cjk_run.clone());
+            }
+            cjk_run.clear();
+        }
+    }
+    if ascii_word.len() >= 5 {
+        tokens.insert(ascii_word);
+    }
+    if cjk_run.chars().count() >= 3 {
+        tokens.insert(cjk_run);
+    }
+    tokens
+}
+
+fn parse_event_ts(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// Parse the `by=` token of a [deadline] entry. Accepts RFC3339 or a bare
+/// date (YYYY-MM-DD, overdue after that day ends, UTC). Unparseable values
+/// emit nothing — don't guess.
+fn parse_deadline_by(content: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let by_val = content
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix("by="))?;
+    if let Some(ts) = parse_event_ts(by_val) {
+        return Some(ts);
+    }
+    chrono::NaiveDate::parse_from_str(by_val, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(23, 59, 59))
+        .map(|dt| chrono::DateTime::from_naive_utc_and_offset(dt, chrono::Utc))
+}
+
+/// Run the W062/W068/W069 emitters over the journal events.
+/// Pure: `now` is a parameter, nothing is written.
+fn run_journal_diagnostics(events: &[Event], now: chrono::DateTime<chrono::Utc>) -> Vec<EmittedDiag> {
+    use std::collections::{HashMap, HashSet};
+    let mut diags: Vec<EmittedDiag> = Vec::new();
+
+    // Group LogAppended per strand, keeping ts + provenance
+    struct EntryRef<'a> {
+        ts: &'a str,
+        content: &'a str,
+        producer: Option<&'a str>,
+    }
+    let mut per_strand: HashMap<&str, Vec<EntryRef>> = HashMap::new();
+    for event in events {
+        if let Event::LogAppended { id, ts, content, provenance, .. } = event {
+            per_strand.entry(id.as_str()).or_default().push(EntryRef {
+                ts: ts.as_str(),
+                content: content.as_str(),
+                producer: provenance
+                    .as_ref()
+                    .and_then(|p| p.get("producer"))
+                    .and_then(|v| v.as_str()),
+            });
+        }
+    }
+
+    const CLOSING: [&str; 6] = ["[verified]", "[done]", "[cancelled]", "[failed]", "[merged]", "[ended]"];
+
+    // ── W068: deadline overdue ──
+    for (id, entries) in &per_strand {
+        let closed = entries
+            .iter()
+            .any(|e| CLOSING.iter().any(|m| e.content.starts_with(m)));
+        if closed {
+            continue;
+        }
+        for e in entries {
+            if !e.content.starts_with("[deadline]") {
+                continue;
+            }
+            if let Some(by) = parse_deadline_by(e.content) {
+                if now > by {
+                    diags.push((
+                        "W068",
+                        format!("strand {} deadline passed ({})", shorten(id), by.to_rfc3339()),
+                    ));
+                }
+            }
+        }
+    }
+
+    // ── W069: concurrent marker write ──
+    // Same lifecycle marker on the same strand from >= 2 distinct
+    // provenance producers. Entries without provenance can't be
+    // attributed and are ignored (no guessing).
+    for (id, entries) in &per_strand {
+        let mut writers: HashMap<&str, HashSet<&str>> = HashMap::new();
+        for e in entries {
+            if let Some(producer) = e.producer {
+                if let Some(marker) = CLOSING.iter().chain(["[dispatched]", "[registered]"].iter()).find(|m| e.content.starts_with(*m)) {
+                    writers.entry(marker).or_default().insert(producer);
+                }
+            }
+        }
+        for (marker, producers) in writers {
+            if producers.len() >= 2 {
+                let mut who: Vec<&str> = producers.into_iter().collect();
+                who.sort();
+                diags.push((
+                    "W069",
+                    format!("strand {} marker {} written by: {}", shorten(id), marker, who.join(", ")),
+                ));
+            }
+        }
+    }
+
+    // ── W062: contradictory decision/constraint ──
+    // [decision] and [constraint] sharing a keyword, written within 10
+    // minutes, from different strands.
+    struct Governed<'a> {
+        strand: &'a str,
+        ts: chrono::DateTime<chrono::Utc>,
+        tokens: std::collections::HashSet<String>,
+    }
+    let mut decisions: Vec<Governed> = Vec::new();
+    let mut constraints: Vec<Governed> = Vec::new();
+    for (id, entries) in &per_strand {
+        for e in entries {
+            let bucket = if e.content.starts_with("[decision]") {
+                &mut decisions
+            } else if e.content.starts_with("[constraint]") {
+                &mut constraints
+            } else {
+                continue;
+            };
+            if let Some(ts) = parse_event_ts(e.ts) {
+                bucket.push(Governed { strand: id, ts, tokens: w062_tokens(e.content) });
+            }
+        }
+    }
+    let mut seen_pairs: HashSet<(String, String, String)> = HashSet::new();
+    for d in &decisions {
+        for c in &constraints {
+            if d.strand == c.strand {
+                continue;
+            }
+            if (d.ts - c.ts).num_seconds().abs() > 600 {
+                continue;
+            }
+            if let Some(shared) = d.tokens.intersection(&c.tokens).next() {
+                let key = (
+                    shorten(d.strand),
+                    shorten(c.strand),
+                    shared.clone(),
+                );
+                if seen_pairs.insert(key) {
+                    diags.push((
+                        "W062",
+                        format!(
+                            "decision in {} vs constraint in {} share keyword \"{}\" within 10min",
+                            shorten(d.strand),
+                            shorten(c.strand),
+                            shared
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    diags
+}
+
 fn cmd_doctor_journal() -> Result<bool, String> {
     let started = Instant::now();
     let path = resolve_journal_dir()?.join("journal.jsonl");
@@ -984,6 +1186,18 @@ fn cmd_doctor_journal() -> Result<bool, String> {
         println!("  lint summary: {} issue(s) found (warnings only, not blocking)", lint_count);
     }
 
+    // ── W-code diagnostics ──────────────────────────────
+    let diags = run_journal_diagnostics(&events, chrono::Utc::now());
+    println!();
+    println!("  diagnostics:");
+    if diags.is_empty() {
+        println!("    (none)");
+    } else {
+        for (code, detail) in &diags {
+            println!("    {} {}  (tasktree explain {})", code, detail, code);
+        }
+    }
+
     // Measure fresh projection timing
     let projection_start = Instant::now();
     let (journal_events, _) = read_events_lossy(&path);
@@ -994,7 +1208,7 @@ fn cmd_doctor_journal() -> Result<bool, String> {
     println!("  total_lines: {}", total_lines);
     println!("  total_events: {}", journal_events.len());
 
-    let has_issues = corrupted > 0 || !orphans.is_empty() || timeline_status.contains("warning") || lint_count > 0;
+    let has_issues = corrupted > 0 || !orphans.is_empty() || timeline_status.contains("warning") || lint_count > 0 || !diags.is_empty();
     Ok(has_issues)
 }
 
@@ -1383,7 +1597,7 @@ fn is_convention_marker(marker: &str) -> bool {
     matches!(marker,
         "[observed]" | "[check]" | "[friction]" | "[progress]" |
         "[decision]" | "[constraint]" | "[grill]" | "[insight]" | "[lesson]" | "[fixed]" |
-        "[deliverable]" | "[skill]" | "[guide]" | "[covers]" |
+        "[deliverable]" | "[skill]" | "[guide]" | "[covers]" | "[deadline]" |
         "[waiting:human]" | "[checkpoint]" | "[session]" | "[task]"
     )
 }
@@ -2201,21 +2415,20 @@ fn print_tree_text(node: &tree::TreeNode, depth: usize) {
 // Uses projection::project_strands() directly.
 // See protocols/system-prompt-design.md §三 for rationale.
 
-fn cmd_context(
-    context_type: Option<&str>,
+/// Pure projection for context (testable without stdout capture).
+///
+/// Exposure axis (scaffolding ADR-0002): what still binds the future is
+/// exposed by default. [friction] entries on a live (registered) strand are
+/// included full-text; on a closed strand they fold into `friction_folded`
+/// (a scar, not a disappearance — retrieve with `show`). `--exclude-friction`
+/// drops them entirely: hiding is an explicit choice, exposure the default.
+fn build_context_strands(
+    strands: &[projection::ProjectedStrand],
+    target_type: &str,
     covers: &[String],
     since_offset: Option<usize>,
-    format_json: Option<&str>,
-    include_friction: bool,
-    include_hidden: bool,
-) -> Result<(), String> {
-    let path = ensure_journal()?;
-    let (events, _skipped) = read_events_lossy(&path);
-    let strands = projection::project_strands(&events, include_hidden);
-
-    let target_type = context_type.unwrap_or("prompt-strand");
-    let is_json = format_json == Some("json");
-
+    exclude_friction: bool,
+) -> Vec<ContextStrandOutput> {
     // Filter strands by type
     let mut matching: Vec<&projection::ProjectedStrand> = strands
         .iter()
@@ -2249,15 +2462,26 @@ fn cmd_context(
             }
         }
 
-        // Build entries, excluding [friction] by default
+        let strand_is_live = strand.state() == "registered";
+        let mut friction_folded = 0usize;
+
         let entries: Vec<ContextEntryOutput> = strand
             .log
             .iter()
             .filter(|e| {
-                if e.content.starts_with("[friction]") && !include_friction {
-                    return false;
+                if e.content.starts_with("[friction]") {
+                    if exclude_friction {
+                        return false;
+                    }
+                    if !strand_is_live {
+                        // Closed strand: friction no longer binds the
+                        // future — fold to a count.
+                        friction_folded += 1;
+                        return false;
+                    }
+                    return true;
                 }
-                // Also exclude [covers] from body (already in header)
+                // Exclude [covers] from body (already in header)
                 if e.content.starts_with("[covers]") {
                     return false;
                 }
@@ -2291,6 +2515,7 @@ fn cmd_context(
             id: strand.id.clone(),
             covers: unique_covers,
             entries,
+            friction_folded,
         });
     }
 
@@ -2300,6 +2525,26 @@ fn cmd_context(
         let ts_b = b.entries.last().map(|e| e.ts.as_str()).unwrap_or("");
         ts_b.cmp(ts_a)
     });
+    output_strands
+}
+
+fn cmd_context(
+    context_type: Option<&str>,
+    covers: &[String],
+    since_offset: Option<usize>,
+    format_json: Option<&str>,
+    exclude_friction: bool,
+    include_hidden: bool,
+) -> Result<(), String> {
+    let path = ensure_journal()?;
+    let (events, _skipped) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, include_hidden);
+
+    let target_type = context_type.unwrap_or("prompt-strand");
+    let is_json = format_json == Some("json");
+
+    let output_strands =
+        build_context_strands(&strands, target_type, covers, since_offset, exclude_friction);
 
     if is_json {
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
@@ -2321,6 +2566,13 @@ fn cmd_context(
                 } else {
                     println!("  {} {}", entry.marker, entry.content);
                 }
+            }
+            if strand.friction_folded > 0 {
+                println!(
+                    "  friction: ×{} (folded — strand closed; tasktree show {})",
+                    strand.friction_folded,
+                    shorten(&strand.id)
+                );
             }
             if i + 1 < strand_count {
                 println!();
@@ -2364,6 +2616,9 @@ struct ContextStrandOutput {
     id: String,
     covers: Vec<String>,
     entries: Vec<ContextEntryOutput>,
+    /// [friction] entries folded away because the strand is closed
+    /// (exposure axis: a scar, not a disappearance).
+    friction_folded: usize,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -2615,8 +2870,8 @@ fn main() {
 
         Commands::AgentContext { format, include_hidden } => cmd_agent_context(format.as_deref(), *include_hidden),
 
-        Commands::Context { context_type, covers, since_offset, format, include_friction, include_hidden } => {
-            cmd_context(context_type.as_deref(), &covers, *since_offset, format.as_deref(), *include_friction, *include_hidden)
+        Commands::Context { context_type, covers, since_offset, format, exclude_friction, include_hidden } => {
+            cmd_context(context_type.as_deref(), &covers, *since_offset, format.as_deref(), *exclude_friction, *include_hidden)
         },
 
         Commands::Bind { subject_type, subject_id, id, stdin, format } => {
@@ -3231,6 +3486,290 @@ fn create_strand(content: &str) -> String {
         // `older` was touched last, so it outranks `newer` in the menu.
         assert_eq!(out.active[0].id, shorten(&older));
         let _ = newer;
+    }
+
+    // ── examples-as-contract (ADR-0001 rule 4) ──
+    // Every example command in help text must at least parse against the
+    // real CLI. Help text is load-bearing: agents copy it verbatim.
+
+    fn splitish(line: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut cur = String::new();
+        let mut quote: Option<char> = None;
+        for c in line.chars() {
+            match quote {
+                Some(q) => {
+                    if c == q {
+                        quote = None;
+                    } else {
+                        cur.push(c);
+                    }
+                }
+                None => match c {
+                    '"' | '\'' => quote = Some(c),
+                    c if c.is_whitespace() => {
+                        if !cur.is_empty() {
+                            tokens.push(std::mem::take(&mut cur));
+                        }
+                    }
+                    _ => cur.push(c),
+                },
+            }
+        }
+        if !cur.is_empty() {
+            tokens.push(cur);
+        }
+        tokens
+    }
+
+    fn substitute(tok: &str) -> String {
+        if !tok.contains('<') {
+            return tok.to_string();
+        }
+        let upper = tok.to_uppercase();
+        if upper.contains("ID") {
+            "0000019dd34b".to_string()
+        } else if upper.contains("<N>") {
+            "5".to_string()
+        } else if upper.contains("FORMAT") {
+            "json".to_string()
+        } else if upper.contains("PATH") || upper.contains("FILE") {
+            "x.md".to_string()
+        } else if upper.contains("CODE") {
+            "W062".to_string()
+        } else if upper.contains("RFC3339") {
+            "2026-01-01T00:00:00Z".to_string()
+        } else {
+            "x".to_string()
+        }
+    }
+
+    fn try_parse_example(line: &str) -> Result<(), String> {
+        let start = match line.find("tasktree ") {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+        // Grammar-notation lines ([--id <ID> | --new]) are usage patterns,
+        // not copy-paste examples.
+        if line.contains("[--") {
+            return Ok(());
+        }
+        // Prose sentences may end the command with punctuation.
+        let cmdline = line[start..].trim_end_matches(['.', ',', ';', ':', ')']);
+        let tokens: Vec<String> = splitish(cmdline).iter().map(|t| substitute(t)).collect();
+        use clap::CommandFactory;
+        match Cli::command().try_get_matches_from(&tokens) {
+            Ok(_) => Ok(()),
+            Err(e) => match e.kind() {
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => Ok(()),
+                _ => Err(format!("example does not parse: `{}` -> {}", cmdline.trim(), e)),
+            },
+        }
+    }
+
+    #[test]
+    fn help_examples_parse_against_real_cli() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let mut helps: Vec<String> = Vec::new();
+        if let Some(h) = cmd.get_after_help() {
+            helps.push(h.to_string());
+        }
+        for sub in cmd.get_subcommands() {
+            if let Some(h) = sub.get_after_help() {
+                helps.push(h.to_string());
+            }
+        }
+        let mut checked = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        for help in &helps {
+            for line in help.lines() {
+                if !line.contains("tasktree ") || line.contains("<command>") {
+                    continue;
+                }
+                checked += 1;
+                if let Err(e) = try_parse_example(line) {
+                    failures.push(e);
+                }
+            }
+        }
+        assert!(checked > 10, "expected to find example lines in help text, found {}", checked);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn catalog_recovery_commands_parse_when_executable() {
+        for info in diagnostics::catalog() {
+            if info.recovery.executable {
+                assert!(
+                    info.recovery.command_str.starts_with("tasktree"),
+                    "{}: executable recovery must be a tasktree command",
+                    info.code
+                );
+                try_parse_example(info.recovery.command_str)
+                    .unwrap_or_else(|e| panic!("{}: {}", info.code, e));
+            }
+        }
+    }
+
+    #[test]
+    fn orient_catch_up_command_parses() {
+        let _env = setup();
+        let id = create_strand("a line");
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_orient(&strands, false, 10, 2);
+        try_parse_example(&out.active[0].catch_up).unwrap();
+        let _ = id;
+    }
+
+    // ── W-code emitters (two-way closure: every code has a producer) ──
+
+    #[test]
+    fn w068_fires_on_overdue_deadline_and_respects_closing() {
+        let _env = setup();
+        let id = create_strand("ship the feature");
+        cmd_append(Some("[deadline] finish rollout by=2000-01-01"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        assert!(diags.iter().any(|(c, _)| *c == "W068"), "expected W068, got {:?}", diags);
+
+        // Closing the strand silences the warning (precision over recall).
+        cmd_append(Some("[cancelled] re-planned"), None, false, false, None, Some(&id), None, None).unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        assert!(!diags.iter().any(|(c, _)| *c == "W068"));
+    }
+
+    #[test]
+    fn w068_future_deadline_is_silent() {
+        let _env = setup();
+        let id = create_strand("future work");
+        cmd_append(Some("[deadline] finish by=2999-01-01"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        assert!(diags.is_empty(), "future deadline must not fire: {:?}", diags);
+    }
+
+    #[test]
+    fn w069_fires_on_two_producers_same_marker() {
+        let _env = setup();
+        let id = create_strand("contested task");
+        cmd_append(Some("[done] finished it"), None, false, false, None, Some(&id), None, Some(r#"{"producer":"alpha"}"#)).unwrap();
+        cmd_append(Some("[done] also finished it"), None, false, false, None, Some(&id), None, Some(r#"{"producer":"beta"}"#)).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        let w069: Vec<_> = diags.iter().filter(|(c, _)| *c == "W069").collect();
+        assert_eq!(w069.len(), 1, "expected one W069, got {:?}", diags);
+        assert!(w069[0].1.contains("alpha") && w069[0].1.contains("beta"));
+    }
+
+    #[test]
+    fn w069_single_producer_is_silent() {
+        let _env = setup();
+        let id = create_strand("solo task");
+        cmd_append(Some("[done] finished"), None, false, false, None, Some(&id), None, Some(r#"{"producer":"alpha"}"#)).unwrap();
+        cmd_append(Some("[verified] checked"), None, false, false, None, Some(&id), None, Some(r#"{"producer":"alpha"}"#)).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        assert!(diags.iter().all(|(c, _)| *c != "W069"));
+    }
+
+    #[test]
+    fn w062_fires_on_cross_strand_keyword_within_window() {
+        let _env = setup();
+        let a = create_strand("storage work");
+        let b = create_strand("policy work");
+        cmd_append(Some("[decision] adopt sqlite for local persistence"), None, false, false, None, Some(&a), None, None).unwrap();
+        cmd_append(Some("[constraint] sqlite writes are forbidden in production"), None, false, false, None, Some(&b), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        let w062: Vec<_> = diags.iter().filter(|(c, _)| *c == "W062").collect();
+        assert_eq!(w062.len(), 1, "expected one W062, got {:?}", diags);
+        assert!(w062[0].1.contains("sqlite"));
+    }
+
+    #[test]
+    fn w062_same_strand_or_no_shared_keyword_is_silent() {
+        let _env = setup();
+        let a = create_strand("one line");
+        cmd_append(Some("[decision] adopt sqlite here"), None, false, false, None, Some(&a), None, None).unwrap();
+        cmd_append(Some("[constraint] sqlite writes forbidden"), None, false, false, None, Some(&a), None, None).unwrap();
+        let b = create_strand("other line");
+        cmd_append(Some("[constraint] postgres only in staging"), None, false, false, None, Some(&b), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        assert!(diags.iter().all(|(c, _)| *c != "W062"), "same-strand pair must not fire: {:?}", diags);
+    }
+
+    // ── context exposure axis (ADR-0002) ──
+
+    fn create_prompt_strand(content: &str) -> String {
+        let (created, appended) = event::make_strand_created(content, Some("prompt-strand"));
+        let id = created.strand_id().to_string();
+        with_journal_write_lock(|journal| {
+            append_event_unlocked(journal, &created)?;
+            append_event_unlocked(journal, &appended)?;
+            Ok(())
+        }).unwrap();
+        id
+    }
+
+    #[test]
+    fn context_exposes_friction_on_live_strand_by_default() {
+        let _env = setup();
+        let id = create_prompt_strand("live guidance");
+        cmd_append(Some("[friction] stepped in a hole here"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, false);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].entries.iter().any(|e| e.marker == "[friction]"), "live friction must be exposed by default");
+        assert_eq!(out[0].friction_folded, 0);
+    }
+
+    #[test]
+    fn context_folds_friction_on_closed_strand() {
+        let _env = setup();
+        let id = create_prompt_strand("closed guidance");
+        cmd_append(Some("[friction] hole, since resolved"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[done] wrapped up"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, false);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].entries.iter().all(|e| e.marker != "[friction]"), "closed-strand friction folds away");
+        assert_eq!(out[0].friction_folded, 1, "fold is a scar, not a disappearance");
+    }
+
+    #[test]
+    fn context_exclude_friction_is_explicit_blindness() {
+        let _env = setup();
+        let id = create_prompt_strand("live guidance");
+        cmd_append(Some("[friction] hole"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, true);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].entries.iter().all(|e| e.marker != "[friction]"));
+        assert_eq!(out[0].friction_folded, 0, "explicit exclusion is not a fold");
     }
 
     #[test]

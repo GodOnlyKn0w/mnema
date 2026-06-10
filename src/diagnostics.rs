@@ -159,7 +159,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         severity: Severity::Warning,
         category: "lifecycle",
         title: "deadline overdue",
-        finding: "A task has a [deadline] entry whose by_ts has passed, and no [verified] marker.",
+        finding: "A task has a [deadline] entry whose by= time has passed, and the strand carries no closing marker ([verified] [done] [cancelled] [failed] [merged] [ended]).",
         impact: "The task is overdue; downstream schedule assumptions are invalid.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
@@ -207,6 +207,13 @@ static CATALOG: &[DiagnosticInfo] = &[
 
 pub fn lookup(code: &str) -> Option<&'static DiagnosticInfo> {
     CATALOG.iter().find(|d| d.code.eq_ignore_ascii_case(code))
+}
+
+/// Full catalog access for closure checks (examples-as-contract CI and
+/// the two-way closure tests: every emitted code resolves, every entry
+/// has a live producer).
+pub fn catalog() -> &'static [DiagnosticInfo] {
+    CATALOG
 }
 
 pub fn cmd_explain(code: &str, format_json: bool) -> String {
