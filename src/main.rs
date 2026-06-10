@@ -375,7 +375,7 @@ Rules:
 
     /// Explain a diagnostic code (E/W codes from lifecycle, health, arch-boundary)
     Explain {
-        /// Diagnostic code to explain (e.g. E053, W062)
+        /// Diagnostic code to explain (e.g. W068, W062)
         code: String,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -1349,7 +1349,7 @@ fn validate_lifecycle_marker(content: &str) -> Result<(), String> {
 fn is_convention_marker(marker: &str) -> bool {
     matches!(marker,
         "[observed]" | "[check]" | "[friction]" | "[progress]" |
-        "[decision]" | "[grill]" | "[insight]" | "[lesson]" | "[fixed]" |
+        "[decision]" | "[constraint]" | "[grill]" | "[insight]" | "[lesson]" | "[fixed]" |
         "[deliverable]" | "[skill]" | "[guide]" | "[covers]" |
         "[waiting:human]" | "[checkpoint]" | "[session]" | "[task]"
     )
@@ -1439,7 +1439,7 @@ fn cmd_append(
             return Err(format!(
                 "positional append arguments look reversed. Use:\n  tasktree append --id {} \"{}\"",
                 first,
-                stored.replace('"', "\\\"")
+                second.replace('"', "\\\"")
             ));
         }
     }
@@ -3053,6 +3053,8 @@ fn create_strand(content: &str) -> String {
         let err = result.unwrap_err();
         assert!(err.contains("arguments look reversed"));
         assert!(err.contains("tasktree append --id"));
+        // The suggested command must carry the actual content, not echo the id
+        assert!(err.contains(&format!("--id {} \"[observed] finding\"", id)));
     }
 
     #[test]
