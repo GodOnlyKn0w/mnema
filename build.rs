@@ -28,4 +28,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TASKTREE_COMMIT");
     println!("cargo:rerun-if-env-changed=TASKTREE_BUILD_PROFILE");
     println!("cargo:rerun-if-changed=.git/HEAD");
+    // Same-branch commits leave .git/HEAD untouched ("ref: refs/heads/X"
+    // is stable) — watch the ref file HEAD points at, or the stamp goes
+    // stale and the binary lies about its commit.
+    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
+        if let Some(r) = head.trim().strip_prefix("ref: ") {
+            println!("cargo:rerun-if-changed=.git/{r}");
+        }
+    }
 }
