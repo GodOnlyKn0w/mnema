@@ -15,6 +15,33 @@ use serde::Serialize;
 
 use crate::projection::ProjectedStrand;
 
+// ── orient --format json ───────────────────────────────────
+
+/// One active strand in the orient menu.
+#[derive(Debug, Serialize)]
+pub struct OrientStrand {
+    pub id: String,
+    pub strand_type: Option<String>,
+    pub entries: usize,
+    pub summary: String,
+    pub last_entry: String,
+    pub last_offset: usize,
+    /// Ready-to-run catch-up command for this strand (ADR-0003: the cursor
+    /// lives on the strand's last_offset, not on an observer).
+    pub catch_up: String,
+}
+
+/// External contract for `orient --format json`.
+#[derive(Debug, Serialize)]
+pub struct OrientOutput {
+    pub max_offset: usize,
+    pub active: Vec<OrientStrand>,
+    /// Closed/hidden strands folded to a count (exposure axis: the dead
+    /// folds into a scar, retrievable via `list`).
+    pub closed_count: usize,
+    pub remind: String,
+}
+
 // ── list --format json ─────────────────────────────────────
 
 /// External contract for `list --format json`. One element in the `strands` array.

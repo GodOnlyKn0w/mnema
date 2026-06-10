@@ -80,6 +80,7 @@ fn version_info() -> &'static str {
     version = version_info(),
     after_help = "\
 Commands:
+  orient      Session-start orientation: active strand menu + catch-up commands
   add         Create a new strand
   append      Append an entry to a strand
   bind        Record a subject binding
@@ -422,6 +423,38 @@ Rules:
         #[arg(long, value_name = "ID", conflicts_with_all = ["strand", "links"])]
         tree: Option<String>,
         /// Maximum events to return
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+    },
+    /// Session-start orientation: menu of active strands with catch-up commands
+    #[command(after_help = "\
+Pure read: orient never writes to the journal.
+
+Output per active strand:
+  handle        Strand id (use with --id)
+  summary       First entry (what this line of work is)
+  last          Most recent entry (where it left off)
+  catch-up      Ready-to-run command showing what happened around this
+                strand since it was last touched (cursor = last_offset)
+
+After orienting:
+  continue a line   tasktree append --id <ID> \"[decision] ...\"
+  new matter        tasktree add \"<summary>\"
+  before anything irreversible
+                    tasktree checkpoint --id <ID> --action \"<what and why>\"
+
+Closed strands are folded to a count; retrieve with tasktree list.
+Exit codes:
+  0 ok
+  1 journal missing or unreadable")]
+    Orient {
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+        /// Include hidden strands in the menu (default: exclude)
+        #[arg(long)]
+        include_hidden: bool,
+        /// Maximum strands in the menu, most recent first (default: 10)
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
     },
@@ -1980,6 +2013,99 @@ fn cmd_timeline(
     Ok(())
 }
 
+/// Orient remind line: the whole operating loop in one line (ADR-0001:
+/// the rules travel with the orientation, the weave-in pointer stays thin).
+const ORIENT_REMIND: &str = "continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | before irreversible → checkpoint --id <ID> --action \"<why>\" | more → tasktree --help";
+
+/// Pure projection for orient. Never touches the journal (ADR-0003: orient
+/// stays pure-read; the catch-up cursor is each strand's own last_offset).
+fn build_orient(
+    strands: &[projection::ProjectedStrand],
+    include_hidden: bool,
+    limit: usize,
+    max_offset: usize,
+) -> output::OrientOutput {
+    let visible: Vec<&projection::ProjectedStrand> = strands
+        .iter()
+        .filter(|s| !s.hidden || include_hidden)
+        .collect();
+    let mut active: Vec<&projection::ProjectedStrand> = visible
+        .iter()
+        .copied()
+        .filter(|s| s.state() == "registered")
+        .collect();
+    let closed_count = visible.len() - active.len();
+    // Most recently touched first; the menu is an index, not a dump.
+    active.sort_by(|a, b| b.last_offset().cmp(&a.last_offset()));
+    active.truncate(limit);
+
+    output::OrientOutput {
+        max_offset,
+        active: active
+            .iter()
+            .map(|s| output::OrientStrand {
+                id: shorten(&s.id),
+                strand_type: s.strand_type.clone(),
+                entries: s.log_count(),
+                summary: truncate(s.first_summary(), 70),
+                last_entry: truncate(s.last_summary(), 70),
+                last_offset: s.last_offset(),
+                catch_up: format!(
+                    "tasktree timeline --since-offset {} --links {}",
+                    s.last_offset(),
+                    shorten(&s.id)
+                ),
+            })
+            .collect(),
+        closed_count,
+        remind: ORIENT_REMIND.to_string(),
+    }
+}
+
+fn cmd_orient(format: Option<&str>, include_hidden: bool, limit: Option<usize>) -> Result<(), String> {
+    let started = Instant::now();
+    let path = ensure_journal()?;
+    let (events, skipped) = read_events_lossy(&path);
+    let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
+    let strands = projection::project_strands(&events, include_hidden);
+    let out = build_orient(&strands, include_hidden, limit.unwrap_or(10), max_offset);
+
+    if format == Some("json") {
+        println!("{}", serde_json::to_string(&out).expect("serialize"));
+    } else {
+        println!(
+            "journal: max_offset {} | {} active | {} closed (tasktree list)",
+            out.max_offset,
+            out.active.len(),
+            out.closed_count
+        );
+        for s in &out.active {
+            let type_info = s
+                .strand_type
+                .as_deref()
+                .map(|t| format!(" [{}]", t))
+                .unwrap_or_default();
+            println!("  {}{}  {} entries", s.id, type_info, s.entries);
+            println!("    {}", s.summary);
+            if s.entries > 1 {
+                println!("    last: {}", s.last_entry);
+            }
+            println!("    catch-up: {}", s.catch_up);
+        }
+        if out.active.is_empty() {
+            println!("(no active strands) — start one: tasktree add \"<summary>\"");
+        }
+        println!("remind: {}", out.remind);
+    }
+
+    if skipped > 0 {
+        eprintln!("[tasktree] WARNING: {} corrupted lines skipped", skipped);
+        std::process::exit(2);
+    }
+    eprintln!("[tasktree] orient: {:.0?}", started.elapsed());
+    Ok(())
+}
+
 fn cmd_agent_context(format_json: Option<&str>, include_hidden: bool) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
@@ -2484,6 +2610,8 @@ fn main() {
         Commands::Export { out } => cmd_export(out),
 
         Commands::Tree { id, format } => cmd_tree(id, format.as_deref()),
+
+        Commands::Orient { format, include_hidden, limit } => cmd_orient(format.as_deref(), *include_hidden, *limit),
 
         Commands::AgentContext { format, include_hidden } => cmd_agent_context(format.as_deref(), *include_hidden),
 
@@ -3055,6 +3183,66 @@ fn create_strand(content: &str) -> String {
         assert!(err.contains("tasktree append --id"));
         // The suggested command must carry the actual content, not echo the id
         assert!(err.contains(&format!("--id {} \"[observed] finding\"", id)));
+    }
+
+    // ── orient ──
+
+    #[test]
+    fn orient_menu_shows_active_folds_closed() {
+        let _env = setup();
+        let open_id = create_strand("open line of work");
+        let done_id = create_strand("finished line");
+        cmd_append(Some("[done] wrapped up"), None, false, false, None, Some(&done_id), None, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let max_offset = events.last().map(|(o, _)| *o).unwrap();
+        let strands = projection::project_strands(&events, false);
+        let out = build_orient(&strands, false, 10, max_offset);
+
+        assert_eq!(out.max_offset, max_offset);
+        assert_eq!(out.active.len(), 1);
+        assert_eq!(out.closed_count, 1);
+        let entry = &out.active[0];
+        assert_eq!(entry.id, shorten(&open_id));
+        assert_eq!(entry.summary, "open line of work");
+        // Catch-up command is copy-paste runnable and anchored on the
+        // strand's own last_offset (ADR-0003).
+        assert_eq!(
+            entry.catch_up,
+            format!("tasktree timeline --since-offset {} --links {}", entry.last_offset, shorten(&open_id))
+        );
+        assert!(out.remind.contains("checkpoint"));
+    }
+
+    #[test]
+    fn orient_limit_keeps_most_recent() {
+        let _env = setup();
+        let older = create_strand("older line");
+        let newer = create_strand("newer line");
+        cmd_append(Some("touched again"), None, false, false, None, Some(&older), None, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_orient(&strands, false, 1, events.last().map(|(o, _)| *o).unwrap());
+
+        assert_eq!(out.active.len(), 1);
+        // `older` was touched last, so it outranks `newer` in the menu.
+        assert_eq!(out.active[0].id, shorten(&older));
+        let _ = newer;
+    }
+
+    #[test]
+    fn orient_is_pure_read() {
+        let _env = setup();
+        create_strand("a line");
+        let path = ensure_journal().unwrap();
+        let before = std::fs::read(&path).unwrap();
+        cmd_orient(None, false, None).unwrap();
+        cmd_orient(Some("json"), true, Some(3)).unwrap();
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(before, after, "orient must never write to the journal");
     }
 
     #[test]
