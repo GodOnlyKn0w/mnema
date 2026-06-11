@@ -156,6 +156,17 @@ Examples:
   echo \"new strand title\" | tasktree append --stdin --new
   tasktree append --file note.md --id 0000019dd34b --provenance '{\"producer\":\"pi\",\"model\":\"gpt-5\"}'
 
+Markers (optional bracket prefix on the first line):
+  judgment     [decision] [constraint] [friction] [fixed] [lesson] [insight]
+  observation  [observed] [check] [progress] [deliverable]
+  planning     [deadline] <text> by=YYYY-MM-DD   (or by=<RFC3339>)
+  structure    [covers] [guide] [skill] [task] [session]
+  closing      [done] [verified] [cancelled] [failed] [merged] [ended]
+               [dispatched] [registered]
+  system       [checkpoint] [hidden] [waiting:human] [grill]
+  Unknown [m...]/[c...]/[f...]/[v...]/[d...]/[e...]/[r...] prefixes are
+  rejected to catch typos; other bracket text passes through as content.
+
 Provenance:
   --provenance <JSON>  Optional structured metadata. Must be a JSON
                        object. Stored on the LogAppended event, not in
@@ -440,6 +451,8 @@ Output per active strand:
 After orienting:
   continue a line   tasktree append --id <ID> \"[decision] ...\"
   new matter        tasktree add \"<summary>\"
+  matter concluded  tasktree append --id <ID> \"[done] <how it ended>\"
+                    ([cancelled] or [failed] are alternatives)
   before anything irreversible
                     tasktree checkpoint --id <ID> --action \"<what and why>\"
 
@@ -1904,7 +1917,11 @@ fn cmd_checkpoint(
         strand.log.iter().collect()
     };
 
-
+    // Run diagnostics on the pre-append events (checkpoint itself is not a
+    // diagnostic target; re-reading after append would be equivalent here).
+    let raw_events: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+    let diags = run_journal_diagnostics(&raw_events, chrono::Utc::now());
+    let diag_count = diags.len();
 
     if format_json {
         println!(
@@ -1919,6 +1936,7 @@ fn cmd_checkpoint(
                 "action": action,
                 "append_id": append_id,
                 "journal_appended": true,
+                "diagnostics_count": diag_count,
             })
         );
     } else {
@@ -1942,6 +1960,9 @@ fn cmd_checkpoint(
                 .map(|a| format!(" [{}]", &a[..12]))
                 .unwrap_or_default();
             println!("  [{}]{} {}", &entry.ts[..19], id_str, entry.content);
+        }
+        if diag_count > 0 {
+            println!("diagnostics: {} warning(s) — run tasktree doctor journal", diag_count);
         }
     }
 
@@ -2245,7 +2266,7 @@ fn cmd_timeline(
 
 /// Orient remind line: the whole operating loop in one line (ADR-0001:
 /// the rules travel with the orientation, the weave-in pointer stays thin).
-const ORIENT_REMIND: &str = "continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | before irreversible → checkpoint --id <ID> --action \"<why>\" | more → tasktree --help";
+const ORIENT_REMIND: &str = "continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | matter concluded → append --id <ID> \"[done] ...\" | before irreversible → checkpoint --id <ID> --action \"<why>\" | more → tasktree --help";
 
 /// Pure projection for orient. Never touches the journal (ADR-0003: orient
 /// stays pure-read; the catch-up cursor is each strand's own last_offset).
@@ -3497,6 +3518,7 @@ fn create_strand(content: &str) -> String {
             format!("tasktree timeline --since-offset {} --links {}", entry.last_offset, shorten(&open_id))
         );
         assert!(out.remind.contains("checkpoint"));
+        assert!(out.remind.contains("matter concluded"), "remind must carry the closing segment");
     }
 
     #[test]
@@ -4012,6 +4034,34 @@ fn create_strand(content: &str) -> String {
     }
 
     // ── checkpoint ──
+
+    #[test]
+    fn checkpoint_diagnostics_scar_fires_on_overdue_deadline() {
+        // Strands with an overdue [deadline] must produce a W068 diagnostic.
+        // Checkpoint runs diagnostics internally; this test verifies that the
+        // same journal state run_journal_diagnostics sees is non-empty, which
+        // is what drives the scar line printed by cmd_checkpoint.
+        let _env = setup();
+        let id = create_strand("deadline work");
+        cmd_append(
+            Some("[deadline] finish rollout by=2000-01-01"),
+            None, false, false, None, Some(&id), None, None,
+        ).unwrap();
+
+        // cmd_checkpoint must succeed (overdue deadline is a warning, not fatal).
+        let result = cmd_checkpoint(Some(&id), "checkpoint before close", None, false, false, None);
+        assert!(result.is_ok(), "checkpoint must succeed even with overdue deadline: {:?}", result);
+
+        // Confirm the journal state produces a W068 — the same data checkpoint uses.
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        assert!(
+            diags.iter().any(|(c, _)| *c == "W068"),
+            "expected W068 diagnostic for overdue deadline, got {:?}", diags
+        );
+    }
 
     #[test]
     fn checkpoint_explicit_id_appends_structured_entry() {
@@ -4637,6 +4687,30 @@ fn create_strand(content: &str) -> String {
             }
             _ => panic!("expected LogAppended"),
         }
+    }
+
+    #[test]
+    fn append_help_markers_are_writable() {
+        // Every marker listed in the Append after_help must be accepted by
+        // validate_lifecycle_marker, keeping help text honest forever.
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let append_help = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "append")
+            .and_then(|s| s.get_after_help())
+            .map(|h| h.to_string())
+            .expect("append subcommand must have after_help");
+        let markers = extract_bracket_markers(&append_help);
+        assert!(!markers.is_empty(), "markers section must list at least one marker");
+        let mut failures: Vec<String> = Vec::new();
+        for marker in &markers {
+            let test_content = format!("{} x", marker);
+            if let Err(e) = validate_lifecycle_marker(&test_content) {
+                failures.push(format!("{}: {}", marker, e));
+            }
+        }
+        assert!(failures.is_empty(), "markers in append help rejected by validate_lifecycle_marker:\n{}", failures.join("\n"));
     }
 
     #[test]
