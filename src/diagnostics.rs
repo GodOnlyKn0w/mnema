@@ -146,6 +146,11 @@ timeline（TimelineOutput）：
   ※ timeline[] 每元素：journal_offset / ts / strand_id /
     strand_type / kind / ts_skew
 
+add / find: id / status / result（result = 卡片，find 只有 id）
+hide / unhide: strand_id / status / noop /
+  active_count / closed_count / hidden_count / result（卡片）
+link: source_id / target_id / edge_type / status /
+  result.source / result.target（卡片）
 卡片/result 形态见 tasktree explain card"#,
     },
     TopicInfo {
@@ -160,6 +165,7 @@ timeline（TimelineOutput）：
   --format json     机器输出唯一正典（explain --json 是兼容快捷）
   --provenance      写命令的出处标注
   --tail <N>        只限显示、不改账，对任何目标可用
+  --edge-type       link 的边类型（--type 是 deprecated 别名）
 
 JSON 命名法：
   复数名词 = 数组（events / matches / strands / active / timeline）

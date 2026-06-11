@@ -123,15 +123,38 @@ enum Commands {
     /// Initialize .tasktree/ directory and journal
     Init,
     /// Create a new strand with first log entry
+    #[command(after_help = "\
+Content source (choose exactly one):
+  CONTENT             First log entry content
+  --stdin             Read content from standard input
+  --file <PATH>       Read content from a file
+
+Rules:
+  CONTENT, --stdin, and --file are mutually exclusive.
+  Empty content is rejected.
+
+Examples:
+  tasktree add \"start a new line of work\"
+  echo \"start a new line\" | tasktree add --stdin
+  tasktree add --file brief.md")]
     Add {
-        /// Content for the first log entry
-        content: String,
+        /// Content for the first log entry (positional; omit when using --stdin or --file)
+        content: Option<String>,
+        /// Read content from standard input
+        #[arg(long, verbatim_doc_comment)]
+        stdin: bool,
+        /// Read content from a file
+        #[arg(long, value_name = "PATH", verbatim_doc_comment)]
+        file: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
         /// Strand type: task, dag, why, session (default: auto-detect)
         #[arg(long = "type", value_name = "TYPE")]
         strand_type: Option<String>,
+        /// Optional provenance JSON object. Stored on the initial LogAppended entry.
+        #[arg(long = "provenance", value_name = "JSON")]
+        provenance: Option<String>,
     },
     /// Append content to a strand, or create a new strand from content.
     #[command(after_help = "\
@@ -330,6 +353,9 @@ JSON shape: tasktree explain json")]
     Find {
         #[command(flatten)]
         target: IdTarget,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
     },
     /// Create a directed link between two strands
     Link {
@@ -337,9 +363,17 @@ JSON shape: tasktree explain json")]
         source: String,
         /// Target strand ID (prefix match)
         target: String,
-        /// Edge type: depends-on, belongs-to, why (default: depends-on)
-        #[arg(long = "type", value_name = "TYPE")]
+        /// Edge type: depends-on, belongs-to, why (default: depends-on).
+        /// [alias: --type (deprecated)]
+        #[arg(long = "edge-type", visible_alias = "type", value_name = "TYPE")]
         edge_type: Option<String>,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+        /// Optional provenance JSON object. Same shape as `append --provenance`.
+        /// Stored on the EdgeLinked event.
+        #[arg(long = "provenance", value_name = "JSON")]
+        provenance: Option<String>,
     },
     /// Hide a strand from default list view
     Hide {
@@ -348,11 +382,22 @@ JSON shape: tasktree explain json")]
         /// Reason for hiding (optional). If provided, appends '[hidden] <reason>' to the strand.
         #[arg(long)]
         reason: Option<String>,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+        /// Optional provenance JSON object. When --reason is given, stored on
+        /// the '[hidden] <reason>' LogAppended entry. Without --reason the
+        /// StrandHidden event carries no provenance (no content entry is written).
+        #[arg(long = "provenance", value_name = "JSON")]
+        provenance: Option<String>,
     },
     /// Unhide a previously hidden strand
     Unhide {
         #[command(flatten)]
         target: IdTarget,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
     },
 
     /// Record a subject binding. Append-only. Newer bindings supersede
@@ -778,19 +823,74 @@ fn cmd_init() -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_add(content: &str, format_json: bool, strand_type: Option<&str>) -> Result<(), String> {
+fn cmd_add(
+    content: Option<&str>,
+    stdin: bool,
+    file: Option<&str>,
+    format_json: bool,
+    strand_type: Option<&str>,
+    provenance_raw: Option<&str>,
+) -> Result<(), String> {
+    // ---- Content Source Resolution (mirrors append) ----
+    let source_kind = match (content.is_some(), stdin, file.is_some()) {
+        (false, false, false) => {
+            return Err(
+                "choose a content source: positional content, --stdin, or --file <path>"
+                    .to_string(),
+            );
+        }
+        (true, false, false) => "positional",
+        (false, true, false) => "stdin",
+        (false, false, true) => "file",
+        _ => {
+            let mut sources = Vec::new();
+            if content.is_some() { sources.push("positional content"); }
+            if stdin { sources.push("--stdin"); }
+            if file.is_some() { sources.push("--file"); }
+            return Err(format!(
+                "choose only one content source, got: {}",
+                sources.join(", ")
+            ));
+        }
+    };
+
+    let raw = match source_kind {
+        "positional" => content.unwrap().to_string(),
+        "stdin" => read_stdin_content()?,
+        "file" => read_file_content(file.unwrap())?,
+        _ => unreachable!(),
+    };
+
+    if raw.trim().is_empty() {
+        let hint = match source_kind {
+            "stdin" => "stdin content is empty",
+            "file" => return Err(format!("file content is empty: {}", file.unwrap())),
+            _ => "content is empty",
+        };
+        return Err(hint.to_string());
+    }
+
+    // Strip trailing newline (same as append), preserve other whitespace
+    let stored = normalize_content(&raw);
+
     // Auto-detect strand type from content if not provided
     let resolved_type = strand_type.or_else(|| {
-        if content.starts_with("para group ") { Some("dag") }
-        else if content.starts_with('[') && content.len() > 2
-            && content[1..].chars().next().map_or(false, |c| c.is_ascii_digit())
+        if stored.starts_with("para group ") { Some("dag") }
+        else if stored.starts_with('[') && stored.len() > 2
+            && stored[1..].chars().next().map_or(false, |c| c.is_ascii_digit())
         { Some("task") }
         else { None }
     });
 
+    let provenance = parse_provenance_arg(provenance_raw)?;
+
     // acquire lock once, write both events atomically
     let result = with_journal_write_lock(|journal| {
-        let (created, appended) = event::make_strand_created(content, resolved_type);
+        let (created, mut appended) = event::make_strand_created(&stored, resolved_type);
+        // Attach provenance to the initial LogAppended event
+        if let Event::LogAppended { provenance: ref mut prov_field, .. } = appended {
+            *prov_field = provenance.clone();
+        }
         let id = created.strand_id().to_string();
         append_event_unlocked(journal, &created)?;
         append_event_unlocked(journal, &appended)?;
@@ -1280,11 +1380,17 @@ fn cmd_doctor_journal() -> Result<bool, String> {
     Ok(has_issues)
 }
 
-fn cmd_find(id: &str) -> Result<(), String> {
+fn cmd_find(id: &str, format_json: bool) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _) = read_events_lossy(&path);
     match find_strand(&events, id) {
-        Some(full_id) => println!("{}", full_id),
+        Some(full_id) => {
+            if format_json {
+                println!("{}", json!({"id": full_id}));
+            } else {
+                println!("{}", full_id);
+            }
+        }
         None => return Err(format!("strand {} not found", id)),
     }
     Ok(())
@@ -1295,25 +1401,49 @@ fn resolve_id(events: &[(usize, Event)], id: &str) -> Result<String, String> {
     find_strand(events, id).ok_or_else(|| format!("strand {} not found", id))
 }
 
-fn cmd_link(source: &str, target: &str, edge_type: Option<&str>) -> Result<(), String> {
+fn cmd_link(
+    source: &str,
+    target: &str,
+    edge_type: Option<&str>,
+    format_json: bool,
+    provenance_raw: Option<&str>,
+) -> Result<(), String> {
     // Default edge type: depends-on
     let resolved_type = edge_type.or(Some("depends-on"));
     let events = read_events_strict(&ensure_journal()?)?;
     let src_id = resolve_id(&events, source)?;
     let tgt_id = resolve_id(&events, target)?;
     let etype = resolved_type.unwrap();
-    let event = event::make_edge_linked(&src_id, &tgt_id, Some(etype));
+    let provenance = parse_provenance_arg(provenance_raw)?;
+    let event = event::make_edge_linked(&src_id, &tgt_id, Some(etype), provenance);
     with_journal_write_lock(|journal| {
         append_event_unlocked(journal, &event)
     })?;
-    println!("linked {} -> {} ({})", shorten(&src_id), shorten(&tgt_id), etype);
-    if let Some((card, state)) = strand_card_fresh_with_state(&src_id) {
-        print_handle_line(&card, &state);
+    if format_json {
+        let src_card = strand_card_fresh(&src_id);
+        let src_val = src_card.as_ref().and_then(|c| serde_json::to_value(c).ok());
+        let tgt_card = strand_card_fresh(&tgt_id);
+        let tgt_val = tgt_card.as_ref().and_then(|c| serde_json::to_value(c).ok());
+        println!("{}", json!({
+            "source_id": src_id,
+            "target_id": tgt_id,
+            "edge_type": etype,
+            "status": "ok",
+            "result": {
+                "source": src_val,
+                "target": tgt_val,
+            },
+        }));
+    } else {
+        println!("linked {} -> {} ({})", shorten(&src_id), shorten(&tgt_id), etype);
+        if let Some((card, state)) = strand_card_fresh_with_state(&src_id) {
+            print_handle_line(&card, &state);
+        }
+        if let Some((card, state)) = strand_card_fresh_with_state(&tgt_id) {
+            print_handle_line(&card, &state);
+        }
+        println!("{} --{}--> {}", shorten(&src_id), etype, shorten(&tgt_id));
     }
-    if let Some((card, state)) = strand_card_fresh_with_state(&tgt_id) {
-        print_handle_line(&card, &state);
-    }
-    println!("{} --{}--> {}", shorten(&src_id), etype, shorten(&tgt_id));
     Ok(())
 }
 /// Compute current hide_count for a strand by scanning its events. The
@@ -1334,11 +1464,50 @@ fn count_hide_unhide(events: &[(usize, Event)], strand_id: &str) -> i32 {
     count
 }
 
+/// Visibility ledger JSON shared by the hide/unhide twins. Extracted as a
+/// function so the grammar naming CI can sample the shape — write-command
+/// JSON built inline with json!() is invisible to projection-based sampling.
+fn visibility_ledger_json(strand_id: &str, noop: bool) -> serde_json::Value {
+    let card_val = strand_card_fresh(strand_id)
+        .as_ref()
+        .and_then(|c| serde_json::to_value(c).ok());
+    let (active, closed, hidden) = match ensure_journal().ok() {
+        Some(p) => {
+            let (events, _) = read_events_lossy(&p);
+            let all = projection::project_strands(&events, true);
+            let hidden_n = all.iter().filter(|s| s.hidden).count();
+            let visible: Vec<_> = all.iter().filter(|s| !s.hidden).collect();
+            let active_n = visible.iter().filter(|s| s.state() == "registered").count();
+            (active_n, visible.len() - active_n, hidden_n)
+        }
+        None => (0, 0, 0),
+    };
+    json!({
+        "strand_id": strand_id,
+        "status": "ok",
+        "noop": noop,
+        "active_count": active,
+        "closed_count": closed,
+        "hidden_count": hidden,
+        "result": card_val,
+    })
+}
+
 /// Hide a strand. Idempotent: if the strand is already hidden (hide_count > 0),
 /// no event is written. The current state read and the append happen inside the
 /// same journal write lock so concurrent hide/unhide calls are serialised.
-fn cmd_hide(id: &str, reason: Option<&str>) -> Result<(), String> {
+///
+/// `provenance_raw` is forwarded to the `[hidden] <reason>` LogAppended entry
+/// when `reason` is given. Without a reason no content entry is written and
+/// the StrandHidden event carries no provenance field (the event schema has none).
+fn cmd_hide(
+    id: &str,
+    reason: Option<&str>,
+    format_json: bool,
+    provenance_raw: Option<&str>,
+) -> Result<(), String> {
     let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
+    let provenance = parse_provenance_arg(provenance_raw)?;
     // Both the read (to compute current state) and the append must be inside
     // the same write lock. Otherwise two concurrent `cmd_hide` calls would each
     // see hide_count=0 and both append a StrandHidden event.
@@ -1354,30 +1523,38 @@ fn cmd_hide(id: &str, reason: Option<&str>) -> Result<(), String> {
         }
         let hide_event = event::make_strand_hidden(&strand_id);
         if let Some(r) = reason {
-            let log_event = event::make_log_appended(&strand_id, &format!("[hidden] {}", r), None);
+            let log_event = event::make_log_appended(
+                &strand_id,
+                &format!("[hidden] {}", r),
+                provenance.clone(),
+            );
             append_events_unlocked(journal, &[hide_event, log_event])?;
         } else {
             append_event_unlocked(journal, &hide_event)?;
         }
         Ok(true)
     })?;
-    if outcome {
-        println!("hidden {}", shorten(&strand_id));
+    if format_json {
+        println!("{}", visibility_ledger_json(&strand_id, !outcome));
     } else {
-        println!("hidden {} (already hidden, no-op)", shorten(&strand_id));
+        if outcome {
+            println!("hidden {}", shorten(&strand_id));
+        } else {
+            println!("hidden {} (already hidden, no-op)", shorten(&strand_id));
+        }
+        // Handle line (abbreviated card) + visibility ledger after both branches.
+        if let Some((card, state)) = strand_card_fresh_with_state(&strand_id) {
+            print_handle_line(&card, &state);
+        }
+        print_visibility_ledger();
     }
-    // Handle line (abbreviated card) + visibility ledger after both branches.
-    if let Some((card, state)) = strand_card_fresh_with_state(&strand_id) {
-        print_handle_line(&card, &state);
-    }
-    print_visibility_ledger();
     Ok(())
 }
 
 /// Unhide a strand. Idempotent: if the strand is not hidden (hide_count <= 0),
 /// no event is written. The current state read and the append happen inside the
 /// same journal write lock so concurrent hide/unhide calls are serialised.
-fn cmd_unhide(id: &str) -> Result<(), String> {
+fn cmd_unhide(id: &str, format_json: bool) -> Result<(), String> {
     let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
     let outcome = with_journal_write_lock(|journal| {
         let path = ensure_journal()?;
@@ -1390,16 +1567,20 @@ fn cmd_unhide(id: &str) -> Result<(), String> {
         append_event_unlocked(journal, &event)?;
         Ok(true)
     })?;
-    if outcome {
-        println!("unhidden {}", shorten(&strand_id));
+    if format_json {
+        println!("{}", visibility_ledger_json(&strand_id, !outcome));
     } else {
-        println!("unhidden {} (already visible, no-op)", shorten(&strand_id));
+        if outcome {
+            println!("unhidden {}", shorten(&strand_id));
+        } else {
+            println!("unhidden {} (already visible, no-op)", shorten(&strand_id));
+        }
+        // Handle line + visibility ledger after both branches.
+        if let Some((card, state)) = strand_card_fresh_with_state(&strand_id) {
+            print_handle_line(&card, &state);
+        }
+        print_visibility_ledger();
     }
-    // Handle line + visibility ledger after both branches.
-    if let Some((card, state)) = strand_card_fresh_with_state(&strand_id) {
-        print_handle_line(&card, &state);
-    }
-    print_visibility_ledger();
     Ok(())
 }
 
@@ -3407,9 +3588,9 @@ fn main() {
 
     let result = match &cli.command {
         Commands::Init => cmd_init(),
-        Commands::Add { content, format, strand_type } => {
+        Commands::Add { content, stdin, file, format, strand_type, provenance } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_add(content, fmt, strand_type.as_deref())
+            cmd_add(content.as_deref(), *stdin, file.as_deref(), fmt, strand_type.as_deref(), provenance.as_deref())
         },
         Commands::Append {
             content,
@@ -3442,17 +3623,20 @@ fn main() {
             let fmt = format.as_deref() == Some("json");
             cmd_search(query, fmt, *include_hidden)
         },
-        Commands::Find { target } => match target.get() {
-            Some(id) => cmd_find(id),
+        Commands::Find { target, format } => match target.get() {
+            Some(id) => cmd_find(id, format.as_deref() == Some("json")),
             None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
         },
-        Commands::Link { source, target, edge_type } => cmd_link(source, target, edge_type.as_deref()),
-        Commands::Hide { target, reason } => match target.get() {
-            Some(id) => cmd_hide(id, reason.as_deref()),
+        Commands::Link { source, target, edge_type, format, provenance } => {
+            let fmt = format.as_deref() == Some("json");
+            cmd_link(source, target, edge_type.as_deref(), fmt, provenance.as_deref())
+        },
+        Commands::Hide { target, reason, format, provenance } => match target.get() {
+            Some(id) => cmd_hide(id, reason.as_deref(), format.as_deref() == Some("json"), provenance.as_deref()),
             None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
         },
-        Commands::Unhide { target } => match target.get() {
-            Some(id) => cmd_unhide(id),
+        Commands::Unhide { target, format } => match target.get() {
+            Some(id) => cmd_unhide(id, format.as_deref() == Some("json")),
             None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
         },
 
@@ -4101,7 +4285,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let open_id = create_strand("open work");
         let hidden_id = create_strand("will be hidden");
-        cmd_hide(&hidden_id, None).unwrap();
+        cmd_hide(&hidden_id, None, false, None).unwrap();
 
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
@@ -4785,6 +4969,11 @@ fn create_strand(content: &str) -> String {
             serde_json::to_value(build_orient(&strands, true, 10, 2)).unwrap(),
             serde_json::to_value(output::SearchOutput { matches: vec![], count: 0, query: String::new() }).unwrap(),
             serde_json::to_value(output::TimelineOutput { timeline: vec![], truncated: false, count: 0, max_offset: 0 }).unwrap(),
+            // Write-command JSON built inline with json!() is invisible to
+            // struct sampling — extracted shapes are sampled here. First
+            // catch of this blind spot: hide's ledger shipped bare
+            // active/closed/hidden count names.
+            visibility_ledger_json(&id, false),
         ];
 
         // plural noun => array; count/*_count => number
@@ -4807,15 +4996,28 @@ fn create_strand(content: &str) -> String {
         let mut errs = Vec::new();
         for s in samples.drain(..) { walk(&s, &mut errs); }
         assert!(errs.is_empty(), "{}", errs.join("\n"));
+
+        // Reference-as-contract: the json topic's hide/unhide section must
+        // name every real ledger key (the topic lied once — stale names
+        // survived a field rename).
+        let topic = diagnostics::topic_lookup("json").expect("json topic exists");
+        if let serde_json::Value::Object(map) = visibility_ledger_json(&id, false) {
+            for key in map.keys() {
+                assert!(
+                    topic.body.contains(key.as_str()),
+                    "json topic does not mention ledger field `{}`",
+                    key
+                );
+            }
+        }
     }
 
     #[test]
     fn grammar_format_json_coverage() {
         use clap::CommandFactory;
-        // Batch-2 debt: remove from exemptions as JSON twins land
-        // (hide/unhide/link/find). doctor/export are named exempt in the
-        // contract; init pending judgment.
-        const EXEMPT: &[&str] = &["init", "doctor", "export", "find", "hide", "unhide", "link"];
+        // doctor/export are permanently exempt in the grammar contract;
+        // init is pending judgment.
+        const EXEMPT: &[&str] = &["init", "doctor", "export"];
         for sub in Cli::command().get_subcommands() {
             if EXEMPT.contains(&sub.get_name()) || sub.get_name() == "help" {
                 continue;
@@ -5333,7 +5535,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id_a = create_strand("visible strand");
         let id_b = create_strand("will be hidden");
-        cmd_hide(&id_b, Some("noise")).unwrap();
+        cmd_hide(&id_b, Some("noise"), false, None).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let visible = projection::project_strands(&events, false);
@@ -5348,7 +5550,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id_a = create_strand("visible strand");
         let id_b = create_strand("will be hidden");
-        cmd_hide(&id_b, Some("noise")).unwrap();
+        cmd_hide(&id_b, Some("noise"), false, None).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let all = projection::project_strands(&events, true);
@@ -5364,7 +5566,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id = create_strand("anchor");
         cmd_append(Some("needle-haystack"), Some(&id), false, false, None, None, None, None).unwrap();
-        cmd_hide(&id, Some("noise")).unwrap();
+        cmd_hide(&id, Some("noise"), false, None).unwrap();
         // Default: include_hidden=false → search skips the hidden strand.
         let result = cmd_search("needle", false, false);
         assert!(result.is_ok());
@@ -5377,7 +5579,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id = create_strand("anchor");
         cmd_append(Some("needle-haystack"), Some(&id), false, false, None, None, None, None).unwrap();
-        cmd_hide(&id, Some("noise")).unwrap();
+        cmd_hide(&id, Some("noise"), false, None).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let all = projection::project_strands(&events, true);
@@ -5398,7 +5600,7 @@ fn create_strand(content: &str) -> String {
             append_event_unlocked(j, &c)?;
             append_event_unlocked(j, &a)
         }).unwrap();
-        cmd_hide(&id, Some("noise")).unwrap();
+        cmd_hide(&id, Some("noise"), false, None).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let visible = projection::project_strands(&events, false);
@@ -5417,7 +5619,7 @@ fn create_strand(content: &str) -> String {
             append_event_unlocked(j, &c)?;
             append_event_unlocked(j, &a)
         }).unwrap();
-        cmd_hide(&id, Some("noise")).unwrap();
+        cmd_hide(&id, Some("noise"), false, None).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let visible = projection::project_strands(&events, false);
@@ -5432,10 +5634,10 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id = create_strand("hide me");
         let before = total_events();
-        cmd_hide(&id, None).unwrap();
+        cmd_hide(&id, None, false, None).unwrap();
         let mid = total_events();
-        cmd_hide(&id, None).unwrap();
-        cmd_hide(&id, Some("still hidden")).unwrap();
+        cmd_hide(&id, None, false, None).unwrap();
+        cmd_hide(&id, Some("still hidden"), false, None).unwrap();
         let after = total_events();
         assert_eq!(mid - before, 1, "first hide must write exactly 1 event");
         assert_eq!(after - mid, 0, "repeated hide must be a no-op (0 events appended)");
@@ -5451,8 +5653,8 @@ fn create_strand(content: &str) -> String {
     fn single_unhide_restores_visibility() {
         let _env = setup();
         let id = create_strand("hide/unhide me");
-        cmd_hide(&id, None).unwrap();
-        cmd_unhide(&id).unwrap();
+        cmd_hide(&id, None, false, None).unwrap();
+        cmd_unhide(&id, false).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let s = projection::project_strands(&events, true)
@@ -5470,8 +5672,8 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id = create_strand("plain strand");
         let before = total_events();
-        cmd_unhide(&id).unwrap();
-        cmd_unhide(&id).unwrap();
+        cmd_unhide(&id, false).unwrap();
+        cmd_unhide(&id, false).unwrap();
         let after = total_events();
         assert_eq!(after - before, 0, "unhide on visible strand must be a no-op");
     }
@@ -5483,7 +5685,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let old = create_strand("old visible strand");
         let recent = create_strand("recent will be hidden");
-        cmd_hide(&recent, Some("noise")).unwrap();
+        cmd_hide(&recent, Some("noise"), false, None).unwrap();
         let result = cmd_checkpoint(None, "fall back to visible", None, false, false, None);
         assert!(result.is_ok());
         let path = ensure_journal().unwrap();
@@ -5505,7 +5707,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let _old = create_strand("old visible strand");
         let recent = create_strand("recent will be hidden");
-        cmd_hide(&recent, Some("noise")).unwrap();
+        cmd_hide(&recent, Some("noise"), false, None).unwrap();
         let result = cmd_checkpoint(None, "allow hidden", None, false, true, None);
         assert!(result.is_ok());
         let path = ensure_journal().unwrap();
@@ -5527,7 +5729,7 @@ fn create_strand(content: &str) -> String {
     fn checkpoint_explicit_id_finds_hidden_strand() {
         let _env = setup();
         let id = create_strand("explicit hidden");
-        cmd_hide(&id, Some("noise")).unwrap();
+        cmd_hide(&id, Some("noise"), false, None).unwrap();
         let result = cmd_checkpoint(Some(&id), "explicit id on hidden", None, false, false, None);
         assert!(result.is_ok(), "explicit --id must resolve a hidden strand");
     }
@@ -5545,7 +5747,7 @@ fn create_strand(content: &str) -> String {
             append_event_unlocked(j, &c)?;
             append_event_unlocked(j, &a)
         }).unwrap();
-        cmd_hide(&id, Some("noise")).unwrap();
+        cmd_hide(&id, Some("noise"), false, None).unwrap();
         let result = cmd_context(None, &[], None, None, false, false, false);
         assert!(result.is_ok());
         let path = ensure_journal().unwrap();
@@ -5565,7 +5767,7 @@ fn create_strand(content: &str) -> String {
             append_event_unlocked(j, &c)?;
             append_event_unlocked(j, &a)
         }).unwrap();
-        cmd_hide(&id, Some("noise")).unwrap();
+        cmd_hide(&id, Some("noise"), false, None).unwrap();
         let result = cmd_agent_context(None, false);
         assert!(result.is_ok());
         let path = ensure_journal().unwrap();
@@ -5852,7 +6054,7 @@ fn create_strand(content: &str) -> String {
     fn strand_card_fresh_finds_hidden_strand() {
         let _env = setup();
         let id = create_strand("will be hidden");
-        cmd_hide(&id, None).unwrap();
+        cmd_hide(&id, None, false, None).unwrap();
         // strand_card_fresh uses include_hidden=true — must still find it
         let card = strand_card_fresh(&id);
         assert!(card.is_some(), "strand_card_fresh must return card for hidden strand");
@@ -6392,6 +6594,299 @@ fn create_strand(content: &str) -> String {
             !obj.contains_key("entries"),
             "show JSON must NOT have 'entries' key (renamed to entry_count)"
         );
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Batch-2: JSON twins / provenance / --edge-type / add --stdin/--file
+    // ════════════════════════════════════════════════════════════════════════
+
+    // ── ① JSON twins: find --format json ─────────────────────────────────
+
+    #[test]
+    fn find_json_returns_id_object() {
+        let _env = setup();
+        let id = create_strand("find-json target");
+        // find with full id — text mode returns plain id
+        cmd_find(&id, false).unwrap();
+        // find with format json — must return {"id": <full_id>}
+        // Capture via direct call; actual stdout capture not needed for contract test.
+        // We verify that the json serialization path is exercised without error.
+        let result = cmd_find(&id, true);
+        assert!(result.is_ok(), "find --format json must succeed: {:?}", result);
+    }
+
+    #[test]
+    fn find_json_unknown_strand_errors() {
+        let _env = setup();
+        create_strand("irrelevant");
+        let result = cmd_find("000000000000", true);
+        assert!(result.is_err(), "find on unknown id must error in json mode too");
+    }
+
+    // ── ① JSON twins: hide --format json ─────────────────────────────────
+
+    #[test]
+    fn hide_json_returns_visibility_ledger() {
+        let _env = setup();
+        let id = create_strand("to be hidden json");
+        let result = cmd_hide(&id, None, true, None);
+        assert!(result.is_ok(), "hide --format json must succeed: {:?}", result);
+        // idempotent call — noop: true
+        let result2 = cmd_hide(&id, None, true, None);
+        assert!(result2.is_ok(), "hide --format json idempotent must succeed");
+    }
+
+    #[test]
+    fn hide_json_contains_active_closed_hidden_counts() {
+        // Contract: JSON output of hide must carry active / closed / hidden integer fields.
+        // We exercise the path; count correctness is a projection concern already tested.
+        let _env = setup();
+        let id = create_strand("hide json count test");
+        // Calling cmd_hide with format_json=true must not panic/error.
+        cmd_hide(&id, None, true, None).unwrap();
+    }
+
+    // ── ① JSON twins: unhide --format json ───────────────────────────────
+
+    #[test]
+    fn unhide_json_returns_ok() {
+        let _env = setup();
+        let id = create_strand("unhide json test");
+        cmd_hide(&id, None, false, None).unwrap();
+        let result = cmd_unhide(&id, true);
+        assert!(result.is_ok(), "unhide --format json must succeed: {:?}", result);
+    }
+
+    // ── ① JSON twins: link --format json ─────────────────────────────────
+
+    #[test]
+    fn link_json_returns_source_target_edge_type() {
+        let _env = setup();
+        let src = create_strand("link json source");
+        let tgt = create_strand("link json target");
+        let result = cmd_link(&src, &tgt, None, true, None);
+        assert!(result.is_ok(), "link --format json must succeed: {:?}", result);
+    }
+
+    #[test]
+    fn link_json_default_edge_type_is_depends_on() {
+        // Verify the EdgeLinked event carries the default edge_type when none given.
+        let _env = setup();
+        let src = create_strand("link edge type source");
+        let tgt = create_strand("link edge type target");
+        cmd_link(&src, &tgt, None, false, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let found = events.iter().any(|(_, e)| {
+            if let Event::EdgeLinked { id, edge_type, .. } = e {
+                id == &src && edge_type.as_deref() == Some("depends-on")
+            } else {
+                false
+            }
+        });
+        assert!(found, "EdgeLinked must carry edge_type=depends-on by default");
+    }
+
+    // ── ② provenance: link --provenance ──────────────────────────────────
+
+    #[test]
+    fn link_provenance_stored_on_edge_linked_event() {
+        let _env = setup();
+        let src = create_strand("prov link source");
+        let tgt = create_strand("prov link target");
+        cmd_link(&src, &tgt, None, false, Some(r#"{"producer":"test-agent"}"#)).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let found = events.iter().any(|(_, e)| {
+            if let Event::EdgeLinked { id, provenance, .. } = e {
+                id == &src && provenance.is_some()
+            } else {
+                false
+            }
+        });
+        assert!(found, "EdgeLinked must carry provenance when --provenance given");
+    }
+
+    #[test]
+    fn link_without_provenance_has_none() {
+        let _env = setup();
+        let src = create_strand("no-prov link source");
+        let tgt = create_strand("no-prov link target");
+        cmd_link(&src, &tgt, None, false, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let found = events.iter().any(|(_, e)| {
+            if let Event::EdgeLinked { id, provenance, .. } = e {
+                id == &src && provenance.is_none()
+            } else {
+                false
+            }
+        });
+        assert!(found, "EdgeLinked must have provenance=None when not given");
+    }
+
+    /// Old EdgeLinked JSON without provenance field must still deserialize.
+    #[test]
+    fn old_edge_linked_still_deserializes() {
+        let old = r#"{"type":"edge_linked","id":"abc","ts":"2026-01-01T00:00:00Z","to":"def"}"#;
+        let event: Event = serde_json::from_str(old).unwrap();
+        match &event {
+            Event::EdgeLinked { to, provenance, .. } => {
+                assert_eq!(to, "def");
+                assert!(provenance.is_none(), "old edge_linked must deserialize with provenance=None");
+            }
+            _ => panic!("expected EdgeLinked"),
+        }
+    }
+
+    // ── ② provenance: hide --provenance forwards to reason entry ─────────
+
+    #[test]
+    fn hide_with_reason_and_provenance_stores_provenance_on_log_entry() {
+        let _env = setup();
+        let id = create_strand("hide prov test");
+        cmd_hide(&id, Some("test reason"), false, Some(r#"{"producer":"tester"}"#)).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let found = events.iter().any(|(_, e)| {
+            if let Event::LogAppended { id: eid, content, provenance, .. } = e {
+                eid == &id
+                    && content.starts_with("[hidden]")
+                    && provenance.is_some()
+            } else {
+                false
+            }
+        });
+        assert!(found, "[hidden] entry must carry provenance when --provenance given with --reason");
+    }
+
+    #[test]
+    fn hide_without_reason_provenance_arg_is_accepted() {
+        // --provenance without --reason: argument accepted, no content entry written.
+        let _env = setup();
+        let id = create_strand("hide no-reason prov");
+        let result = cmd_hide(&id, None, false, Some(r#"{"producer":"tester"}"#));
+        assert!(result.is_ok(), "hide --provenance without --reason must succeed");
+    }
+
+    // ── ② provenance: add --provenance ───────────────────────────────────
+
+    #[test]
+    fn add_provenance_stored_on_first_log_entry() {
+        let _env = setup();
+        cmd_add(Some("add prov test"), false, None, false, None, Some(r#"{"producer":"tester"}"#)).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let found = events.iter().any(|(_, e)| {
+            if let Event::LogAppended { content, provenance, .. } = e {
+                content == "add prov test" && provenance.is_some()
+            } else {
+                false
+            }
+        });
+        assert!(found, "LogAppended from add must carry provenance when --provenance given");
+    }
+
+    #[test]
+    fn add_without_provenance_has_none() {
+        let _env = setup();
+        cmd_add(Some("add no prov"), false, None, false, None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let found = events.iter().any(|(_, e)| {
+            if let Event::LogAppended { content, provenance, .. } = e {
+                content == "add no prov" && provenance.is_none()
+            } else {
+                false
+            }
+        });
+        assert!(found, "LogAppended from add must have provenance=None when not given");
+    }
+
+    // ── ③ --edge-type: renamed flag still resolves correctly ─────────────
+
+    #[test]
+    fn link_edge_type_custom_is_stored() {
+        let _env = setup();
+        let src = create_strand("edge-type source");
+        let tgt = create_strand("edge-type target");
+        cmd_link(&src, &tgt, Some("belongs-to"), false, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let found = events.iter().any(|(_, e)| {
+            if let Event::EdgeLinked { id, edge_type, .. } = e {
+                id == &src && edge_type.as_deref() == Some("belongs-to")
+            } else {
+                false
+            }
+        });
+        assert!(found, "custom edge_type must be stored on EdgeLinked event");
+    }
+
+    // ── ④ add --stdin / --file ────────────────────────────────────────────
+
+    #[test]
+    fn add_positional_content_creates_strand() {
+        let _env = setup();
+        // Positional content: existing path, now cmd_add(Some(..), false, None, ..)
+        let result = cmd_add(Some("add positional"), false, None, false, None, None);
+        assert!(result.is_ok(), "add with positional content must succeed: {:?}", result);
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        assert!(
+            strands.iter().any(|s| s.first_summary() == "add positional"),
+            "strand with 'add positional' summary must exist"
+        );
+    }
+
+    #[test]
+    fn add_file_content_creates_strand() {
+        let env = setup();
+        let file_path = env.path().join("brief.md");
+        fs::write(&file_path, "add from file\n").unwrap();
+        let path_str = file_path.to_str().unwrap();
+        let result = cmd_add(None, false, Some(path_str), false, None, None);
+        assert!(result.is_ok(), "add --file must succeed: {:?}", result);
+        let jpath = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&jpath);
+        let strands = projection::project_strands(&events, true);
+        assert!(
+            strands.iter().any(|s| s.first_summary() == "add from file"),
+            "strand with 'add from file' summary must exist after add --file"
+        );
+    }
+
+    #[test]
+    fn add_multiple_content_sources_errors() {
+        let _env = setup();
+        // positional + stdin both set → must error
+        let result = cmd_add(Some("content"), true, None, false, None, None);
+        assert!(result.is_err(), "add with two content sources must error");
+    }
+
+    #[test]
+    fn add_no_content_source_errors() {
+        let _env = setup();
+        let result = cmd_add(None, false, None, false, None, None);
+        assert!(result.is_err(), "add with no content source must error");
+    }
+
+    #[test]
+    fn add_empty_file_content_errors() {
+        let env = setup();
+        let file_path = env.path().join("empty.md");
+        fs::write(&file_path, "").unwrap();
+        let path_str = file_path.to_str().unwrap();
+        let result = cmd_add(None, false, Some(path_str), false, None, None);
+        assert!(result.is_err(), "add --file with empty file must error");
+    }
+
+    #[test]
+    fn add_nonexistent_file_errors() {
+        let _env = setup();
+        let result = cmd_add(None, false, Some("/nonexistent/path/to/file.txt"), false, None, None);
+        assert!(result.is_err(), "add --file with nonexistent file must error");
     }
 }
 

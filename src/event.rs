@@ -74,6 +74,10 @@ pub enum Event {
         to: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         edge_type: Option<String>,
+        /// Optional structured provenance. Same contract as on `LogAppended`.
+        /// New in this schema; older journals simply omit the field.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        provenance: Option<serde_json::Value>,
     },
     #[serde(rename = "edge_unlinked")]
     EdgeUnlinked {
@@ -235,12 +239,18 @@ pub fn make_checkpoint(
     }
 }
 
-pub fn make_edge_linked(source_id: &str, target_id: &str, edge_type: Option<&str>) -> Event {
+pub fn make_edge_linked(
+    source_id: &str,
+    target_id: &str,
+    edge_type: Option<&str>,
+    provenance: Option<serde_json::Value>,
+) -> Event {
     Event::EdgeLinked {
         id: source_id.to_string(),
         ts: now(),
         to: target_id.to_string(),
         edge_type: edge_type.map(|s| s.to_string()),
+        provenance,
     }
 }
 
