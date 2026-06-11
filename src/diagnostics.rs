@@ -22,6 +22,151 @@
 
 use serde::Serialize;
 
+// ── Topic catalog (L3 encyclopaedia layer) ──────────────────
+
+/// One encyclopaedia topic reachable via `tasktree explain <name>`.
+/// Namespace rule: topic names are all-lowercase; diagnostic codes begin
+/// with an uppercase letter (W/E). The two namespaces are mechanically
+/// disjoint — no case-folding is applied to topics.
+pub struct TopicInfo {
+    pub name: &'static str,
+    pub title: &'static str,
+    pub body: &'static str,
+}
+
+static TOPICS: &[TopicInfo] = &[
+    TopicInfo {
+        name: "card",
+        title: "卡片——统一输出文法单元",
+        body: r#"卡片是所有写命令写后回显、orient 菜单、--format json result 字段共享的形态。
+
+文本格式（四行结构）：
+  把手行   <id> [type] | <n> entries | <state>
+  首条     <summary>（第一条日志，概述这条线的主题）
+  last:    <last_entry>（最近一条日志；entries>1 时出现）
+  疤痕行   仅当命令产生 W 码时追加（如 W070、W071）
+
+语义：
+  回显即预付的验证——写命令输出卡片是为了让调用方
+  无需再跑 show/orient 确认写入是否生效。
+  所有写命令（append/add/checkpoint/bind/hide/unhide/link）
+  都在写后回显受影响线的卡片。
+
+JSON 形态（OrientStrand，写命令 result 字段 / orient active[]）：
+  - id:          缩短的 strand id（12 字符十六进制前缀）
+  - strand_type: 线的类型，可为 null（task/dag/why/session）
+  - entries:     日志条目计数
+  - summary:     第一条日志截断到 70 字符
+  - last_entry:  最近一条日志截断到 70 字符
+  - last_offset: 该线最近事件的 journal offset
+  - catch_up:    就绪的 timeline 追赶命令
+
+JSON shape 索引见 tasktree explain json"#,
+    },
+    TopicInfo {
+        name: "markers",
+        title: "Marker 词表——append 条目前缀规范",
+        body: r#"Marker 是 append 条目首行的方括号前缀，机器可解析。
+
+judgment:    [decision] [constraint] [friction] [fixed] [lesson] [insight]
+observation: [observed] [check] [progress] [deliverable]
+planning:    [deadline] <text> by=YYYY-MM-DD  （或 by=<RFC3339>）
+structure:   [covers] [guide] [skill] [task] [session]
+closing:     [done] [verified] [cancelled] [failed] [merged] [ended]
+             [dispatched] [registered]
+system:      [checkpoint] [hidden] [waiting:human] [grill]
+
+Marker 语义（一行一条）：
+  [decision]    已做的决定
+  [constraint]  必须遵守的约束
+  [friction]    阻力 / 未解决的问题
+  [fixed]       已修复的问题（通常跟在 [friction] 后）
+  [lesson]      学到的教训
+  [insight]     洞见
+  [observed]    观察到的事实
+  [check]       检查点记录
+  [progress]    进展
+  [deliverable] 交付物
+  [deadline]    截止日期（by= 字段必须是日期或 RFC3339）
+  [done]        事情完成（关闭线的收尾标记）
+  [checkpoint]  由 tasktree checkpoint 命令写入，勿手动添加
+  [waiting:human] 等待人工响应
+
+未知的 [m.../c.../f.../v.../d.../e.../r...] 前缀被拒绝（防止拼写错误）；
+其他方括号文本作为内容透传。"#,
+    },
+    TopicInfo {
+        name: "retry",
+        title: "重试语义——哪些命令可盲目重试",
+        body: r#"命令重试安全性（基于源码核实）：
+
+可盲目重试（幂等）：
+  hide     已隐藏时显式 no-op（不写事件，输出"already hidden"）
+  unhide   已可见时显式 no-op（不写事件，输出"already visible"）
+  init     已存在时跳过文件创建；总是打印初始化消息；目录幂等
+
+不可盲目重试（有副作用）：
+  bind     append-only；重复调用写入新的 SubjectBound 事件；
+           后绑定对 current 投影生效（覆盖语义在投影层，
+           不在写入层）；超时后先 current 查账再决定
+  append   重复写入新的 LogAppended 事件；
+           超时后先 show/orient 查账再决定
+  add      每次创建新 strand；不检查内容重复
+  checkpoint  重复写入新的 checkpoint 条目；
+              超时后先 timeline 查账再决定
+  link     重复写入新的 EdgeLinked 事件；投影去重与否取决于下游
+
+通用原则：超时后先查账（show/orient/timeline），
+确认事件是否已写入，再决定是否重试。"#,
+    },
+    TopicInfo {
+        name: "json",
+        title: "JSON 形态索引——各读命令 --format json 的顶层字段",
+        body: r#"show（StrandDetailOutput）：
+  id / hidden / summary / entries / status /
+  state_marker / state_offset / edges / strand_branch / events
+  ※ entries 是计数，日志行在 events[].entry
+
+list（StrandListOutput.strands[]，StrandListItem）：
+  id / entries / first_summary / last_summary / hidden /
+  strand_type / edges / status / state_marker / state_offset /
+  last_entry_ts / last_entry_offset
+
+orient（OrientOutput）：
+  max_offset / active / closed_count / hidden_count / remind
+  ※ active[] 是卡片数组（OrientStrand）见 tasktree explain card
+
+search（SearchOutput）：
+  matches / count / query
+  ※ matches[] 每元素：strand_id / content / strand_type / hidden
+
+timeline（TimelineOutput）：
+  timeline / truncated / count / max_offset
+  ※ timeline[] 每元素：journal_offset / ts / strand_id /
+    strand_type / kind / ts_skew
+
+卡片/result 形态见 tasktree explain card"#,
+    },
+];
+
+/// Exact lowercase match (topic names are always all-lowercase).
+pub fn topic_lookup(name: &str) -> Option<&'static TopicInfo> {
+    TOPICS.iter().find(|t| t.name == name)
+}
+
+pub fn topics() -> &'static [TopicInfo] {
+    TOPICS
+}
+
+/// Serialisable output for a topic explain hit.
+#[derive(Debug, Serialize)]
+pub struct ExplainTopicOutput {
+    pub ok: bool,
+    pub topic: String,
+    pub title: String,
+    pub body: String,
+}
+
 // ── Data model ──────────────────────────────────────────────
 
 /// Fixed recovery kinds. Each diagnostic must use one of these.
@@ -246,45 +391,73 @@ pub fn catalog() -> &'static [DiagnosticInfo] {
     CATALOG
 }
 
-pub fn cmd_explain(code: &str, format_json: bool) -> String {
-    match lookup(code) {
-        Some(info) => {
-            let output = ExplainSuccessOutput::from(info);
-            if format_json {
-                serde_json::to_string_pretty(&output).unwrap_or_else(|e| {
-                    format!(r#"{{"ok":false,"code":"{}","error":"serialization failed: {}"}}"#, code, e)
-                })
-            } else {
-                format!(
-                    "{}\n  severity: {}\n  category: {}\n  title: {}\n\n  finding: {}\n\n  impact: {}\n\n  recovery:\n    kind: {:?}\n    command: {}\n    executable: {}\n    requires_human: {}\n\n  producer: {}",
-                    info.code,
-                    match info.severity { Severity::Error => "error", Severity::Warning => "warning" },
-                    info.category,
-                    info.title,
-                    info.finding,
-                    info.impact,
-                    info.recovery.kind,
-                    info.recovery.command_str,
-                    info.recovery.executable,
-                    info.recovery.requires_human,
-                    info.producer,
-                )
-            }
-        }
-        None => {
-            let output = ExplainErrorOutput {
-                ok: false,
-                code: code.to_string(),
-                error: "unknown diagnostic code".to_string(),
-            };
-            if format_json {
-                serde_json::to_string_pretty(&output).unwrap_or_else(|e| {
-                    format!(r#"{{"ok":false,"code":"{}","error":"serialization failed: {}"}}"#, code, e)
-                })
-            } else {
-                format!("unknown diagnostic code: {}", code)
-            }
-        }
+/// Routing order:
+///   1. Diagnostic code lookup (case-insensitive; W062, w062, etc.)
+///   2. Topic lookup (input lowercased; card, markers, retry, json)
+///   3. Error with available-topics list and diagnostic-code hint
+pub fn cmd_explain(input: &str, format_json: bool) -> String {
+    // ── 1. Diagnostic code (case-insensitive) ──────────────
+    if let Some(info) = lookup(input) {
+        let output = ExplainSuccessOutput::from(info);
+        return if format_json {
+            serde_json::to_string_pretty(&output).unwrap_or_else(|e| {
+                format!(r#"{{"ok":false,"code":"{}","error":"serialization failed: {}"}}"#, input, e)
+            })
+        } else {
+            format!(
+                "{}\n  severity: {}\n  category: {}\n  title: {}\n\n  finding: {}\n\n  impact: {}\n\n  recovery:\n    kind: {:?}\n    command: {}\n    executable: {}\n    requires_human: {}\n\n  producer: {}",
+                info.code,
+                match info.severity { Severity::Error => "error", Severity::Warning => "warning" },
+                info.category,
+                info.title,
+                info.finding,
+                info.impact,
+                info.recovery.kind,
+                info.recovery.command_str,
+                info.recovery.executable,
+                info.recovery.requires_human,
+                info.producer,
+            )
+        };
+    }
+
+    // ── 2. Topic (exact lowercase match) ───────────────────
+    let lowered = input.to_lowercase();
+    if let Some(topic) = topic_lookup(&lowered) {
+        let output = ExplainTopicOutput {
+            ok: true,
+            topic: topic.name.to_string(),
+            title: topic.title.to_string(),
+            body: topic.body.to_string(),
+        };
+        return if format_json {
+            serde_json::to_string_pretty(&output).unwrap_or_else(|e| {
+                format!(r#"{{"ok":false,"topic":"{}","error":"serialization failed: {}"}}"#, input, e)
+            })
+        } else {
+            format!("{}\n\n{}", topic.title, topic.body)
+        };
+    }
+
+    // ── 3. Unknown ─────────────────────────────────────────
+    let available_topics: Vec<&str> = TOPICS.iter().map(|t| t.name).collect();
+    if format_json {
+        let error_output = serde_json::json!({
+            "ok": false,
+            "input": input,
+            "error": format!("unknown code or topic: {}", input),
+            "available_topics": available_topics,
+            "hint": "diagnostic codes: tasktree explain W062 etc",
+        });
+        serde_json::to_string_pretty(&error_output).unwrap_or_else(|_| {
+            format!(r#"{{"ok":false,"input":"{}","error":"unknown code or topic"}}"#, input)
+        })
+    } else {
+        format!(
+            "unknown code or topic: {}\n  topics: {}\n  diagnostic codes: tasktree explain W062 etc",
+            input,
+            available_topics.join(", "),
+        )
     }
 }
 
@@ -334,7 +507,8 @@ mod tests {
         let output = cmd_explain("E999", true);
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         assert_eq!(v["ok"], false);
-        assert_eq!(v["error"], "unknown diagnostic code");
+        // new error key is "error" with updated message
+        assert!(v["error"].as_str().unwrap_or("").contains("unknown code or topic"));
     }
 
     #[test]
@@ -347,7 +521,174 @@ mod tests {
     #[test]
     fn test_explain_text_unknown() {
         let output = cmd_explain("XYZ", false);
-        assert!(output.contains("unknown diagnostic code"));
+        assert!(output.contains("unknown code or topic"));
+    }
+
+    // ── Topic catalog tests ─────────────────────────────────
+
+    #[test]
+    fn explain_topics_resolve() {
+        // All four topics resolve in both text and JSON modes.
+        for name in ["card", "markers", "retry", "json"] {
+            let text = cmd_explain(name, false);
+            assert!(!text.contains("unknown code or topic"), "topic {} failed text: {}", name, text);
+
+            let json_out = cmd_explain(name, true);
+            let v: serde_json::Value = serde_json::from_str(&json_out)
+                .unwrap_or_else(|_| panic!("topic {} json not valid JSON: {}", name, json_out));
+            assert_eq!(v["ok"], true, "topic {} json ok must be true", name);
+            assert_eq!(v["topic"], name, "topic {} json name mismatch", name);
+            assert!(v["title"].as_str().is_some(), "topic {} missing title", name);
+            assert!(v["body"].as_str().is_some(), "topic {} missing body", name);
+        }
+
+        // Unknown input shows error AND lists "card" (no dead ends)
+        let err_text = cmd_explain("nonexistent_topic", false);
+        assert!(err_text.contains("unknown code or topic"), "expected error in: {}", err_text);
+        assert!(err_text.contains("card"), "error must list available topics, missing 'card': {}", err_text);
+
+        let err_json = cmd_explain("nonexistent_topic", true);
+        let v: serde_json::Value = serde_json::from_str(&err_json).expect("error JSON must be valid");
+        assert_eq!(v["ok"], false);
+        // available_topics array must contain "card"
+        let topics_arr = v["available_topics"].as_array().expect("available_topics must be array");
+        assert!(topics_arr.iter().any(|x| x == "card"), "available_topics must include card");
+    }
+
+    #[test]
+    fn explain_code_lookup_unchanged() {
+        // W062/w062 still route to diagnostic catalog (not topic lookup).
+        let upper = cmd_explain("W062", true);
+        let v: serde_json::Value = serde_json::from_str(&upper).expect("valid JSON");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["code"], "W062");
+
+        let lower = cmd_explain("w062", true);
+        let v2: serde_json::Value = serde_json::from_str(&lower).expect("valid JSON");
+        assert_eq!(v2["ok"], true);
+        assert_eq!(v2["code"], "W062");
+    }
+
+    #[test]
+    fn topic_body_line_count_at_most_30() {
+        for topic in topics() {
+            let lines = topic.body.lines().count();
+            assert!(
+                lines <= 30,
+                "topic '{}' body has {} lines (max 30)",
+                topic.name,
+                lines
+            );
+        }
+    }
+
+    #[test]
+    fn card_topic_fields_match_serialization() {
+        // Build a minimal OrientStrand and check its serde keys all appear in
+        // the card topic body.
+        use crate::output::OrientStrand;
+        let sample = OrientStrand {
+            id: "abc123".to_string(),
+            strand_type: None,
+            entries: 1,
+            summary: "test".to_string(),
+            last_entry: "test".to_string(),
+            last_offset: 0,
+            catch_up: "tasktree timeline --since-offset 0 --links abc123".to_string(),
+        };
+        let v = serde_json::to_value(&sample).expect("serialize OrientStrand");
+        let keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        let topic = topic_lookup("card").expect("card topic must exist");
+        for key in &keys {
+            assert!(
+                topic.body.contains(key.as_str()),
+                "card topic body missing OrientStrand field: {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn json_topic_fields_match_serialization() {
+        use crate::output::{
+            StrandDetailOutput, StrandListItem, OrientOutput,
+            SearchOutput, TimelineOutput,
+        };
+        let topic = topic_lookup("json").expect("json topic must exist");
+
+        // show → StrandDetailOutput
+        let show_sample = StrandDetailOutput {
+            id: "a".to_string(),
+            hidden: false,
+            summary: "s".to_string(),
+            entries: 0,
+            status: "registered".to_string(),
+            state_marker: None,
+            state_offset: 0,
+            edges: vec![],
+            strand_branch: None,
+            events: vec![],
+        };
+        let v = serde_json::to_value(&show_sample).expect("serialize StrandDetailOutput");
+        for key in v.as_object().unwrap().keys() {
+            assert!(topic.body.contains(key.as_str()), "json topic missing show field: {}", key);
+        }
+
+        // list → StrandListItem
+        let list_sample = StrandListItem {
+            id: "a".to_string(),
+            entries: 0,
+            first_summary: "s".to_string(),
+            last_summary: "s".to_string(),
+            hidden: false,
+            strand_type: None,
+            edges: vec![],
+            status: "registered".to_string(),
+            state_marker: None,
+            state_offset: 0,
+            last_entry_ts: "".to_string(),
+            last_entry_offset: 0,
+        };
+        let v = serde_json::to_value(&list_sample).expect("serialize StrandListItem");
+        for key in v.as_object().unwrap().keys() {
+            assert!(topic.body.contains(key.as_str()), "json topic missing list field: {}", key);
+        }
+
+        // orient → OrientOutput (check top-level fields)
+        let orient_sample = OrientOutput {
+            max_offset: 0,
+            active: vec![],
+            closed_count: 0,
+            hidden_count: 0,
+            remind: "".to_string(),
+        };
+        let v = serde_json::to_value(&orient_sample).expect("serialize OrientOutput");
+        for key in v.as_object().unwrap().keys() {
+            assert!(topic.body.contains(key.as_str()), "json topic missing orient field: {}", key);
+        }
+
+        // search → SearchOutput
+        let search_sample = SearchOutput {
+            matches: vec![],
+            count: 0,
+            query: "q".to_string(),
+        };
+        let v = serde_json::to_value(&search_sample).expect("serialize SearchOutput");
+        for key in v.as_object().unwrap().keys() {
+            assert!(topic.body.contains(key.as_str()), "json topic missing search field: {}", key);
+        }
+
+        // timeline → TimelineOutput
+        let timeline_sample = TimelineOutput {
+            timeline: vec![],
+            truncated: false,
+            count: 0,
+            max_offset: 0,
+        };
+        let v = serde_json::to_value(&timeline_sample).expect("serialize TimelineOutput");
+        for key in v.as_object().unwrap().keys() {
+            assert!(topic.body.contains(key.as_str()), "json topic missing timeline field: {}", key);
+        }
     }
 
     #[test]

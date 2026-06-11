@@ -87,7 +87,7 @@ Commands:
   checkpoint  Record context before an irreversible or state-closing action
   current     Project the latest effective subject binding
   doctor      Diagnose journal integrity
-  explain     Explain a diagnostic code
+  explain     Explain a diagnostic code or topic (card, markers, retry, json)
   export      Export journal as standalone audit artifact
   list        List strands
   show        Show a strand
@@ -157,15 +157,7 @@ Examples:
   tasktree append --file note.md --id 0000019dd34b --provenance '{\"producer\":\"pi\",\"model\":\"gpt-5\"}'
 
 Markers (optional bracket prefix on the first line):
-  judgment     [decision] [constraint] [friction] [fixed] [lesson] [insight]
-  observation  [observed] [check] [progress] [deliverable]
-  planning     [deadline] <text> by=YYYY-MM-DD   (or by=<RFC3339>)
-  structure    [covers] [guide] [skill] [task] [session]
-  closing      [done] [verified] [cancelled] [failed] [merged] [ended]
-               [dispatched] [registered]
-  system       [checkpoint] [hidden] [waiting:human] [grill]
-  Unknown [m...]/[c...]/[f...]/[v...]/[d...]/[e...]/[r...] prefixes are
-  rejected to catch typos; other bracket text passes through as content.
+  Marker vocabulary: tasktree explain markers
 
 Provenance:
   --provenance <JSON>  Optional structured metadata. Must be a JSON
@@ -235,7 +227,8 @@ Exit codes:
 Rules:
   --tail only limits displayed output.
   --tail does not change observed_entries_before_append.
-  checkpoint failed means hard stop.")]
+  checkpoint failed means hard stop.
+JSON shape: tasktree explain json")]
     Checkpoint {
         /// Strand ID (prefix match). Prefer explicit --id for commits and destructive actions.
         #[arg(long = "id", value_name = "STRAND_ID")]
@@ -396,9 +389,32 @@ Rules:
         format: Option<String>,
     },
 
-    /// Explain a diagnostic code (E/W codes from lifecycle, health, arch-boundary)
+    /// Explain a diagnostic code or encyclopaedia topic
+    ///
+    /// Namespace rule: diagnostic codes begin with an uppercase letter
+    /// (W062, E053); topics are all-lowercase (card, markers, retry, json).
+    /// The two namespaces are mechanically disjoint.
+    #[command(after_help = "\
+Namespaces:
+  Diagnostic codes   uppercase-initial: W062, E053, w062 (case-insensitive)
+  Topics             all-lowercase:     card, markers, retry, json
+
+Topics:
+  card      卡片：统一输出文法单元（格式、字段、回显语义）
+  markers   Marker 词表（[decision]、[done] 等前缀规范）
+  retry     重试语义：哪些命令可盲目重试
+  json      JSON 形态索引：各读命令 --format json 的顶层字段
+
+Examples:
+  tasktree explain W062
+  tasktree explain card
+  tasktree explain json
+  tasktree explain markers
+  tasktree explain retry
+  tasktree explain W062 --format json
+  tasktree explain card --json")]
     Explain {
-        /// Diagnostic code to explain (e.g. W068, W062)
+        /// Diagnostic code (e.g. W068) or topic name (e.g. card)
         code: String,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -471,7 +487,8 @@ Closed strands are folded to a count; retrieve with tasktree list.
 Hidden strands are folded to a count; retrieve with tasktree list --all.
 Exit codes:
   0 ok
-  1 journal missing or unreadable")]
+  1 journal missing or unreadable
+JSON shape: tasktree explain json")]
     Orient {
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -3172,11 +3189,12 @@ fn main() {
             let is_json = *json || format.as_deref() == Some("json");
             let output = diagnostics::cmd_explain(code, is_json);
             println!("{}", output);
-            // If the code is known, exit 0; if unknown, exit 1
-            if diagnostics::lookup(code).is_some() {
+            // Exit 0 when code or topic resolves; exit 1 otherwise.
+            let lowered = code.to_lowercase();
+            if diagnostics::lookup(code).is_some() || diagnostics::topic_lookup(&lowered).is_some() {
                 Ok(())
             } else {
-                Err(format!("unknown diagnostic code: {}", code))
+                Err(format!("unknown code or topic: {}", code))
             }
         }
         Commands::Doctor { target } => {
@@ -3956,6 +3974,38 @@ fn create_strand(content: &str) -> String {
         }
         assert!(checked > 10, "expected to find example lines in help text, found {}", checked);
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn help_topic_references_exist() {
+        // "引用即契约": any `tasktree explain <word>` line in after_help where
+        // <word> is all-lowercase must resolve via topic_lookup.
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let mut helps: Vec<String> = Vec::new();
+        if let Some(h) = cmd.get_after_help() { helps.push(h.to_string()); }
+        for sub in cmd.get_subcommands() {
+            if let Some(h) = sub.get_after_help() { helps.push(h.to_string()); }
+        }
+        let mut failures: Vec<String> = Vec::new();
+        for help in &helps {
+            for line in help.lines() {
+                // Match "tasktree explain <word>" where word is all-lowercase
+                if let Some(rest) = line.find("tasktree explain ").map(|i| &line[i + "tasktree explain ".len()..]) {
+                    let word: String = rest.split_whitespace().next().unwrap_or("").chars()
+                        .take_while(|c| c.is_alphabetic() || *c == '_' || *c == '-')
+                        .collect();
+                    if word.is_empty() { continue; }
+                    // Only check all-lowercase words (topic namespace)
+                    if word.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c == '-') {
+                        if diagnostics::topic_lookup(&word).is_none() {
+                            failures.push(format!("help references topic '{}' but topic_lookup returns None", word));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "broken topic references in help text:\n{}", failures.join("\n"));
     }
 
     #[test]
@@ -5121,18 +5171,14 @@ fn create_strand(content: &str) -> String {
 
     #[test]
     fn append_help_markers_are_writable() {
-        // Every marker listed in the Append after_help must be accepted by
-        // validate_lifecycle_marker, keeping help text honest forever.
-        use clap::CommandFactory;
-        let cmd = Cli::command();
-        let append_help = cmd
-            .get_subcommands()
-            .find(|s| s.get_name() == "append")
-            .and_then(|s| s.get_after_help())
-            .map(|h| h.to_string())
-            .expect("append subcommand must have after_help");
-        let markers = extract_bracket_markers(&append_help);
-        assert!(!markers.is_empty(), "markers section must list at least one marker");
+        // The Append after_help now points to `tasktree explain markers` instead
+        // of listing markers inline (L2 slim-down). The contract is now on the
+        // markers topic body: every bracket marker in the body must be accepted
+        // by validate_lifecycle_marker.
+        let topic = diagnostics::topic_lookup("markers")
+            .expect("markers topic must exist");
+        let markers = extract_bracket_markers(topic.body);
+        assert!(!markers.is_empty(), "markers topic body must list at least one marker");
         let mut failures: Vec<String> = Vec::new();
         for marker in &markers {
             let test_content = format!("{} x", marker);
@@ -5140,7 +5186,7 @@ fn create_strand(content: &str) -> String {
                 failures.push(format!("{}: {}", marker, e));
             }
         }
-        assert!(failures.is_empty(), "markers in append help rejected by validate_lifecycle_marker:\n{}", failures.join("\n"));
+        assert!(failures.is_empty(), "markers in topic body rejected by validate_lifecycle_marker:\n{}", failures.join("\n"));
     }
 
     #[test]
