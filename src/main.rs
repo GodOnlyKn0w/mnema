@@ -540,6 +540,11 @@ JSON shape: tasktree explain json")]
         /// Include hidden strands in the result set (default: exclude)
         #[arg(long)]
         include_hidden: bool,
+        /// Disable observation-class folding: expose [progress]/[observed]/[check]
+        /// entries full-text instead of tail-folding. Folding is the default;
+        /// full exposure is an explicit choice (exposure axis, ADR-0002).
+        #[arg(long)]
+        include_observations: bool,
     },
 }
 
@@ -2760,6 +2765,122 @@ fn print_tree_text(node: &tree::TreeNode, depth: usize) {
 // Uses projection::project_strands() directly.
 // See protocols/system-prompt-design.md §三 for rationale.
 
+/// Pairing result for a single LogEntry index: the index of the friction
+/// entry it resolves (when the entry is `[fixed]`), or the index of the
+/// `[fixed]` entry that resolves it (when the entry is `[friction]`).
+/// Used by `pair_frictions` to communicate which entries are paired.
+///
+/// Returned as a bitset: paired_friction_indices + paired_fixed_indices so
+/// callers need only one pass.
+struct FrictionPairing {
+    /// Indices (into the log slice) of [friction] entries that are paired.
+    paired_friction: std::collections::HashSet<usize>,
+    /// Indices (into the log slice) of [fixed] entries that are paired.
+    paired_fixed: std::collections::HashSet<usize>,
+    /// For each paired friction index, the truncated content for the scar line.
+    /// Key: friction log index; Value: "<friction truncated 50> → fixed"
+    scar_content: std::collections::HashMap<usize, String>,
+}
+
+/// Compute friction↔fixed pairing for a strand's log entries.
+///
+/// Rules (deterministic, engine-enforced):
+///   1. Explicit reference: if a `[fixed]` entry's content contains a token
+///      `fixes=<prefix>` (prefix >= 8 hex chars), match the first unpaired
+///      `[friction]` entry in the same log whose `append_id` starts with that
+///      prefix. Explicit wins over proximity.
+///   2. Proximity (stack): if no explicit match, pair the `[fixed]` entry
+///      with the nearest preceding unpaired `[friction]` entry (LIFO stack).
+///   3. `[friction]` entries with no corresponding `[fixed]` remain unpaired
+///      and are exposed full-text (live strand) or folded (closed strand).
+///
+/// This function is pure: it only reads `log`, never writes to the journal.
+fn pair_frictions(log: &[projection::LogEntry]) -> FrictionPairing {
+    use std::collections::{HashMap, HashSet};
+
+    // Stack of unpaired friction indices (LIFO proximity match)
+    let mut friction_stack: Vec<usize> = Vec::new();
+    // append_id prefix → log index, for explicit `fixes=` lookup
+    // We index all friction entries by their append_id so O(1) lookup.
+    let mut friction_by_append_id: Vec<(String, usize)> = Vec::new();
+
+    let mut paired_friction: HashSet<usize> = HashSet::new();
+    let mut paired_fixed: HashSet<usize> = HashSet::new();
+    let mut scar_content: HashMap<usize, String> = HashMap::new();
+
+    // First pass: collect friction indices and their append_ids
+    for (idx, entry) in log.iter().enumerate() {
+        if entry.content.starts_with("[friction]") {
+            if let Some(ref aid) = entry.append_id {
+                if !aid.is_empty() {
+                    friction_by_append_id.push((aid.clone(), idx));
+                }
+            }
+        }
+    }
+
+    // Second pass: process entries in order
+    for (idx, entry) in log.iter().enumerate() {
+        if entry.content.starts_with("[friction]") {
+            friction_stack.push(idx);
+        } else if entry.content.starts_with("[fixed]") {
+            // Try explicit `fixes=<prefix>` first
+            let explicit_match: Option<usize> = {
+                let mut found = None;
+                // Extract fixes= token from content
+                let body = entry.content.trim_start_matches("[fixed]").trim();
+                for token in body.split_whitespace() {
+                    if let Some(prefix) = token.strip_prefix("fixes=") {
+                        if prefix.len() >= 8 {
+                            // Find an unpaired friction with append_id starting with prefix
+                            for (aid, fidx) in &friction_by_append_id {
+                                if aid.starts_with(prefix) && !paired_friction.contains(fidx) {
+                                    found = Some(*fidx);
+                                    break;
+                                }
+                            }
+                        }
+                        break; // only first fixes= token
+                    }
+                }
+                found
+            };
+
+            let target_friction: Option<usize> = if let Some(fidx) = explicit_match {
+                Some(fidx)
+            } else {
+                // Proximity: pop nearest unpaired friction from stack
+                // Walk stack from top to find an unpaired one
+                let mut found = None;
+                for i in (0..friction_stack.len()).rev() {
+                    let fidx = friction_stack[i];
+                    if !paired_friction.contains(&fidx) {
+                        friction_stack.remove(i);
+                        found = Some(fidx);
+                        break;
+                    }
+                }
+                found
+            };
+
+            if let Some(fidx) = target_friction {
+                // Build scar content: friction text truncated at 50 chars → fixed
+                let friction_body = log[fidx].content
+                    .trim_start_matches("[friction]")
+                    .trim();
+                let truncated: String = friction_body.chars().take(50).collect();
+                let scar = format!("{} → fixed", truncated);
+
+                paired_friction.insert(fidx);
+                paired_fixed.insert(idx);
+                scar_content.insert(fidx, scar);
+            }
+        }
+    }
+
+    FrictionPairing { paired_friction, paired_fixed, scar_content }
+}
+
 /// Pure projection for context (testable without stdout capture).
 ///
 /// Exposure axis (scaffolding ADR-0002): what still binds the future is
@@ -2767,12 +2888,16 @@ fn print_tree_text(node: &tree::TreeNode, depth: usize) {
 /// included full-text; on a closed strand they fold into `friction_folded`
 /// (a scar, not a disappearance — retrieve with `show`). `--exclude-friction`
 /// drops them entirely: hiding is an explicit choice, exposure the default.
+/// `include_observations`: when true, [progress]/[observed]/[check] entries are
+/// exposed full-text (tail folding disabled). When false (default), only the most
+/// recent entry per marker type is kept; the rest are counted in `folded_counts`.
 fn build_context_strands(
     strands: &[projection::ProjectedStrand],
     target_type: &str,
     covers: &[String],
     since_offset: Option<usize>,
     exclude_friction: bool,
+    include_observations: bool,
 ) -> Vec<ContextStrandOutput> {
     // Filter strands by type
     let mut matching: Vec<&projection::ProjectedStrand> = strands
@@ -2787,6 +2912,9 @@ fn build_context_strands(
 
     // Build output structures
     let mut output_strands: Vec<ContextStrandOutput> = Vec::new();
+
+    // Observation-class markers subject to tail-folding
+    const OBS_MARKERS: [&str; 3] = ["[progress]", "[observed]", "[check]"];
 
     for strand in &matching {
         // Collect [covers] entries (only entries that START with [covers])
@@ -2810,36 +2938,126 @@ fn build_context_strands(
         let strand_is_live = strand.state() == "registered";
         let mut friction_folded = 0usize;
 
+        // ── A. friction↔fixed pairing (live strands only) ──────────────
+        // On closed strands, all friction folds via friction_folded count; pairing
+        // doesn't affect that (the line is dead regardless).
+        let pairing = if strand_is_live && !exclude_friction {
+            pair_frictions(&strand.log)
+        } else {
+            FrictionPairing {
+                paired_friction: std::collections::HashSet::new(),
+                paired_fixed: std::collections::HashSet::new(),
+                scar_content: std::collections::HashMap::new(),
+            }
+        };
+        let friction_paired = pairing.paired_friction.len();
+
+        // ── B. observation-class tail-folding pre-pass ──────────────────
+        // For each obs marker, find the index of the LAST occurrence in the log
+        // (that is the tail to keep). All earlier occurrences are folded.
+        let mut last_obs_idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        if !include_observations {
+            for (idx, entry) in strand.log.iter().enumerate() {
+                for &om in &OBS_MARKERS {
+                    if entry.content.starts_with(om) {
+                        last_obs_idx.insert(om, idx);
+                    }
+                }
+            }
+        }
+
+        // ── C. Build entry list ─────────────────────────────────────────
+        let mut folded_counts = FoldedCounts::zero();
+
         let entries: Vec<ContextEntryOutput> = strand
             .log
             .iter()
-            .filter(|e| {
+            .enumerate()
+            .filter_map(|(idx, e)| {
+                // ── [friction] handling ────────────────────────────────
                 if e.content.starts_with("[friction]") {
                     if exclude_friction {
-                        return false;
+                        return None;
                     }
                     if !strand_is_live {
-                        // Closed strand: friction no longer binds the
-                        // future — fold to a count.
+                        // Closed strand: fold to count.
                         friction_folded += 1;
-                        return false;
+                        return None;
                     }
-                    return true;
+                    // Live strand: check if paired
+                    if pairing.paired_friction.contains(&idx) {
+                        // Emit scar entry instead of full text
+                        let scar = pairing.scar_content.get(&idx).cloned()
+                            .unwrap_or_else(|| "→ fixed".to_string());
+                        return Some(ContextEntryOutput {
+                            marker: "[friction]".to_string(),
+                            content: scar,
+                            offset: e.offset,
+                            ts: e.ts.clone(),
+                        });
+                    }
+                    // Unpaired friction: expose full text
+                    let (marker, content) = extract_marker(&e.content);
+                    return Some(ContextEntryOutput {
+                        marker: marker.to_string(),
+                        content: content.to_string(),
+                        offset: e.offset,
+                        ts: e.ts.clone(),
+                    });
                 }
-                // Exclude [covers] from body (already in header)
+
+                // ── [fixed] handling ───────────────────────────────────
+                // Paired [fixed] entries are already represented in the scar line
+                // on their friction counterpart; do not emit them separately.
+                if e.content.starts_with("[fixed]") {
+                    if pairing.paired_fixed.contains(&idx) {
+                        return None;
+                    }
+                    // Unpaired [fixed]: expose as normal entry
+                    let (marker, content) = extract_marker(&e.content);
+                    return Some(ContextEntryOutput {
+                        marker: marker.to_string(),
+                        content: content.to_string(),
+                        offset: e.offset,
+                        ts: e.ts.clone(),
+                    });
+                }
+
+                // ── [covers] ───────────────────────────────────────────
+                // Exclude from body (already in header)
                 if e.content.starts_with("[covers]") {
-                    return false;
+                    return None;
                 }
-                true
-            })
-            .map(|e| {
+
+                // ── observation-class tail-folding ─────────────────────
+                if !include_observations {
+                    for &om in &OBS_MARKERS {
+                        if e.content.starts_with(om) {
+                            let tail_idx = last_obs_idx.get(om).copied().unwrap_or(idx);
+                            if idx != tail_idx {
+                                // Not the tail: fold it
+                                match om {
+                                    "[progress]" => folded_counts.progress += 1,
+                                    "[observed]" => folded_counts.observed += 1,
+                                    "[check]"    => folded_counts.check    += 1,
+                                    _ => {}
+                                }
+                                return None;
+                            }
+                            // This IS the tail: fall through to normal emit
+                            break;
+                        }
+                    }
+                }
+
+                // Normal entry
                 let (marker, content) = extract_marker(&e.content);
-                ContextEntryOutput {
+                Some(ContextEntryOutput {
                     marker: marker.to_string(),
                     content: content.to_string(),
                     offset: e.offset,
                     ts: e.ts.clone(),
-                }
+                })
             })
             .collect();
 
@@ -2861,6 +3079,8 @@ fn build_context_strands(
             covers: unique_covers,
             entries,
             friction_folded,
+            friction_paired,
+            folded_counts,
         });
     }
 
@@ -2880,6 +3100,7 @@ fn cmd_context(
     format_json: Option<&str>,
     exclude_friction: bool,
     include_hidden: bool,
+    include_observations: bool,
 ) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
@@ -2889,7 +3110,7 @@ fn cmd_context(
     let is_json = format_json == Some("json");
 
     let output_strands =
-        build_context_strands(&strands, target_type, covers, since_offset, exclude_friction);
+        build_context_strands(&strands, target_type, covers, since_offset, exclude_friction, include_observations);
 
     if is_json {
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
@@ -2916,6 +3137,14 @@ fn cmd_context(
                 println!(
                     "  friction: ×{} (folded — strand closed; tasktree show {})",
                     strand.friction_folded,
+                    shorten(&strand.id)
+                );
+            }
+            if strand.folded_counts.any_folded() {
+                let fc = &strand.folded_counts;
+                println!(
+                    "  folded: progress ×{} | observed ×{} | check ×{}  (tasktree show {})",
+                    fc.progress, fc.observed, fc.check,
                     shorten(&strand.id)
                 );
             }
@@ -2956,6 +3185,23 @@ fn extract_marker(content: &str) -> (&str, &str) {
     }
 }
 
+/// Folded observation-class entry counts. Always serialised (including zeros)
+/// so the output contract is stable — consumers can rely on the field being present.
+#[derive(Debug, serde::Serialize, Clone)]
+struct FoldedCounts {
+    /// [progress] entries folded (tail-1 count; does NOT include the retained tail entry)
+    progress: usize,
+    /// [observed] entries folded (tail-1 count)
+    observed: usize,
+    /// [check] entries folded (tail-1 count)
+    check: usize,
+}
+
+impl FoldedCounts {
+    fn zero() -> Self { FoldedCounts { progress: 0, observed: 0, check: 0 } }
+    fn any_folded(&self) -> bool { self.progress > 0 || self.observed > 0 || self.check > 0 }
+}
+
 #[derive(Debug, serde::Serialize)]
 struct ContextStrandOutput {
     id: String,
@@ -2964,6 +3210,12 @@ struct ContextStrandOutput {
     /// [friction] entries folded away because the strand is closed
     /// (exposure axis: a scar, not a disappearance).
     friction_folded: usize,
+    /// Live-strand friction/fixed pairs that were folded into scar entries.
+    /// Closed strands always have 0 here — their friction folds via friction_folded.
+    friction_paired: usize,
+    /// Observation-class entries folded by default (tail kept, rest counted).
+    /// Three keys are always present even when 0.
+    folded_counts: FoldedCounts,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -3216,8 +3468,8 @@ fn main() {
 
         Commands::AgentContext { format, include_hidden } => cmd_agent_context(format.as_deref(), *include_hidden),
 
-        Commands::Context { context_type, covers, since_offset, format, exclude_friction, include_hidden } => {
-            cmd_context(context_type.as_deref(), &covers, *since_offset, format.as_deref(), *exclude_friction, *include_hidden)
+        Commands::Context { context_type, covers, since_offset, format, exclude_friction, include_hidden, include_observations } => {
+            cmd_context(context_type.as_deref(), &covers, *since_offset, format.as_deref(), *exclude_friction, *include_hidden, *include_observations)
         },
 
         Commands::Bind { subject_type, subject_id, id, stdin, format } => {
@@ -4226,7 +4478,7 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let strands = projection::project_strands(&events, false);
-        let out = build_context_strands(&strands, "prompt-strand", &[], None, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, false, false);
         assert_eq!(out.len(), 1);
         assert!(out[0].entries.iter().any(|e| e.marker == "[friction]"), "live friction must be exposed by default");
         assert_eq!(out[0].friction_folded, 0);
@@ -4241,7 +4493,7 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let strands = projection::project_strands(&events, false);
-        let out = build_context_strands(&strands, "prompt-strand", &[], None, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, false, false);
         assert_eq!(out.len(), 1);
         assert!(out[0].entries.iter().all(|e| e.marker != "[friction]"), "closed-strand friction folds away");
         assert_eq!(out[0].friction_folded, 1, "fold is a scar, not a disappearance");
@@ -4255,10 +4507,202 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let strands = projection::project_strands(&events, false);
-        let out = build_context_strands(&strands, "prompt-strand", &[], None, true);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, true, false);
         assert_eq!(out.len(), 1);
         assert!(out[0].entries.iter().all(|e| e.marker != "[friction]"));
         assert_eq!(out[0].friction_folded, 0, "explicit exclusion is not a fold");
+    }
+
+    // ── Part A: friction↔fixed pairing ──────────────────────────
+
+    #[test]
+    fn context_friction_fixed_pair_produces_scar() {
+        // A single [friction] followed by [fixed] on a live strand:
+        // - scar entry appears (marker=[friction], content contains "→ fixed")
+        // - neither the original friction nor the [fixed] appear as separate entries
+        // - friction_paired == 1
+        let _env = setup();
+        let id = create_prompt_strand("live guidance");
+        cmd_append(Some("[friction] a hole to fill"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[fixed] filled the hole"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, false, false);
+        assert_eq!(out.len(), 1);
+        let entries = &out[0].entries;
+        // scar entry must be present
+        let scar = entries.iter().find(|e| e.marker == "[friction]" && e.content.contains("→ fixed"));
+        assert!(scar.is_some(), "expected scar entry with → fixed, entries: {:?}", entries);
+        // no standalone [fixed] entry
+        assert!(entries.iter().all(|e| e.marker != "[fixed]"), "paired [fixed] must not appear separately");
+        // no unmodified friction entry (scar replaces it)
+        let raw_friction = entries.iter().filter(|e| e.marker == "[friction]").count();
+        assert_eq!(raw_friction, 1, "exactly one [friction] entry (the scar)");
+        let scar_entry = scar.unwrap();
+        assert!(scar_entry.content.contains("a hole to fill"), "scar must include truncated friction text");
+        assert_eq!(out[0].friction_paired, 1);
+    }
+
+    #[test]
+    fn context_two_frictions_one_fixed_proximity_pair() {
+        // Two [friction] entries, one [fixed]: proximity rule pairs the NEAREST
+        // preceding friction (the second one). The first friction remains full-text.
+        let _env = setup();
+        let id = create_prompt_strand("live guidance");
+        cmd_append(Some("[friction] first hole"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[friction] second hole"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[fixed] fixed second"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, false, false);
+        assert_eq!(out.len(), 1);
+        let entries = &out[0].entries;
+        // First friction: still full-text (unpaired)
+        let first_full = entries.iter().find(|e| {
+            e.marker == "[friction]" && e.content.contains("first hole") && !e.content.contains("→ fixed")
+        });
+        assert!(first_full.is_some(), "first friction must remain full-text (unpaired)");
+        // Second friction: scar
+        let scar = entries.iter().find(|e| {
+            e.marker == "[friction]" && e.content.contains("→ fixed")
+        });
+        assert!(scar.is_some(), "second friction must become a scar");
+        assert_eq!(out[0].friction_paired, 1, "only one pair");
+    }
+
+    #[test]
+    fn context_friction_fixed_explicit_fixes_ref() {
+        // [fixed] with fixes=<prefix> pairs with the specified friction, not proximity.
+        // We create: friction_A, friction_B, [fixed fixes=<prefix_of_A>]
+        // Expected: friction_A becomes scar, friction_B stays full-text.
+        let _env = setup();
+        let id = create_prompt_strand("live guidance");
+        // Append friction_A first and capture its append_id
+        cmd_append(Some("[friction] hole alpha"), None, false, false, None, Some(&id), None, None).unwrap();
+        // Append friction_B
+        cmd_append(Some("[friction] hole beta"), None, false, false, None, Some(&id), None, None).unwrap();
+        // Read back to find friction_A's append_id
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let friction_a_append_id = events.iter().rev().find_map(|(_, e)| {
+            if let event::Event::LogAppended { id: eid, content, append_id, .. } = e {
+                if eid == &id && content.contains("hole alpha") {
+                    return append_id.clone();
+                }
+            }
+            None
+        }).expect("friction_A must have append_id");
+        // Use first 8 chars of append_id as the prefix
+        let prefix = &friction_a_append_id[..8.min(friction_a_append_id.len())];
+        let fixed_content = format!("[fixed] resolves first hole fixes={}", prefix);
+        cmd_append(Some(&fixed_content), None, false, false, None, Some(&id), None, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, false, false);
+        assert_eq!(out.len(), 1);
+        let entries = &out[0].entries;
+        // friction_A → scar
+        let scar_a = entries.iter().find(|e| {
+            e.marker == "[friction]" && e.content.contains("hole alpha") && e.content.contains("→ fixed")
+        });
+        assert!(scar_a.is_some(), "friction_A must become scar via explicit fixes= ref; entries: {:?}", entries);
+        // friction_B → full-text (unpaired)
+        let full_b = entries.iter().find(|e| {
+            e.marker == "[friction]" && e.content.contains("hole beta") && !e.content.contains("→ fixed")
+        });
+        assert!(full_b.is_some(), "friction_B must stay full-text (unpaired by explicit ref)");
+        assert_eq!(out[0].friction_paired, 1);
+    }
+
+    #[test]
+    fn context_exclude_friction_also_suppresses_scars() {
+        // --exclude-friction (explicit blindness) must suppress scar entries too.
+        let _env = setup();
+        let id = create_prompt_strand("live guidance");
+        cmd_append(Some("[friction] a hole"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[fixed] filled"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, true, false);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].entries.iter().all(|e| e.marker != "[friction]"),
+            "exclude_friction must suppress scar entries too");
+    }
+
+    // ── Part B: observation-class folding ────────────────────────
+
+    #[test]
+    fn context_observation_folding_tail_kept() {
+        // 3 [progress] + 1 [observed] → folded_counts {progress:2, observed:0, check:0}
+        // (progress tail kept as last entry, observed is itself the tail so count=0)
+        let _env = setup();
+        let id = create_prompt_strand("live guidance");
+        cmd_append(Some("[progress] step 1"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[progress] step 2"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[progress] step 3"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[observed] an observation"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, false, false);
+        assert_eq!(out.len(), 1);
+        let fc = &out[0].folded_counts;
+        assert_eq!(fc.progress, 2, "first 2 progress entries folded, tail kept");
+        assert_eq!(fc.observed, 0, "single observed entry is the tail, not folded");
+        assert_eq!(fc.check, 0);
+        // The tail progress entry must appear in entries
+        let has_tail = out[0].entries.iter().any(|e| {
+            e.marker == "[progress]" && e.content.contains("step 3")
+        });
+        assert!(has_tail, "tail [progress] entry must be visible");
+        // Folded progress entries must NOT appear
+        let visible_progress: Vec<_> = out[0].entries.iter()
+            .filter(|e| e.marker == "[progress]")
+            .collect();
+        assert_eq!(visible_progress.len(), 1, "only tail [progress] visible");
+    }
+
+    #[test]
+    fn context_include_observations_disables_folding() {
+        // --include-observations exposes all entries; folded_counts all 0.
+        let _env = setup();
+        let id = create_prompt_strand("live guidance");
+        cmd_append(Some("[progress] step 1"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[progress] step 2"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[check] checked"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, false, true);
+        assert_eq!(out.len(), 1);
+        let fc = &out[0].folded_counts;
+        assert_eq!(fc.progress, 0, "no folding when include_observations=true");
+        assert_eq!(fc.observed, 0);
+        assert_eq!(fc.check, 0);
+        // All three entries visible
+        let progress_count = out[0].entries.iter().filter(|e| e.marker == "[progress]").count();
+        assert_eq!(progress_count, 2, "both [progress] entries must be visible");
+    }
+
+    #[test]
+    fn context_closed_strand_observation_folding() {
+        // Closed strands also get observation folding (live+closed unified for obs).
+        let _env = setup();
+        let id = create_prompt_strand("closed strand");
+        cmd_append(Some("[progress] step 1"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[progress] step 2"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[done] wrapped"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, false, false);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].folded_counts.progress, 1, "first progress folded on closed strand");
     }
 
     #[test]
@@ -4978,7 +5422,7 @@ fn create_strand(content: &str) -> String {
             append_event_unlocked(j, &a)
         }).unwrap();
         cmd_hide(&id, Some("noise")).unwrap();
-        let result = cmd_context(None, &[], None, None, false, false);
+        let result = cmd_context(None, &[], None, None, false, false, false);
         assert!(result.is_ok());
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
@@ -5202,7 +5646,7 @@ fn create_strand(content: &str) -> String {
         let r = cmd_search("entry", false, false);
         assert!(r.is_ok());
         // context
-        let r = cmd_context(None, &[], None, None, false, false);
+        let r = cmd_context(None, &[], None, None, false, false, false);
         assert!(r.is_ok());
     }
 

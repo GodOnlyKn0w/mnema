@@ -80,7 +80,8 @@ Marker 语义（一行一条）：
   [decision]    已做的决定
   [constraint]  必须遵守的约束
   [friction]    阻力 / 未解决的问题
-  [fixed]       已修复的问题（通常跟在 [friction] 后）
+  [fixed]       已修复的问题；引擎自动与前一条未配对 [friction] 配对（栈式就近）；
+                可用 fixes=<append_id前缀≥8位> 显式指定目标 friction
   [lesson]      学到的教训
   [insight]     洞见
   [observed]    观察到的事实
