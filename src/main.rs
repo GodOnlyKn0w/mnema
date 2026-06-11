@@ -2704,9 +2704,12 @@ const ORIENT_REMIND: &str = "continue → append --id <ID> \"[decision] ...\" | 
 /// Build an OrientStrand card from a projected strand. Identical to the
 /// inline construction in build_orient; extracted so write commands can
 /// call the same logic without duplicating the truncation/shorten rules.
+// Contract: card id is the FULL 24-hex strand id — same width as show/list
+// JSON, so consumers can join across outputs. Display sites shorten at
+// print time; the prefix form stays a valid argument either way.
 fn make_card(s: &projection::ProjectedStrand) -> output::OrientStrand {
     output::OrientStrand {
-        id: shorten(&s.id),
+        id: s.id.clone(),
         strand_type: s.strand_type.clone(),
         entry_count: s.log_count(),
         summary: truncate(s.first_summary(), 70),
@@ -2715,7 +2718,7 @@ fn make_card(s: &projection::ProjectedStrand) -> output::OrientStrand {
         catch_up: format!(
             "tasktree timeline --since-offset {} --links {}",
             s.last_offset(),
-            shorten(&s.id)
+            s.id
         ),
     }
 }
@@ -2778,7 +2781,7 @@ fn print_handle_line(card: &output::OrientStrand, state: &str) {
         .unwrap_or_default();
     eprintln!(
         "  {}{} | {} entries | {}",
-        card.id, type_info, card.entry_count, state
+        shorten(&card.id), type_info, card.entry_count, state
     );
 }
 
@@ -2846,7 +2849,7 @@ fn cmd_orient(format: Option<&str>, include_hidden: bool, limit: Option<usize>) 
                 .as_deref()
                 .map(|t| format!(" [{}]", t))
                 .unwrap_or_default();
-            println!("  {}{}  {} entries", s.id, type_info, s.entry_count);
+            println!("  {}{}  {} entries", shorten(&s.id), type_info, s.entry_count);
             println!("    {}", s.summary);
             if s.entry_count > 1 {
                 println!("    last: {}", s.last_entry);
@@ -4268,13 +4271,13 @@ fn create_strand(content: &str) -> String {
         assert_eq!(out.active.len(), 1);
         assert_eq!(out.closed_count, 1);
         let entry = &out.active[0];
-        assert_eq!(entry.id, shorten(&open_id));
+        assert_eq!(entry.id, open_id);
         assert_eq!(entry.summary, "open line of work");
         // Catch-up command is copy-paste runnable and anchored on the
         // strand's own last_offset (ADR-0003).
         assert_eq!(
             entry.catch_up,
-            format!("tasktree timeline --since-offset {} --links {}", entry.last_offset, shorten(&open_id))
+            format!("tasktree timeline --since-offset {} --links {}", entry.last_offset, open_id)
         );
         assert!(out.remind.contains("checkpoint"));
         assert!(out.remind.contains("matter concluded"), "remind must carry the closing segment");
@@ -4297,17 +4300,15 @@ fn create_strand(content: &str) -> String {
         let out = build_orient(&strands, false, 10, max_offset);
         assert_eq!(out.hidden_count, 1, "hidden strand must appear in hidden_count");
         assert_eq!(out.closed_count, 0, "hidden strand must not inflate closed_count");
-        let open_short = shorten(&open_id);
-        let hidden_short = shorten(&hidden_id);
         let active_ids: Vec<&str> = out.active.iter().map(|s| s.id.as_str()).collect();
-        assert!(active_ids.contains(&open_short.as_str()), "visible strand must be in menu");
-        assert!(!active_ids.contains(&hidden_short.as_str()), "hidden strand absent from menu");
+        assert!(active_ids.contains(&open_id.as_str()), "visible strand must be in menu");
+        assert!(!active_ids.contains(&hidden_id.as_str()), "hidden strand absent from menu");
 
         // include_hidden=true: hidden strand joins the pool; hidden_count=0.
         let out_all = build_orient(&strands, true, 10, max_offset);
         assert_eq!(out_all.hidden_count, 0, "include_hidden=true must yield hidden_count=0");
         let all_ids: Vec<&str> = out_all.active.iter().map(|s| s.id.as_str()).collect();
-        assert!(all_ids.contains(&hidden_short.as_str()), "include_hidden=true puts hidden strand in menu");
+        assert!(all_ids.contains(&hidden_id.as_str()), "include_hidden=true puts hidden strand in menu");
     }
 
     #[test]
@@ -4324,7 +4325,7 @@ fn create_strand(content: &str) -> String {
 
         assert_eq!(out.active.len(), 1);
         // `older` was touched last, so it outranks `newer` in the menu.
-        assert_eq!(out.active[0].id, shorten(&older));
+        assert_eq!(out.active[0].id, older);
         let _ = newer;
     }
 
@@ -4986,6 +4987,14 @@ fn create_strand(content: &str) -> String {
                     }
                     if (k == "count" || k.ends_with("_count")) && !val.is_number() {
                         errs.push(format!("count field `{}` is not a number", k));
+                    }
+                    // id/strand_id are full-width 24-hex handles (join law);
+                    // append_id is a 64-hex content hash, not a strand handle.
+                    if (k == "id" || k == "strand_id") && val.is_string() {
+                        let s = val.as_str().unwrap();
+                        if s.len() != 24 {
+                            errs.push(format!("`{}` is not full-width 24-hex: `{}`", k, s));
+                        }
                     }
                     walk(val, errs);
                 }
@@ -5988,7 +5997,7 @@ fn create_strand(content: &str) -> String {
         let strands = projection::project_strands(&events, true);
         let s = strands.iter().find(|s| s.id == id).expect("strand must exist");
         let card = make_card(s);
-        assert_eq!(card.id, shorten(&id));
+        assert_eq!(card.id, id);
         assert_eq!(card.entry_count, 2);
         assert_eq!(card.summary, truncate(s.first_summary(), 70));
         assert_eq!(card.last_entry, truncate(s.last_summary(), 70));
@@ -6008,7 +6017,7 @@ fn create_strand(content: &str) -> String {
         // truncate(100-char string, 70) → 70 chars + "..." = 73 total
         assert!(card.summary.len() <= 73, "summary must be truncated to 70 chars + ...");
         // id is never truncated: always shorten(full_id) = 12 chars
-        assert_eq!(card.id.len(), 12);
+        assert_eq!(card.id.len(), 24);
     }
 
     // ── card echo: strand_card_fresh / append paths ──
@@ -6045,7 +6054,7 @@ fn create_strand(content: &str) -> String {
         let new_s = strands.iter().find(|s| s.first_summary() == "brand new via --new")
             .expect("new strand must exist");
         let card = strand_card_fresh(&new_s.id).expect("card must be retrievable");
-        assert_eq!(card.id, shorten(&new_s.id));
+        assert_eq!(card.id, new_s.id);
     }
 
     // ── card echo: hide leaves strand retrievable via include_hidden=true ──
@@ -6058,7 +6067,7 @@ fn create_strand(content: &str) -> String {
         // strand_card_fresh uses include_hidden=true — must still find it
         let card = strand_card_fresh(&id);
         assert!(card.is_some(), "strand_card_fresh must return card for hidden strand");
-        assert_eq!(card.unwrap().id, shorten(&id));
+        assert_eq!(card.unwrap().id, id);
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -6104,7 +6113,7 @@ fn create_strand(content: &str) -> String {
         let card = make_card(s);
 
         // id: exactly 12 hex chars, is prefix of full id, contains no '…'
-        assert_eq!(card.id.len(), 12, "card.id must be exactly 12 chars");
+        assert_eq!(card.id.len(), 24, "card.id must be the full 24-hex id");
         assert!(id.starts_with(&card.id), "card.id must be a prefix of the full id");
         assert!(!card.id.contains('\u{2026}') && !card.id.contains("..."),
             "card.id must not contain truncation marker");
@@ -6149,9 +6158,9 @@ fn create_strand(content: &str) -> String {
         assert!(!out.active.is_empty(), "orient must have at least one active strand");
 
         for card in &out.active {
-            // id: 12 chars, prefix of its own full id (look up the strand)
-            assert_eq!(card.id.len(), 12,
-                "orient card.id must be 12 chars, got '{}'", card.id);
+            // id: full 24-hex width (joins against show/list JSON)
+            assert_eq!(card.id.len(), 24,
+                "orient card.id must be the full 24-hex id, got '{}'", card.id);
             // Verify it is a legal prefix: find the projected strand by prefix
             let matched = strands.iter().find(|s| s.id.starts_with(&card.id));
             assert!(matched.is_some(),
@@ -6351,15 +6360,13 @@ fn create_strand(content: &str) -> String {
         assert!(!list_item.id.contains('\u{2026}') && !list_item.id.contains("..."),
             "list JSON: id must not contain truncation marker");
 
-        // orient --format json (build_orient): shorten(id) = 12-char prefix
+        // orient --format json (build_orient): full 24-hex id (joins across outputs)
         let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
         let out = build_orient(&strands, false, 10, max_offset);
-        let orient_card = out.active.iter().find(|c| id.starts_with(&c.id))
+        let orient_card = out.active.iter().find(|c| c.id == id)
             .expect("orient must contain our strand");
-        assert_eq!(orient_card.id, shorten(&id),
-            "orient JSON: id must equal shorten(full_id)");
-        assert_eq!(orient_card.id.len(), 12,
-            "orient JSON: id must be exactly 12 chars");
+        assert_eq!(orient_card.id.len(), 24,
+            "orient JSON: id must be the full 24-hex id");
         assert!(!orient_card.id.contains('\u{2026}') && !orient_card.id.contains("..."),
             "orient JSON: id must not contain truncation marker");
 
@@ -6440,8 +6447,8 @@ fn create_strand(content: &str) -> String {
         let strands = projection::project_strands(&events, true);
         let s = strands.iter().find(|s| s.id == id_a).expect("strand A must exist");
         let card = make_card(s);
-        assert_eq!(card.id, shorten(&id_a),
-            "post-checkpoint card id must be shorten(full_id)");
+        assert_eq!(card.id, id_a,
+            "post-checkpoint card id must be the full id");
         assert!(!card.catch_up.contains('\u{2026}') && !card.catch_up.contains("..."),
             "post-checkpoint catch_up must not be truncated");
         try_parse_example(&card.catch_up)

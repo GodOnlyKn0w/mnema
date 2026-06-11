@@ -171,6 +171,8 @@ JSON 命名法：
   复数名词 = 数组（events / matches / strands / active / timeline）
   计数 = count 或 *_count（entry_count / closed_count / hidden_count）
   自身身份 = id；引用他者 = <noun>_id（如 search 的 strand_id）
+  id / strand_id 一律全宽 24 hex，跨输出可 join
+  （append_id 例外：64 hex 内容哈希，不是 strand 把手）
 
 写命令三件套：写 journal 必收 --provenance、必有 --format json
 孪生、写后回显卡片（见 tasktree explain card）。
