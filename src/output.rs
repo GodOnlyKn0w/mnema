@@ -22,7 +22,7 @@ use crate::projection::ProjectedStrand;
 pub struct OrientStrand {
     pub id: String,
     pub strand_type: Option<String>,
-    pub entries: usize,
+    pub entry_count: usize,
     pub summary: String,
     pub last_entry: String,
     pub last_offset: usize,
@@ -51,7 +51,7 @@ pub struct OrientOutput {
 #[derive(Debug, Serialize)]
 pub struct StrandListItem {
     pub id: String,
-    pub entries: usize,
+    pub entry_count: usize,
     pub first_summary: String,
     pub last_summary: String,
     pub hidden: bool,
@@ -86,7 +86,7 @@ pub struct StrandDetailOutput {
     pub id: String,
     pub hidden: bool,
     pub summary: String,
-    pub entries: usize,
+    pub entry_count: usize,
     pub status: String,
     pub state_marker: Option<String>,
     pub state_offset: usize,
@@ -121,7 +121,7 @@ impl From<&ProjectedStrand> for StrandListItem {
     fn from(s: &ProjectedStrand) -> Self {
         StrandListItem {
             id: s.id.clone(),
-            entries: s.log_count(),
+            entry_count: s.log_count(),
             first_summary: s.first_summary().to_string(),
             last_summary: s.last_summary().to_string(),
             hidden: s.hidden,
@@ -142,7 +142,7 @@ impl From<&ProjectedStrand> for StrandDetailOutput {
             id: s.id.clone(),
             hidden: s.hidden,
             summary: s.first_summary().to_string(),
-            entries: s.log_count(),
+            entry_count: s.log_count(),
             status: s.state().to_string(),
             state_marker: s.state_marker.clone(),
             state_offset: s.state_offset,

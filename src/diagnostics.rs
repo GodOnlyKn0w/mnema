@@ -53,13 +53,13 @@ static TOPICS: &[TopicInfo] = &[
   都在写后回显受影响线的卡片。
 
 JSON 形态（OrientStrand，写命令 result 字段 / orient active[]）：
-  - id:          缩短的 strand id（12 字符十六进制前缀）
-  - strand_type: 线的类型，可为 null（task/dag/why/session）
-  - entries:     日志条目计数
-  - summary:     第一条日志截断到 70 字符
-  - last_entry:  最近一条日志截断到 70 字符
-  - last_offset: 该线最近事件的 journal offset
-  - catch_up:    就绪的 timeline 追赶命令
+  - id:           缩短的 strand id（12 字符十六进制前缀）
+  - strand_type:  线的类型，可为 null（task/dag/why/session）
+  - entry_count:  日志条目计数
+  - summary:      第一条日志截断到 70 字符
+  - last_entry:   最近一条日志截断到 70 字符
+  - last_offset:  该线最近事件的 journal offset
+  - catch_up:     就绪的 timeline 追赶命令
 
 JSON shape 索引见 tasktree explain json"#,
     },
@@ -124,12 +124,12 @@ Marker 语义（一行一条）：
         name: "json",
         title: "JSON 形态索引——各读命令 --format json 的顶层字段",
         body: r#"show（StrandDetailOutput）：
-  id / hidden / summary / entries / status /
+  id / hidden / summary / entry_count / status /
   state_marker / state_offset / edges / strand_branch / events
-  ※ entries 是计数，日志行在 events[].entry
+  ※ entry_count 是计数，日志行在 events[].entry
 
 list（StrandListOutput.strands[]，StrandListItem）：
-  id / entries / first_summary / last_summary / hidden /
+  id / entry_count / first_summary / last_summary / hidden /
   strand_type / edges / status / state_marker / state_offset /
   last_entry_ts / last_entry_offset
 
@@ -147,6 +147,35 @@ timeline（TimelineOutput）：
     strand_type / kind / ts_skew
 
 卡片/result 形态见 tasktree explain card"#,
+    },
+    TopicInfo {
+        name: "grammar",
+        title: "文法契约——全 CLI 一致的参数与命名规则",
+        body: r#"目标线：主对象用位置参数；位置被 content 占用的命令
+（append/checkpoint/bind）用 --id；单 id 命令两种写法等价
+（<ID> 与 --id <ID>）；timeline 的 --id 等价 --strand。
+
+旗标词表（同一概念只有一个名字）：
+  --include-hidden  含隐藏线（list 的 --all 是兼容别名）
+  --format json     机器输出唯一正典（explain --json 是兼容快捷）
+  --provenance      写命令的出处标注
+  --tail <N>        只限显示、不改账，对任何目标可用
+
+JSON 命名法：
+  复数名词 = 数组（events / matches / strands / active / timeline）
+  计数 = count 或 *_count（entry_count / closed_count / hidden_count）
+  自身身份 = id；引用他者 = <noun>_id（如 search 的 strand_id）
+
+写命令三件套：写 journal 必收 --provenance、必有 --format json
+孪生、写后回显卡片（见 tasktree explain card）。
+（孪生与 provenance 的覆盖缺口见一致性 CI 豁免表，按批清偿。）
+
+exit code：0 成功 / 1 解析失败 / 2 写入失败 / 3 参数非法。
+
+永久豁免（点名豁免，防"看起来漏了"的二次猜测）：
+  doctor 子命令风格（doctor journal）
+  export --out <PATH>（主对象用旗标）
+  append [CONTENT] [ID] 的 LEGACY 第二位置参数"#,
     },
 ];
 
@@ -394,7 +423,7 @@ pub fn catalog() -> &'static [DiagnosticInfo] {
 
 /// Routing order:
 ///   1. Diagnostic code lookup (case-insensitive; W062, w062, etc.)
-///   2. Topic lookup (input lowercased; card, markers, retry, json)
+///   2. Topic lookup (input lowercased; card, markers, retry, json, grammar)
 ///   3. Error with available-topics list and diagnostic-code hint
 pub fn cmd_explain(input: &str, format_json: bool) -> String {
     // ── 1. Diagnostic code (case-insensitive) ──────────────
@@ -591,7 +620,7 @@ mod tests {
         let sample = OrientStrand {
             id: "abc123".to_string(),
             strand_type: None,
-            entries: 1,
+            entry_count: 1,
             summary: "test".to_string(),
             last_entry: "test".to_string(),
             last_offset: 0,
@@ -622,7 +651,7 @@ mod tests {
             id: "a".to_string(),
             hidden: false,
             summary: "s".to_string(),
-            entries: 0,
+            entry_count: 0,
             status: "registered".to_string(),
             state_marker: None,
             state_offset: 0,
@@ -638,7 +667,7 @@ mod tests {
         // list → StrandListItem
         let list_sample = StrandListItem {
             id: "a".to_string(),
-            entries: 0,
+            entry_count: 0,
             first_summary: "s".to_string(),
             last_summary: "s".to_string(),
             hidden: false,

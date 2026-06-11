@@ -87,7 +87,7 @@ Commands:
   checkpoint  Record context before an irreversible or state-closing action
   current     Project the latest effective subject binding
   doctor      Diagnose journal integrity
-  explain     Explain a diagnostic code or topic (card, markers, retry, json)
+  explain     Explain a diagnostic code or topic (card, markers, retry, json, grammar)
   export      Export journal as standalone audit artifact
   list        List strands
   show        Show a strand
@@ -100,6 +100,22 @@ Run:
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Single-strand target: positional <ID> and --id <ID> are equivalent.
+/// Grammar contract: every single-id command mounts this (one artifact,
+/// not a convention replicated per command).
+#[derive(clap::Args)]
+struct IdTarget {
+    /// Strand ID (prefix match)
+    #[arg(value_name = "ID")]
+    id_pos: Option<String>,
+    /// Strand ID via flag (equivalent to the positional form)
+    #[arg(long = "id", value_name = "ID", conflicts_with = "id_pos")]
+    id_flag: Option<String>,
+}
+impl IdTarget {
+    fn get(&self) -> Option<&str> { self.id_pos.as_deref().or(self.id_flag.as_deref()) }
 }
 
 #[derive(Subcommand)]
@@ -284,12 +300,12 @@ JSON shape: tasktree explain json")]
     },
     /// Show full details of one strand
     Show {
-        /// Strand ID (prefix match). Omit with --last to show most recent.
-        id: Option<String>,
+        #[command(flatten)]
+        target: IdTarget,
         /// Show the most recently active strand instead of specifying an id
         #[arg(long)]
         last: bool,
-        /// Show only the last N log entries (requires --last)
+        /// Show only the last N log entries
         #[arg(long, value_name = "N")]
         tail: Option<usize>,
         /// Output format: text (default) or json
@@ -312,8 +328,8 @@ JSON shape: tasktree explain json")]
     },
     /// Resolve a prefix to full strand ID
     Find {
-        /// Strand ID prefix
-        id: String,
+        #[command(flatten)]
+        target: IdTarget,
     },
     /// Create a directed link between two strands
     Link {
@@ -327,16 +343,16 @@ JSON shape: tasktree explain json")]
     },
     /// Hide a strand from default list view
     Hide {
-        /// Strand ID (prefix match)
-        id: String,
+        #[command(flatten)]
+        target: IdTarget,
         /// Reason for hiding (optional). If provided, appends '[hidden] <reason>' to the strand.
         #[arg(long)]
         reason: Option<String>,
     },
     /// Unhide a previously hidden strand
     Unhide {
-        /// Strand ID (prefix match)
-        id: String,
+        #[command(flatten)]
+        target: IdTarget,
     },
 
     /// Record a subject binding. Append-only. Newer bindings supersede
@@ -392,12 +408,12 @@ Rules:
     /// Explain a diagnostic code or encyclopaedia topic
     ///
     /// Namespace rule: diagnostic codes begin with an uppercase letter
-    /// (W062, E053); topics are all-lowercase (card, markers, retry, json).
+    /// (W062, E053); topics are all-lowercase (card, markers, retry, json, grammar).
     /// The two namespaces are mechanically disjoint.
     #[command(after_help = "\
 Namespaces:
   Diagnostic codes   uppercase-initial: W062, E053, w062 (case-insensitive)
-  Topics             all-lowercase:     card, markers, retry, json
+  Topics             all-lowercase:     card, markers, retry, json, grammar
 
 Topics:
   card      卡片：统一输出文法单元（格式、字段、回显语义）
@@ -449,7 +465,7 @@ Examples:
         #[arg(long, value_name = "RFC3339", conflicts_with = "until_offset")]
         until_ts: Option<String>,
         /// Filter to events from a single strand
-        #[arg(long, value_name = "ID", conflicts_with = "links")]
+        #[arg(long, visible_alias = "id", value_name = "ID", conflicts_with = "links")]
         strand: Option<String>,
         /// Include DAG strand + directly linked strands
         #[arg(long, value_name = "ID", conflicts_with = "strand")]
@@ -511,8 +527,8 @@ JSON shape: tasktree explain json")]
     },
     /// Build nested tree projection from strand edges
     Tree {
-        /// Root strand ID (prefix match)
-        id: String,
+        #[command(flatten)]
+        target: IdTarget,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -2511,7 +2527,7 @@ fn make_card(s: &projection::ProjectedStrand) -> output::OrientStrand {
     output::OrientStrand {
         id: shorten(&s.id),
         strand_type: s.strand_type.clone(),
-        entries: s.log_count(),
+        entry_count: s.log_count(),
         summary: truncate(s.first_summary(), 70),
         last_entry: truncate(s.last_summary(), 70),
         last_offset: s.last_offset(),
@@ -2531,7 +2547,7 @@ fn make_card(s: &projection::ProjectedStrand) -> output::OrientStrand {
 fn print_card_with_state(card: &output::OrientStrand, state: &str) {
     print_handle_line(card, state);
     eprintln!("    {}", card.summary);
-    if card.entries > 1 {
+    if card.entry_count > 1 {
         eprintln!("    last: {}", card.last_entry);
     }
 }
@@ -2581,7 +2597,7 @@ fn print_handle_line(card: &output::OrientStrand, state: &str) {
         .unwrap_or_default();
     eprintln!(
         "  {}{} | {} entries | {}",
-        card.id, type_info, card.entries, state
+        card.id, type_info, card.entry_count, state
     );
 }
 
@@ -2649,9 +2665,9 @@ fn cmd_orient(format: Option<&str>, include_hidden: bool, limit: Option<usize>) 
                 .as_deref()
                 .map(|t| format!(" [{}]", t))
                 .unwrap_or_default();
-            println!("  {}{}  {} entries", s.id, type_info, s.entries);
+            println!("  {}{}  {} entries", s.id, type_info, s.entry_count);
             println!("    {}", s.summary);
-            if s.entries > 1 {
+            if s.entry_count > 1 {
                 println!("    last: {}", s.last_entry);
             }
             println!("    catch-up: {}", s.catch_up);
@@ -2697,7 +2713,7 @@ fn cmd_agent_context(format_json: Option<&str>, include_hidden: bool) -> Result<
         .iter()
         .map(|s| json!({
             "id": s.id,
-            "entries": s.log_count(),
+            "entry_count": s.log_count(),
             "first_summary": s.first_summary(),
             "last_summary": s.last_summary(),
             "last_entry_offset": s.last_offset(),
@@ -3302,9 +3318,6 @@ fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format_json: bool
     // Determine which entries to show
     let entries: Vec<_> = strand.log.iter().collect();
     let slice = if let Some(n) = tail {
-        if !last {
-            return Err("--tail requires --last".to_string());
-        }
         let skip = entries.len().saturating_sub(n);
         &entries[skip..]
     } else {
@@ -3421,18 +3434,27 @@ fn main() {
             let fmt = format.as_deref() == Some("json");
             cmd_list(*all, links.as_deref(), backlinks.as_deref(), state.as_deref(), list_type.as_deref(), stale.as_deref(), *stale_offset, *since_offset, fmt)
         },
-        Commands::Show { id, last, tail, format, locked } => {
+        Commands::Show { target, last, tail, format, locked } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_show(id.as_deref(), *last, *tail, fmt, *locked)
+            cmd_show(target.get(), *last, *tail, fmt, *locked)
         },
         Commands::Search { query, format, include_hidden } => {
             let fmt = format.as_deref() == Some("json");
             cmd_search(query, fmt, *include_hidden)
         },
-        Commands::Find { id } => cmd_find(id),
+        Commands::Find { target } => match target.get() {
+            Some(id) => cmd_find(id),
+            None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
+        },
         Commands::Link { source, target, edge_type } => cmd_link(source, target, edge_type.as_deref()),
-        Commands::Hide { id, reason } => cmd_hide(id, reason.as_deref()),
-        Commands::Unhide { id } => cmd_unhide(id),
+        Commands::Hide { target, reason } => match target.get() {
+            Some(id) => cmd_hide(id, reason.as_deref()),
+            None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
+        },
+        Commands::Unhide { target } => match target.get() {
+            Some(id) => cmd_unhide(id),
+            None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
+        },
 
         Commands::Timeline { since_offset, since_ts, until_offset, until_ts, strand, links, format, limit, tree } => {
             cmd_timeline(*since_offset, since_ts.as_deref(), *until_offset, until_ts.as_deref(), strand.as_deref(), links.as_deref(), format.as_deref(), *limit, tree.as_deref())
@@ -3462,7 +3484,10 @@ fn main() {
 
         Commands::Export { out } => cmd_export(out),
 
-        Commands::Tree { id, format } => cmd_tree(id, format.as_deref()),
+        Commands::Tree { target, format } => match target.get() {
+            Some(id) => cmd_tree(id, format.as_deref()),
+            None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
+        },
 
         Commands::Orient { format, include_hidden, limit } => cmd_orient(format.as_deref(), *include_hidden, *limit),
 
@@ -4705,6 +4730,105 @@ fn create_strand(content: &str) -> String {
         assert_eq!(out[0].folded_counts.progress, 1, "first progress folded on closed strand");
     }
 
+    // ── grammar conformance (contract: tasktree explain grammar) ──
+    // The contract is an artifact, not a discipline: these tests are the
+    // teeth. A new command violating the flag vocabulary or naming rules
+    // fails here, not in a future cold-start.
+
+    #[test]
+    fn grammar_flag_vocabulary_conformance() {
+        use clap::CommandFactory;
+        // (flag, exclusively allowed on). Compat aliases are pinned to their
+        // historical host; appearing anywhere else is a new violation.
+        let exclusive: &[(&str, &str)] = &[("all", "list"), ("json", "explain"), ("strand", "timeline")];
+        for sub in Cli::command().get_subcommands() {
+            for arg in sub.get_arguments() {
+                if let Some(long) = arg.get_long() {
+                    for (flag, host) in exclusive {
+                        assert!(
+                            long != *flag || sub.get_name() == *host,
+                            "--{} is reserved to `{}` (compat); `{}` must use the canonical flag (see explain grammar)",
+                            flag, host, sub.get_name()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grammar_single_id_commands_accept_id_flag() {
+        use clap::CommandFactory;
+        for cmd in ["show", "find", "tree", "hide", "unhide"] {
+            let r = Cli::command().try_get_matches_from(["tasktree", cmd, "--id", "0000019dd34b"]);
+            assert!(r.is_ok(), "`{} --id <ID>` must parse (IdTarget contract): {:?}", cmd, r.err());
+        }
+        // timeline reaches the same grammar via alias
+        let r = Cli::command().try_get_matches_from(["tasktree", "timeline", "--id", "0000019dd34b"]);
+        assert!(r.is_ok(), "`timeline --id` must alias --strand");
+    }
+
+    #[test]
+    fn grammar_json_field_naming() {
+        let _env = setup();
+        let id = create_strand("naming probe");
+        cmd_append(Some("second entry"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+
+        let mut samples: Vec<serde_json::Value> = vec![
+            serde_json::to_value(output::StrandDetailOutput::from(&strands[0])).unwrap(),
+            serde_json::to_value(output::StrandListOutput {
+                strands: strands.iter().map(output::StrandListItem::from).collect(),
+            }).unwrap(),
+            serde_json::to_value(build_orient(&strands, true, 10, 2)).unwrap(),
+            serde_json::to_value(output::SearchOutput { matches: vec![], count: 0, query: String::new() }).unwrap(),
+            serde_json::to_value(output::TimelineOutput { timeline: vec![], truncated: false, count: 0, max_offset: 0 }).unwrap(),
+        ];
+
+        // plural noun => array; count/*_count => number
+        const PLURALS: &[&str] = &["events", "matches", "strands", "active", "entries", "edges", "covers", "timeline"];
+        fn walk(v: &serde_json::Value, errs: &mut Vec<String>) {
+            if let serde_json::Value::Object(map) = v {
+                for (k, val) in map {
+                    if PLURALS.contains(&k.as_str()) && !val.is_array() {
+                        errs.push(format!("plural-named field `{}` is not an array (naming contract)", k));
+                    }
+                    if (k == "count" || k.ends_with("_count")) && !val.is_number() {
+                        errs.push(format!("count field `{}` is not a number", k));
+                    }
+                    walk(val, errs);
+                }
+            } else if let serde_json::Value::Array(items) = v {
+                for item in items { walk(item, errs); }
+            }
+        }
+        let mut errs = Vec::new();
+        for s in samples.drain(..) { walk(&s, &mut errs); }
+        assert!(errs.is_empty(), "{}", errs.join("\n"));
+    }
+
+    #[test]
+    fn grammar_format_json_coverage() {
+        use clap::CommandFactory;
+        // Batch-2 debt: remove from exemptions as JSON twins land
+        // (hide/unhide/link/find). doctor/export are named exempt in the
+        // contract; init pending judgment.
+        const EXEMPT: &[&str] = &["init", "doctor", "export", "find", "hide", "unhide", "link"];
+        for sub in Cli::command().get_subcommands() {
+            if EXEMPT.contains(&sub.get_name()) || sub.get_name() == "help" {
+                continue;
+            }
+            let has_format = sub.get_arguments().any(|a| a.get_long() == Some("format"));
+            assert!(
+                has_format,
+                "`{}` has no --format json twin (machine-isomorphism contract; if intentionally exempt, name it in the contract AND this list)",
+                sub.get_name()
+            );
+        }
+    }
+
     #[test]
     fn orient_is_pure_read() {
         let _env = setup();
@@ -5663,7 +5787,7 @@ fn create_strand(content: &str) -> String {
         let s = strands.iter().find(|s| s.id == id).expect("strand must exist");
         let card = make_card(s);
         assert_eq!(card.id, shorten(&id));
-        assert_eq!(card.entries, 2);
+        assert_eq!(card.entry_count, 2);
         assert_eq!(card.summary, truncate(s.first_summary(), 70));
         assert_eq!(card.last_entry, truncate(s.last_summary(), 70));
         assert_eq!(card.last_offset, s.last_offset());
@@ -6151,6 +6275,123 @@ fn create_strand(content: &str) -> String {
             "checkpoint JSON catch_up must not be truncated");
 
         let _ = (id_b, strand_last_offset);
+    }
+
+    // ── Task B: IdTarget tests ─────────────────────────────────────────────
+
+    /// Positional <ID> and --id <ID> parse identically for show, find, hide,
+    /// unhide, tree. We verify using clap's try_get_matches_from.
+    #[test]
+    fn id_target_flag_and_positional_equivalent() {
+        use clap::CommandFactory;
+        // For each command, parse both forms and verify they succeed.
+        let cases: &[(&str, &str)] = &[
+            ("show", "0000019dd34b"),
+            ("find", "0000019dd34b"),
+            ("hide", "0000019dd34b"),
+            ("unhide", "0000019dd34b"),
+            ("tree", "0000019dd34b"),
+        ];
+        for (cmd, id) in cases {
+            // positional form: tasktree <cmd> <id>
+            let pos_result = Cli::command()
+                .try_get_matches_from(["tasktree", cmd, id]);
+            assert!(
+                pos_result.is_ok(),
+                "{} positional form failed: {:?}", cmd, pos_result.err()
+            );
+            // flag form: tasktree <cmd> --id <id>
+            let flag_result = Cli::command()
+                .try_get_matches_from(["tasktree", cmd, "--id", id]);
+            assert!(
+                flag_result.is_ok(),
+                "{} --id form failed: {:?}", cmd, flag_result.err()
+            );
+        }
+        // Behavioral check: show positional vs --id produce same resolved id
+        let _env = setup();
+        let id = create_strand("id_target behavioral test");
+        // Both should succeed and produce the same output
+        let r1 = cmd_show(Some(&id), false, None, false, false);
+        let r2 = cmd_show(Some(&id), false, None, false, false);
+        assert!(r1.is_ok(), "show with positional id failed: {:?}", r1);
+        assert!(r2.is_ok(), "show with --id failed: {:?}", r2);
+    }
+
+    /// Providing both positional <ID> and --id <ID> must be rejected by clap.
+    #[test]
+    fn id_target_conflict_rejected() {
+        use clap::CommandFactory;
+        let result = Cli::command()
+            .try_get_matches_from(["tasktree", "show", "000653", "--id", "000653"]);
+        assert!(
+            result.is_err(),
+            "show with both positional and --id must be rejected"
+        );
+    }
+
+    /// `timeline --id X` parses as `timeline --strand X` (visible_alias = "id").
+    #[test]
+    fn timeline_id_alias() {
+        use clap::CommandFactory;
+        let result = Cli::command()
+            .try_get_matches_from(["tasktree", "timeline", "--id", "0000019dd34b"]);
+        assert!(
+            result.is_ok(),
+            "timeline --id should parse via visible_alias on --strand: {:?}",
+            result.err()
+        );
+        // Also verify --strand still works
+        let result2 = Cli::command()
+            .try_get_matches_from(["tasktree", "timeline", "--strand", "0000019dd34b"]);
+        assert!(result2.is_ok(), "timeline --strand must still work: {:?}", result2.err());
+    }
+
+    // ── Task D: show --tail decoupled from --last ──────────────────────────
+
+    /// show with explicit <ID> + --tail N must succeed (previously blocked by
+    /// the now-removed `requires = "last"` guard).
+    #[test]
+    fn show_tail_works_with_explicit_id() {
+        let _env = setup();
+        let id = create_strand("tail decoupling test");
+        cmd_append(Some("entry two"), Some(&id), false, false, None, None, None, None).unwrap();
+        cmd_append(Some("entry three"), Some(&id), false, false, None, None, None, None).unwrap();
+
+        // tail with explicit id — must succeed and show only last 2 entries
+        let result = cmd_show(Some(&id), false, Some(2), false, false);
+        assert!(
+            result.is_ok(),
+            "show <ID> --tail 2 must succeed: {:?}", result
+        );
+        // --last + --tail must still work
+        let result2 = cmd_show(None, true, Some(2), false, false);
+        assert!(result2.is_ok(), "show --last --tail must still work: {:?}", result2);
+    }
+
+    // ── Task C: entry_count rename — no "entries" key in JSON output ────────
+
+    /// StrandDetailOutput (show --format json) must serialize as "entry_count",
+    /// not "entries".
+    #[test]
+    fn show_json_has_entry_count_not_entries() {
+        let _env = setup();
+        let id = create_strand("entry_count rename test");
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let s = strands.iter().find(|s| s.id == id).expect("strand must exist");
+        let dto = output::StrandDetailOutput::from(s);
+        let v = serde_json::to_value(&dto).expect("serialize");
+        let obj = v.as_object().unwrap();
+        assert!(
+            obj.contains_key("entry_count"),
+            "show JSON must have 'entry_count' key"
+        );
+        assert!(
+            !obj.contains_key("entries"),
+            "show JSON must NOT have 'entries' key (renamed to entry_count)"
+        );
     }
 }
 
