@@ -217,6 +217,15 @@ Output:
   --format json      Machine-readable stdout + journal append. Includes a
                      \"result\" field with the updated strand card (OrientStrand).
 
+  staleness          Always printed: age of strand's last entry + journal delta
+                     since that entry. Catch-up command shown when delta > 0.
+  catch-up           tasktree timeline --since-offset <N> --links <STRAND_ID>
+                     (emitted verbatim when journal delta > 0)
+  warnings           W070 (strand moved under you) and W071 (closed strand) fire
+                     as scar lines in text output; in json output, a \"warnings\"
+                     array (elements: {\"code\", \"detail\"}) is always present.
+                     Both codes are informational — exit is still 0.
+
 Exit codes:
   0 ok
   1 strand resolve/show failed
@@ -1852,6 +1861,92 @@ fn escape_checkpoint_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Render a duration in seconds as a human-readable string.
+/// < 60s → "just now"; < 3600s → "<N>m"; < 86400s → "<N>h"; else "<N>d".
+/// No external dependencies — purely arithmetic.
+fn humanize_duration(secs: i64) -> String {
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
+/// Check W070: checkpoint's provenance.producer differs from the last
+/// LogAppended entry's provenance.producer on the target strand.
+///
+/// Both producers must be non-empty strings for this check to fire;
+/// if either is absent the function returns None (no guessing).
+///
+/// Returns `Some((code, detail))` when the check fires, `None` otherwise.
+fn check_w070_strand_moved(
+    events: &[(usize, Event)],
+    strand_id: &str,
+    checkpoint_producer: Option<&str>,
+) -> Option<EmittedDiag> {
+    let cp_producer = checkpoint_producer?;
+    if cp_producer.is_empty() {
+        return None;
+    }
+    // Find the last LogAppended event for this strand.
+    let last_entry_producer: Option<&str> = events
+        .iter()
+        .filter_map(|(_, e)| {
+            if let Event::LogAppended { id, provenance, .. } = e {
+                if id == strand_id {
+                    Some(
+                        provenance
+                            .as_ref()
+                            .and_then(|p| p.get("producer"))
+                            .and_then(|v| v.as_str()),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .last()
+        .flatten();
+    let last_producer = last_entry_producer?;
+    if last_producer.is_empty() {
+        return None;
+    }
+    if last_producer != cp_producer {
+        Some((
+            "W070",
+            format!(
+                "strand moved under you: last entry by \"{}\", you are \"{}\"",
+                last_producer, cp_producer
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Check W071: checkpoint target strand state is not "registered" (already closed).
+///
+/// Returns `Some((code, detail))` when the check fires, `None` otherwise.
+fn check_w071_closed_strand(strand: &projection::ProjectedStrand) -> Option<EmittedDiag> {
+    if strand.state() != "registered" {
+        Some((
+            "W071",
+            format!(
+                "checkpoint on closed strand: state is {}",
+                strand.state()
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
 fn cmd_checkpoint(
     requested_id: Option<&str>,
     action: &str,
@@ -1924,20 +2019,41 @@ fn cmd_checkpoint(
         (strand, "most_recent_active_strand")
     };
 
-    let observed_entries_before_append = strand.log_count();
-    let escaped_action = escape_checkpoint_value(action);
-    let content = format!(
-        "[checkpoint] ok resolved_by=\"{}\" observed_entries_before_append={} action=\"{}\"",
-        resolved_by, observed_entries_before_append, escaped_action
-    );
-    let provenance = parse_provenance_arg(provenance_raw).map_err(|message| CheckpointFailure {
+    // ── Staleness snapshot (before append) ───────────────────────────────
+    // Compute before the write so the delta reflects pre-checkpoint state.
+    let strand_last_offset = strand.last_offset();
+    let max_offset_before = events.last().map(|(o, _)| *o).unwrap_or(0);
+    let journal_delta = max_offset_before.saturating_sub(strand_last_offset);
+
+    // Parse strand's last ts for "last touched N ago" display.
+    let staleness_seconds: Option<i64> = if strand.last_ts().is_empty() {
+        None
+    } else {
+        parse_event_ts(strand.last_ts()).map(|ts| (chrono::Utc::now() - ts).num_seconds())
+    };
+
+    // ── Gate warnings (W070 / W071) — evaluated before write ─────────────
+    let provenance_val = parse_provenance_arg(provenance_raw).map_err(|message| CheckpointFailure {
         code: 3,
         message,
         requested_strand: requested_id.map(str::to_string),
         resolved_strand: Some(strand.id.clone()),
         journal_appended: false,
     })?;
-    let event = event::make_log_appended(&strand.id, &content, provenance);
+    let checkpoint_producer: Option<&str> = provenance_val
+        .as_ref()
+        .and_then(|p| p.get("producer"))
+        .and_then(|v| v.as_str());
+    let w070 = check_w070_strand_moved(&events, &strand.id, checkpoint_producer);
+    let w071 = check_w071_closed_strand(strand);
+
+    let observed_entries_before_append = strand.log_count();
+    let escaped_action = escape_checkpoint_value(action);
+    let content = format!(
+        "[checkpoint] ok resolved_by=\"{}\" observed_entries_before_append={} action=\"{}\"",
+        resolved_by, observed_entries_before_append, escaped_action
+    );
+    let event = event::make_log_appended(&strand.id, &content, provenance_val);
     let append_id = match &event {
         Event::LogAppended { append_id, .. } => append_id.clone(),
         _ => None,
@@ -1965,9 +2081,26 @@ fn cmd_checkpoint(
     let diags = run_journal_diagnostics(&raw_events, chrono::Utc::now());
     let diag_count = diags.len();
 
+    // Build warning list (W070/W071) for output.
+    let mut cp_warnings: Vec<(&'static str, String)> = Vec::new();
+    if let Some(w) = w070 { cp_warnings.push(w); }
+    if let Some(w) = w071 { cp_warnings.push(w); }
+
     if format_json {
         let card = strand_card_fresh(&strand.id);
         let card_val = card.as_ref().map(|c| serde_json::to_value(c).ok()).flatten();
+        let catch_up_val: serde_json::Value = if journal_delta > 0 {
+            json!(format!(
+                "tasktree timeline --since-offset {} --links {}",
+                strand_last_offset, shorten(&strand.id)
+            ))
+        } else {
+            serde_json::Value::Null
+        };
+        let warnings_json: Vec<serde_json::Value> = cp_warnings
+            .iter()
+            .map(|(code, detail)| json!({"code": code, "detail": detail}))
+            .collect();
         println!(
             "{}",
             json!({
@@ -1982,12 +2115,39 @@ fn cmd_checkpoint(
                 "journal_appended": true,
                 "diagnostics_count": diag_count,
                 "result": card_val,
+                "staleness_seconds": staleness_seconds,
+                "journal_delta": journal_delta,
+                "catch_up": catch_up_val,
+                "warnings": warnings_json,
             })
         );
     } else {
         println!("checkpoint ok");
         println!("  strand: {} | {} entries | {}", shorten(&strand.id), strand.log_count() + 1, strand.state());
         println!("  resolved_by: {}", resolved_by);
+
+        // Staleness line — always printed after strand line.
+        let staleness_part = staleness_seconds.map(|s| {
+            let d = humanize_duration(s);
+            if d == "just now" {
+                "last touched just now | ".to_string()
+            } else {
+                format!("last touched {} ago | ", d)
+            }
+        }).unwrap_or_default();
+        println!(
+            "  staleness: {}journal +{} entries since (offset {} → {})",
+            staleness_part, journal_delta, strand_last_offset, max_offset_before
+        );
+
+        // Catch-up line — only when delta > 0.
+        if journal_delta > 0 {
+            println!(
+                "  catch-up: tasktree timeline --since-offset {} --links {}",
+                strand_last_offset, shorten(&strand.id)
+            );
+        }
+
         println!(
             "  observed_entries_before_append: {}",
             observed_entries_before_append
@@ -2005,6 +2165,10 @@ fn cmd_checkpoint(
                 .map(|a| format!(" [{}]", &a[..12]))
                 .unwrap_or_default();
             println!("  [{}]{} {}", &entry.ts[..19], id_str, entry.content);
+        }
+        // W-code scar lines — printed before the general diagnostics count.
+        for (code, detail) in &cp_warnings {
+            println!("  {} {}  (tasktree explain {})", code, detail, code);
         }
         if diag_count > 0 {
             println!("diagnostics: {} warning(s) — run tasktree doctor journal", diag_count);
@@ -2339,11 +2503,14 @@ fn make_card(s: &projection::ProjectedStrand) -> output::OrientStrand {
 
 /// The card printer used by write commands. Callers supply the state
 /// string directly so we avoid re-projecting a second time.
+// Card echo goes to stderr: stdout is the value (capturable by
+// `ID=$(tasktree add ...)`), stderr is the narration — same split as the
+// perf footers. JSON mode is unaffected (result field on stdout).
 fn print_card_with_state(card: &output::OrientStrand, state: &str) {
     print_handle_line(card, state);
-    println!("    {}", card.summary);
+    eprintln!("    {}", card.summary);
     if card.entries > 1 {
-        println!("    last: {}", card.last_entry);
+        eprintln!("    last: {}", card.last_entry);
     }
 }
 
@@ -2378,7 +2545,7 @@ fn print_visibility_ledger() {
         let visible: Vec<_> = all.iter().filter(|s| !s.hidden).collect();
         let active_n = visible.iter().filter(|s| s.state() == "registered").count();
         let closed_n = visible.len() - active_n;
-        println!("journal: {} active | {} closed | {} hidden", active_n, closed_n, hidden_n);
+        eprintln!("journal: {} active | {} closed | {} hidden", active_n, closed_n, hidden_n);
     }
 }
 
@@ -2390,7 +2557,7 @@ fn print_handle_line(card: &output::OrientStrand, state: &str) {
         .as_deref()
         .map(|t| format!(" [{}]", t))
         .unwrap_or_default();
-    println!(
+    eprintln!(
         "  {}{} | {} entries | {}",
         card.id, type_info, card.entries, state
     );
@@ -4278,6 +4445,156 @@ fn create_strand(content: &str) -> String {
 
         let after = read_events_lossy(&ensure_journal().unwrap()).0.len();
         assert_eq!(before, after);
+    }
+
+    // ── humanize_duration ──────────────────────────────────────────────────
+
+    #[test]
+    fn humanize_duration_just_now() {
+        assert_eq!(humanize_duration(0), "just now");
+        assert_eq!(humanize_duration(59), "just now");
+    }
+
+    #[test]
+    fn humanize_duration_minutes() {
+        assert_eq!(humanize_duration(60), "1m");
+        assert_eq!(humanize_duration(61), "1m");
+        assert_eq!(humanize_duration(3599), "59m");
+    }
+
+    #[test]
+    fn humanize_duration_hours() {
+        assert_eq!(humanize_duration(3600), "1h");
+        assert_eq!(humanize_duration(7200), "2h");
+        assert_eq!(humanize_duration(86399), "23h");
+    }
+
+    #[test]
+    fn humanize_duration_days() {
+        assert_eq!(humanize_duration(86400), "1d");
+        assert_eq!(humanize_duration(86400 * 25), "25d");
+    }
+
+    // ── W070: strand moved under you ───────────────────────────────────────
+
+    #[test]
+    fn w070_fires_when_checkpoint_producer_differs_from_last_entry_producer() {
+        let _env = setup();
+        let id = create_strand("contested work");
+        // Write a log entry with producer "alpha".
+        cmd_append(Some("progress note"), None, false, false, None, Some(&id), None,
+            Some(r#"{"producer":"alpha"}"#)).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        // Checkpoint as "beta" — should fire W070.
+        let result = check_w070_strand_moved(&events, &id, Some("beta"));
+        assert!(result.is_some(), "W070 must fire when producers differ");
+        let (code, detail) = result.unwrap();
+        assert_eq!(code, "W070");
+        assert!(detail.contains("alpha"), "detail must mention last producer: {}", detail);
+        assert!(detail.contains("beta"), "detail must mention checkpoint producer: {}", detail);
+    }
+
+    #[test]
+    fn w070_silent_when_same_producer() {
+        let _env = setup();
+        let id = create_strand("solo work");
+        cmd_append(Some("note"), None, false, false, None, Some(&id), None,
+            Some(r#"{"producer":"alpha"}"#)).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let result = check_w070_strand_moved(&events, &id, Some("alpha"));
+        assert!(result.is_none(), "W070 must not fire when same producer");
+    }
+
+    #[test]
+    fn w070_silent_when_checkpoint_producer_absent() {
+        let _env = setup();
+        let id = create_strand("no prov work");
+        cmd_append(Some("note"), None, false, false, None, Some(&id), None,
+            Some(r#"{"producer":"alpha"}"#)).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        // No checkpoint producer → silent.
+        let result = check_w070_strand_moved(&events, &id, None);
+        assert!(result.is_none(), "W070 must not fire when checkpoint producer absent");
+    }
+
+    #[test]
+    fn w070_silent_when_last_entry_producer_absent() {
+        let _env = setup();
+        let id = create_strand("no prov work");
+        // Append without provenance.
+        cmd_append(Some("note"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        // Last entry has no producer → silent.
+        let result = check_w070_strand_moved(&events, &id, Some("beta"));
+        assert!(result.is_none(), "W070 must not fire when last entry has no producer");
+    }
+
+    // ── W071: checkpoint on closed strand ──────────────────────────────────
+
+    #[test]
+    fn w071_fires_on_closed_strand() {
+        let _env = setup();
+        let id = create_strand("closed work");
+        cmd_append(Some("[done] finished"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let strand = strands.iter().find(|s| s.id == id).unwrap();
+        let result = check_w071_closed_strand(strand);
+        assert!(result.is_some(), "W071 must fire on closed strand");
+        let (code, detail) = result.unwrap();
+        assert_eq!(code, "W071");
+        assert!(detail.contains("done"), "detail must mention state: {}", detail);
+    }
+
+    #[test]
+    fn w071_silent_on_open_strand() {
+        let _env = setup();
+        let id = create_strand("open work");
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let strand = strands.iter().find(|s| s.id == id).unwrap();
+        let result = check_w071_closed_strand(strand);
+        assert!(result.is_none(), "W071 must not fire on registered strand");
+    }
+
+    // ── checkpoint + W071 end-to-end: writes succeed (exit 0) ─────────────
+
+    #[test]
+    fn checkpoint_on_closed_strand_still_succeeds() {
+        let _env = setup();
+        let id = create_strand("done work");
+        cmd_append(Some("[done] all finished"), None, false, false, None, Some(&id), None, None).unwrap();
+        // Checkpoint must still succeed — W071 is a warning, not a gate.
+        let result = cmd_checkpoint(Some(&id), "tag the release", None, false, false, None);
+        assert!(result.is_ok(), "checkpoint on closed strand must exit 0: {:?}", result);
+    }
+
+    // ── staleness / journal_delta helpers ─────────────────────────────────
+
+    #[test]
+    fn journal_delta_reflects_other_strand_entries() {
+        let _env = setup();
+        let id_a = create_strand("strand A");
+        let id_b = create_strand("strand B");
+        // Add two entries to B after A was last touched.
+        cmd_append(Some("b-entry-1"), None, false, false, None, Some(&id_b), None, None).unwrap();
+        cmd_append(Some("b-entry-2"), None, false, false, None, Some(&id_b), None, None).unwrap();
+
+        // Compute delta for strand A (before any checkpoint write).
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let strand_a = strands.iter().find(|s| s.id == id_a).unwrap();
+        let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
+        let delta = max_offset.saturating_sub(strand_a.last_offset());
+        // The two entries on B occurred after A's last offset → delta >= 2.
+        assert!(delta >= 2, "delta must be >= 2, got {}", delta);
     }
 
     #[test]

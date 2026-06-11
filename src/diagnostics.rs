@@ -184,6 +184,36 @@ static CATALOG: &[DiagnosticInfo] = &[
         },
         producer: "lifecycle",
     },
+    DiagnosticInfo {
+        code: "W070",
+        severity: Severity::Warning,
+        category: "lifecycle",
+        title: "strand moved under you",
+        finding: "The checkpoint's provenance.producer differs from the producer of the last LogAppended entry on the target strand. Both producers must be present and non-empty for this check to fire; if either is absent the check is silently skipped.",
+        impact: "You may be checkpointing a strand that was last touched by a different agent — your view of the strand's state may be stale.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "tasktree timeline --since-offset <OFFSET> --links <STRAND_ID>",
+            executable: false,
+            requires_human: true,
+        },
+        producer: "lifecycle",
+    },
+    DiagnosticInfo {
+        code: "W071",
+        severity: Severity::Warning,
+        category: "lifecycle",
+        title: "checkpoint on closed strand",
+        finding: "The checkpoint target strand is not in the registered state — it has already been closed with a marker such as [done], [cancelled], or [failed].",
+        impact: "The checkpoint is almost certainly targeting the wrong strand — irreversible actions should be anchored to an open strand.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "confirm the target with tasktree list; the checkpoint may belong on a successor strand",
+            executable: false,
+            requires_human: true,
+        },
+        producer: "lifecycle",
+    },
 
     // ── Health (W062) ───────────────────────────────────
     DiagnosticInfo {
@@ -326,19 +356,25 @@ mod tests {
         assert!(codes.contains(&"W062"));
         assert!(codes.contains(&"W068"));
         assert!(codes.contains(&"W069"));
-        assert_eq!(codes.len(), 3, "catalog size changed — update this test deliberately");
+        assert!(codes.contains(&"W070"));
+        assert!(codes.contains(&"W071"));
+        assert_eq!(codes.len(), 5, "catalog size changed — update this test deliberately");
     }
 
     #[test]
     fn test_removed_workflow_codes_stay_removed() {
-        // 20 codes were removed 2026-06 — they live in git history. Their
+        // 18 codes were removed 2026-06 — they live in git history. Their
         // numbers must never be reused for new meanings:
         //   16 external-workflow codes (gate/shuttle/covers/DAG/story),
         //   E055/E057/E058 (dispatch concept left with that workflow),
         //   W066 (v0 migration finished — journal scan found no residue).
         // E053/E056 are NOT in this list: reserved (commented out in the
         // catalog) for completion-pair semantics once markers stabilise.
-        for code in ["E047", "W058", "W065", "W067", "W070", "W071", "W072",
+        // W070/W071 were previously in this list as removed external-workflow
+        // codes; they have been revived with new lifecycle semantics for the
+        // checkpoint command (strand-moved and closed-strand guards) — see
+        // git history for the old meanings.
+        for code in ["E047", "W058", "W065", "W067", "W072",
                      "W073", "E081", "W081", "E082", "W082", "E083", "W083",
                      "E084", "W085", "E055", "E057", "E058", "W066"] {
             assert!(lookup(code).is_none(), "removed code {} reappeared", code);
@@ -370,5 +406,35 @@ mod tests {
         let codes: Vec<&str> = CATALOG.iter().map(|d| d.code).collect();
         let unique: HashSet<&str> = codes.iter().copied().collect();
         assert_eq!(codes.len(), unique.len(), "duplicate diagnostic codes found");
+    }
+
+    #[test]
+    fn test_w070_can_explain() {
+        let info = lookup("W070").expect("W070 should be in catalog");
+        assert_eq!(info.code, "W070");
+        assert_eq!(info.title, "strand moved under you");
+        assert!(matches!(info.severity, Severity::Warning));
+        assert_eq!(info.category, "lifecycle");
+        let output = cmd_explain("W070", true);
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["code"], "W070");
+        assert_eq!(v["recovery"]["executable"], false);
+        assert_eq!(v["recovery"]["requires_human"], true);
+    }
+
+    #[test]
+    fn test_w071_can_explain() {
+        let info = lookup("W071").expect("W071 should be in catalog");
+        assert_eq!(info.code, "W071");
+        assert_eq!(info.title, "checkpoint on closed strand");
+        assert!(matches!(info.severity, Severity::Warning));
+        assert_eq!(info.category, "lifecycle");
+        let output = cmd_explain("W071", true);
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["code"], "W071");
+        assert_eq!(v["recovery"]["executable"], false);
+        assert_eq!(v["recovery"]["requires_human"], true);
     }
 }
