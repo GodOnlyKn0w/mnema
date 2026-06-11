@@ -212,8 +212,10 @@ Target:
   omitted --id       Resolve to most recently active strand; stdout shows resolved_by.
 
 Output:
-  default            Human-readable stdout + journal append.
-  --format json      Machine-readable stdout + journal append.
+  default            Human-readable stdout + journal append. The strand line
+                     includes entry count and state for at-a-glance confirmation.
+  --format json      Machine-readable stdout + journal append. Includes a
+                     \"result\" field with the updated strand card (OrientStrand).
 
 Exit codes:
   0 ok
@@ -752,9 +754,14 @@ fn cmd_add(content: &str, format_json: bool, strand_type: Option<&str>) -> Resul
         Err(e) => return Err(e),
     };
     if format_json {
-        println!("{}", json!({"id": id, "status": "ok"}));
+        let card = strand_card_fresh(&id);
+        let card_val = card.as_ref().map(|c| serde_json::to_value(c).ok()).flatten();
+        println!("{}", json!({"id": id, "status": "ok", "result": card_val}));
     } else {
         println!("{}", id);
+        if let Some((card, state)) = strand_card_fresh_with_state(&id) {
+            print_card_with_state(&card, &state);
+        }
     }
     Ok(())
 }
@@ -1247,11 +1254,19 @@ fn cmd_link(source: &str, target: &str, edge_type: Option<&str>) -> Result<(), S
     let events = read_events_strict(&ensure_journal()?)?;
     let src_id = resolve_id(&events, source)?;
     let tgt_id = resolve_id(&events, target)?;
-    let event = event::make_edge_linked(&src_id, &tgt_id, resolved_type);
+    let etype = resolved_type.unwrap();
+    let event = event::make_edge_linked(&src_id, &tgt_id, Some(etype));
     with_journal_write_lock(|journal| {
         append_event_unlocked(journal, &event)
     })?;
-    println!("linked {} -> {} ({})", shorten(&src_id), shorten(&tgt_id), resolved_type.unwrap());
+    println!("linked {} -> {} ({})", shorten(&src_id), shorten(&tgt_id), etype);
+    if let Some((card, state)) = strand_card_fresh_with_state(&src_id) {
+        print_handle_line(&card, &state);
+    }
+    if let Some((card, state)) = strand_card_fresh_with_state(&tgt_id) {
+        print_handle_line(&card, &state);
+    }
+    println!("{} --{}--> {}", shorten(&src_id), etype, shorten(&tgt_id));
     Ok(())
 }
 /// Compute current hide_count for a strand by scanning its events. The
@@ -1304,6 +1319,11 @@ fn cmd_hide(id: &str, reason: Option<&str>) -> Result<(), String> {
     } else {
         println!("hidden {} (already hidden, no-op)", shorten(&strand_id));
     }
+    // Handle line (abbreviated card) + visibility ledger after both branches.
+    if let Some((card, state)) = strand_card_fresh_with_state(&strand_id) {
+        print_handle_line(&card, &state);
+    }
+    print_visibility_ledger();
     Ok(())
 }
 
@@ -1328,6 +1348,11 @@ fn cmd_unhide(id: &str) -> Result<(), String> {
     } else {
         println!("unhidden {} (already visible, no-op)", shorten(&strand_id));
     }
+    // Handle line + visibility ledger after both branches.
+    if let Some((card, state)) = strand_card_fresh_with_state(&strand_id) {
+        print_handle_line(&card, &state);
+    }
+    print_visibility_ledger();
     Ok(())
 }
 
@@ -1437,6 +1462,8 @@ fn cmd_bind(
     })?;
 
     if format_json {
+        let card = strand_card_fresh(&full_strand);
+        let card_val = card.as_ref().map(|c| serde_json::to_value(c).ok()).flatten();
         println!(
             "{}",
             json!({
@@ -1444,10 +1471,14 @@ fn cmd_bind(
                 "subject_type": st,
                 "subject_id": sid,
                 "strand_id": full_strand,
+                "result": card_val,
             })
         );
     } else {
         println!("{}", binding_id);
+        if let Some((card, state)) = strand_card_fresh_with_state(&full_strand) {
+            print_handle_line(&card, &state);
+        }
     }
     Ok(())
 }
@@ -1731,6 +1762,9 @@ fn cmd_append(
             Ok(())
         })?;
         println!("{}", new_id);
+        if let Some((card, state)) = strand_card_fresh_with_state(&new_id) {
+            print_card_with_state(&card, &state);
+        }
         return Ok(());
     }
 
@@ -1759,21 +1793,29 @@ fn cmd_append(
 
     let provenance = parse_provenance_arg(provenance_raw)?;
     let event = event::make_log_appended(&full_id, &stored, provenance);
+    let append_id = match &event {
+        Event::LogAppended { append_id, .. } => append_id.clone(),
+        _ => None,
+    };
     with_journal_write_lock(|journal| {
         append_event_unlocked(journal, &event)
     })?;
     if format == Some("json") {
-        let append_id = match &event {
-            Event::LogAppended { append_id, .. } => append_id.clone(),
-            _ => None,
-        };
+        let card = strand_card_fresh(&full_id);
+        let card_val = card.as_ref().map(|c| serde_json::to_value(c).ok()).flatten();
         println!("{}", serde_json::to_string(&serde_json::json!({
             "strand_id": full_id,
             "append_id": append_id,
             "content_preview": stored.chars().take(120).collect::<String>(),
+            "result": card_val,
         })).unwrap());
     } else {
-        println!("appended to {}", shorten(&full_id));
+        if let Some((card, state)) = strand_card_fresh_with_state(&full_id) {
+            println!("appended to {} (offset {})", shorten(&full_id), card.last_offset);
+            print_card_with_state(&card, &state);
+        } else {
+            println!("appended to {}", shorten(&full_id));
+        }
     }
     Ok(())
 }
@@ -1924,6 +1966,8 @@ fn cmd_checkpoint(
     let diag_count = diags.len();
 
     if format_json {
+        let card = strand_card_fresh(&strand.id);
+        let card_val = card.as_ref().map(|c| serde_json::to_value(c).ok()).flatten();
         println!(
             "{}",
             json!({
@@ -1937,11 +1981,12 @@ fn cmd_checkpoint(
                 "append_id": append_id,
                 "journal_appended": true,
                 "diagnostics_count": diag_count,
+                "result": card_val,
             })
         );
     } else {
         println!("checkpoint ok");
-        println!("  strand: {}", shorten(&strand.id));
+        println!("  strand: {} | {} entries | {}", shorten(&strand.id), strand.log_count() + 1, strand.state());
         println!("  resolved_by: {}", resolved_by);
         println!(
             "  observed_entries_before_append: {}",
@@ -2268,6 +2313,89 @@ fn cmd_timeline(
 /// the rules travel with the orientation, the weave-in pointer stays thin).
 const ORIENT_REMIND: &str = "continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | matter concluded → append --id <ID> \"[done] ...\" | before irreversible → checkpoint --id <ID> --action \"<why>\" | more → tasktree --help";
 
+// ── Card helpers ──────────────────────────────────────────────────────────
+// "card" = the OrientStrand shape used both for orient menus and for
+// post-write echo. make_card/strand_card_fresh keep echoes consistent with
+// orient output without re-introducing output divergence.
+
+/// Build an OrientStrand card from a projected strand. Identical to the
+/// inline construction in build_orient; extracted so write commands can
+/// call the same logic without duplicating the truncation/shorten rules.
+fn make_card(s: &projection::ProjectedStrand) -> output::OrientStrand {
+    output::OrientStrand {
+        id: shorten(&s.id),
+        strand_type: s.strand_type.clone(),
+        entries: s.log_count(),
+        summary: truncate(s.first_summary(), 70),
+        last_entry: truncate(s.last_summary(), 70),
+        last_offset: s.last_offset(),
+        catch_up: format!(
+            "tasktree timeline --since-offset {} --links {}",
+            s.last_offset(),
+            shorten(&s.id)
+        ),
+    }
+}
+
+/// The card printer used by write commands. Callers supply the state
+/// string directly so we avoid re-projecting a second time.
+fn print_card_with_state(card: &output::OrientStrand, state: &str) {
+    print_handle_line(card, state);
+    println!("    {}", card.summary);
+    if card.entries > 1 {
+        println!("    last: {}", card.last_entry);
+    }
+}
+
+/// Re-project a single strand from a fresh journal read and build its card.
+/// Uses include_hidden=true so hidden strands can still echo their own card.
+fn strand_card_fresh(strand_id: &str) -> Option<output::OrientStrand> {
+    let path = ensure_journal().ok()?;
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    strands.iter().find(|s| s.id == strand_id).map(make_card)
+}
+
+/// Like strand_card_fresh but also returns the state string (to avoid a
+/// second projection scan when the caller needs both).
+fn strand_card_fresh_with_state(strand_id: &str) -> Option<(output::OrientStrand, String)> {
+    let path = ensure_journal().ok()?;
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    strands.iter().find(|s| s.id == strand_id).map(|s| {
+        (make_card(s), s.state().to_string())
+    })
+}
+
+/// Print the global visibility ledger line used by hide/unhide echo.
+/// Reads the journal fresh. Counts: active = visible & state=="registered",
+/// closed = visible - active, hidden = strands with hidden==true.
+fn print_visibility_ledger() {
+    if let Ok(path) = ensure_journal() {
+        let (events, _) = read_events_lossy(&path);
+        let all = projection::project_strands(&events, true);
+        let hidden_n = all.iter().filter(|s| s.hidden).count();
+        let visible: Vec<_> = all.iter().filter(|s| !s.hidden).collect();
+        let active_n = visible.iter().filter(|s| s.state() == "registered").count();
+        let closed_n = visible.len() - active_n;
+        println!("journal: {} active | {} closed | {} hidden", active_n, closed_n, hidden_n);
+    }
+}
+
+/// Print the handle line only (id + type + entries + state). Used by
+/// hide/unhide/link/bind where we show a reduced card.
+fn print_handle_line(card: &output::OrientStrand, state: &str) {
+    let type_info = card
+        .strand_type
+        .as_deref()
+        .map(|t| format!(" [{}]", t))
+        .unwrap_or_default();
+    println!(
+        "  {}{} | {} entries | {}",
+        card.id, type_info, card.entries, state
+    );
+}
+
 /// Pure projection for orient. Never touches the journal (ADR-0003: orient
 /// stays pure-read; the catch-up cursor is each strand's own last_offset).
 fn build_orient(
@@ -2299,22 +2427,7 @@ fn build_orient(
 
     output::OrientOutput {
         max_offset,
-        active: active
-            .iter()
-            .map(|s| output::OrientStrand {
-                id: shorten(&s.id),
-                strand_type: s.strand_type.clone(),
-                entries: s.log_count(),
-                summary: truncate(s.first_summary(), 70),
-                last_entry: truncate(s.last_summary(), 70),
-                last_offset: s.last_offset(),
-                catch_up: format!(
-                    "tasktree timeline --since-offset {} --links {}",
-                    s.last_offset(),
-                    shorten(&s.id)
-                ),
-            })
-            .collect(),
+        active: active.iter().map(|s| make_card(s)).collect(),
         closed_count,
         hidden_count,
         remind: ORIENT_REMIND.to_string(),
@@ -4728,6 +4841,91 @@ fn create_strand(content: &str) -> String {
         // context
         let r = cmd_context(None, &[], None, None, false, false);
         assert!(r.is_ok());
+    }
+
+    // ── card echo: make_card ──
+
+    #[test]
+    fn make_card_fields_match_projected_strand() {
+        let _env = setup();
+        let id = create_strand("summary text for the card");
+        cmd_append(Some("second entry"), Some(&id), false, false, None, None, None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let s = strands.iter().find(|s| s.id == id).expect("strand must exist");
+        let card = make_card(s);
+        assert_eq!(card.id, shorten(&id));
+        assert_eq!(card.entries, 2);
+        assert_eq!(card.summary, truncate(s.first_summary(), 70));
+        assert_eq!(card.last_entry, truncate(s.last_summary(), 70));
+        assert_eq!(card.last_offset, s.last_offset());
+    }
+
+    #[test]
+    fn make_card_truncates_prose_to_70() {
+        let _env = setup();
+        let long = "x".repeat(100);
+        let id = create_strand(&long);
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let s = strands.iter().find(|s| s.id == id).expect("strand must exist");
+        let card = make_card(s);
+        // truncate(100-char string, 70) → 70 chars + "..." = 73 total
+        assert!(card.summary.len() <= 73, "summary must be truncated to 70 chars + ...");
+        // id is never truncated: always shorten(full_id) = 12 chars
+        assert_eq!(card.id.len(), 12);
+    }
+
+    // ── card echo: strand_card_fresh / append paths ──
+
+    #[test]
+    fn append_explicit_id_card_fresh_has_new_entry() {
+        let _env = setup();
+        let id = create_strand("target");
+        cmd_append(Some("[lesson] learned something"), Some(&id), false, false, None, None, None, None).unwrap();
+        let (card, _state) = strand_card_fresh_with_state(&id).expect("card must be retrievable");
+        assert_eq!(card.last_entry, "[lesson] learned something");
+    }
+
+    #[test]
+    fn append_default_most_recent_card_fresh_reflects_write() {
+        let _env = setup();
+        let _id1 = create_strand("older");
+        let id2 = create_strand("newer");
+        cmd_append(Some("default route entry"), None, false, false, None, None, None, None).unwrap();
+        let (card, _state) = strand_card_fresh_with_state(&id2).expect("card must exist");
+        assert_eq!(card.last_entry, "default route entry");
+    }
+
+    #[test]
+    fn append_new_path_card_id_matches_new_strand() {
+        let _env = setup();
+        // Pre-populate so --new is not the only strand
+        create_strand("existing");
+        cmd_append(Some("brand new via --new"), None, true, false, None, None, None, None).unwrap();
+        // The new strand has the content as first_summary
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let new_s = strands.iter().find(|s| s.first_summary() == "brand new via --new")
+            .expect("new strand must exist");
+        let card = strand_card_fresh(&new_s.id).expect("card must be retrievable");
+        assert_eq!(card.id, shorten(&new_s.id));
+    }
+
+    // ── card echo: hide leaves strand retrievable via include_hidden=true ──
+
+    #[test]
+    fn strand_card_fresh_finds_hidden_strand() {
+        let _env = setup();
+        let id = create_strand("will be hidden");
+        cmd_hide(&id, None).unwrap();
+        // strand_card_fresh uses include_hidden=true — must still find it
+        let card = strand_card_fresh(&id);
+        assert!(card.is_some(), "strand_card_fresh must return card for hidden strand");
+        assert_eq!(card.unwrap().id, shorten(&id));
     }
 }
 
