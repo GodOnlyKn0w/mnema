@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tasktree *)",
+      "PowerShell(tasktree *)",
+      "PowerShell(Set-Location D:\\forks\\tasktree-core; tasktree *)",
+      "Bash(cd /d/forks/tasktree-core && tasktree *)",
+      "Bash(cargo build *)",
+      "Bash(cargo test *)",
+      "PowerShell(cargo build *)",
+      "PowerShell(cargo test *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git status *)",
+      "Bash(git -C /d/forks/tasktree-core diff *)",
+      "Bash(git -C /d/forks/tasktree-core log *)",
+      "Bash(git -C /d/forks/tasktree-core status *)",
+      "PowerShell(git diff *)",
+      "PowerShell(git log *)",
+      "PowerShell(git status *)",
+      "PowerShell(git -C D:\\forks\\tasktree-core diff *)",
+      "PowerShell(git -C D:\\forks\\tasktree-core log *)",
+      "PowerShell(git -C D:\\forks\\tasktree-core status *)"
+    ]
+  }
+}

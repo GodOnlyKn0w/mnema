@@ -53,7 +53,7 @@ static TOPICS: &[TopicInfo] = &[
   都在写后回显受影响线的卡片。
 
 JSON 形态（OrientStrand，写命令 result 字段 / orient active[]）：
-  - id:           缩短的 strand id（12 字符十六进制前缀）
+  - id:           全宽 strand id（24 hex，跨输出可直接 join）
   - strand_type:  线的类型，可为 null（task/dag/why/session）
   - entry_count:  日志条目计数
   - summary:      第一条日志截断到 70 字符
@@ -93,8 +93,8 @@ Marker 语义（一行一条）：
   [checkpoint]  由 tasktree checkpoint 命令写入，勿手动添加
   [waiting:human] 等待人工响应
 
-未知的 [m.../c.../f.../v.../d.../e.../r...] 前缀被拒绝（防止拼写错误）；
-其他方括号文本作为内容透传。"#,
+未知方括号前缀一律作为内容透传（不拒写）；与已知 marker
+编辑距离≤2 的拼错会在 stderr 收到 W073 提示。"#,
     },
     TopicInfo {
         name: "retry",
@@ -413,6 +413,21 @@ static CATALOG: &[DiagnosticInfo] = &[
             requires_human: true,
         },
         producer: "health",
+    },
+    DiagnosticInfo {
+        code: "W073",
+        severity: Severity::Warning,
+        category: "lifecycle",
+        title: "unknown marker — possible typo",
+        finding: "The appended content starts with a bracket word (e.g. [freiction]) that is not in the known marker vocabulary but is within edit distance 2 of a known marker.",
+        impact: "The entry was written as plain content, not a structured marker — it will be invisible to projections that filter by marker type.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "check vocabulary: tasktree explain markers",
+            executable: false,
+            requires_human: true,
+        },
+        producer: "append",
     },
 ];
 
@@ -737,7 +752,8 @@ mod tests {
         assert!(codes.contains(&"W069"));
         assert!(codes.contains(&"W070"));
         assert!(codes.contains(&"W071"));
-        assert_eq!(codes.len(), 5, "catalog size changed — update this test deliberately");
+        assert!(codes.contains(&"W073"));
+        assert_eq!(codes.len(), 6, "catalog size changed — update this test deliberately");
     }
 
     #[test]
@@ -754,7 +770,7 @@ mod tests {
         // checkpoint command (strand-moved and closed-strand guards) — see
         // git history for the old meanings.
         for code in ["E047", "W058", "W065", "W067", "W072",
-                     "W073", "E081", "W081", "E082", "W082", "E083", "W083",
+                     "E081", "W081", "E082", "W082", "E083", "W083",
                      "E084", "W085", "E055", "E057", "E058", "W066"] {
             assert!(lookup(code).is_none(), "removed code {} reappeared", code);
         }
@@ -777,6 +793,22 @@ mod tests {
         assert_eq!(recovery["executable"], false);
         assert_eq!(recovery["requires_human"], true);
         assert!(recovery["command"].as_str().unwrap().contains("contradiction"));
+    }
+
+    #[test]
+    fn test_w073_can_explain() {
+        let info = lookup("W073").expect("W073 should be in catalog");
+        assert_eq!(info.code, "W073");
+        assert_eq!(info.title, "unknown marker — possible typo");
+        assert!(matches!(info.severity, Severity::Warning));
+        assert_eq!(info.category, "lifecycle");
+        assert_eq!(info.producer, "append");
+        let output = cmd_explain("W073", true);
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["code"], "W073");
+        assert_eq!(v["recovery"]["executable"], false);
+        assert_eq!(v["recovery"]["requires_human"], true);
     }
 
     #[test]

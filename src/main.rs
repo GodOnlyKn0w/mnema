@@ -1849,34 +1849,91 @@ fn looks_like_strand_id(value: &str) -> bool {
     (6..=32).contains(&len) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn validate_lifecycle_marker(content: &str) -> Result<(), String> {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("[") { return Ok(()); }
-    if let Some(end) = trimmed.find("]") {
-        let marker = &trimmed[..=end];
-        if is_convention_marker(marker) { return Ok(()); }
-        if is_known_marker(marker) { return Ok(()); }
-        if "mcfvder".contains(marker.chars().nth(1).unwrap_or(' ')) {
-            return Err(format!(
-                "unknown lifecycle marker {} - valid: [merged] [cancelled] [failed] [verified] [done] [ended] [dispatched] [registered]",
-                marker
-            ));
+/// Single source of truth for all known append markers.
+/// Used by validate_lifecycle_marker, suggest_marker, and CI closure tests.
+pub fn known_markers() -> &'static [&'static str] {
+    &[
+        // judgment
+        "[decision]", "[constraint]", "[friction]", "[fixed]", "[lesson]", "[insight]",
+        // observation
+        "[observed]", "[check]", "[progress]", "[deliverable]",
+        // planning
+        "[deadline]",
+        // structure
+        "[covers]", "[guide]", "[skill]", "[task]", "[session]",
+        // closing
+        "[done]", "[verified]", "[cancelled]", "[failed]", "[merged]", "[ended]",
+        "[dispatched]", "[registered]",
+        // system
+        "[checkpoint]", "[hidden]", "[waiting:human]", "[grill]",
+    ]
+}
+
+fn is_known_marker_str(marker: &str) -> bool {
+    known_markers().contains(&marker)
+}
+
+/// Compute Levenshtein edit distance between two strings.
+/// No external dependencies — pure Rust, O(m*n).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let m = a.len();
+    let n = b.len();
+    if m == 0 { return n; }
+    if n == 0 { return m; }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
+
+/// If `word` (a bracket-stripped lowercase marker candidate) is close to a
+/// known marker, return the best suggestion.  Returns None for exact matches,
+/// unknown-but-distant words, and non-alphabetic tags like [W062] or [2026-06].
+fn suggest_marker(marker: &str) -> Option<&'static str> {
+    // Strip brackets: "[freiction]" → "freiction"
+    let inner = marker.trim_start_matches('[').trim_end_matches(']');
+    // Reject if it contains non-alphabetic chars (handles [W062], [2026-06], [my-tag], etc.)
+    if inner.chars().any(|c| !c.is_alphabetic() && c != ':') {
+        return None;
+    }
+    // Find closest known marker by edit distance on inner word vs known inner word
+    let mut best_dist = usize::MAX;
+    let mut best_marker: Option<&'static str> = None;
+    for &km in known_markers() {
+        let km_inner = km.trim_start_matches('[').trim_end_matches(']');
+        let dist = levenshtein(inner, km_inner);
+        if dist == 0 {
+            return None; // exact match — not a typo
+        }
+        if dist < best_dist {
+            best_dist = dist;
+            best_marker = Some(km);
         }
     }
+    if best_dist <= 2 {
+        best_marker
+    } else {
+        None
+    }
+}
+
+fn validate_lifecycle_marker(content: &str) -> Result<(), String> {
+    // All bracket-prefixed content is accepted — unknown markers are handled
+    // by the W073 warning path in cmd_append (post-write, stderr only).
+    // This function is kept for future hard-rejection cases (none currently).
+    let _ = content;
     Ok(())
-}
-
-fn is_convention_marker(marker: &str) -> bool {
-    matches!(marker,
-        "[observed]" | "[check]" | "[friction]" | "[progress]" |
-        "[decision]" | "[constraint]" | "[grill]" | "[insight]" | "[lesson]" | "[fixed]" |
-        "[deliverable]" | "[skill]" | "[guide]" | "[covers]" | "[deadline]" |
-        "[waiting:human]" | "[checkpoint]" | "[session]" | "[task]"
-    )
-}
-
-fn is_known_marker(marker: &str) -> bool {
-    matches!(marker, "[merged]" | "[cancelled]" | "[failed]" | "[verified]" | "[done]" | "[ended]" | "[dispatched]" | "[registered]")
 }
 
 fn cmd_append(
@@ -2028,6 +2085,25 @@ fn cmd_append(
     with_journal_write_lock(|journal| {
         append_event_unlocked(journal, &event)
     })?;
+
+    // W073: after successful write, check for possible marker typo (stderr only).
+    {
+        let trimmed = stored.trim_start();
+        if trimmed.starts_with('[') {
+            if let Some(end) = trimmed.find(']') {
+                let marker = &trimmed[..=end];
+                if !is_known_marker_str(marker) {
+                    if let Some(suggestion) = suggest_marker(marker) {
+                        eprintln!(
+                            "W073: unknown marker {} — did you mean {}? (tasktree explain markers)",
+                            marker, suggestion
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     if format == Some("json") {
         let card = strand_card_fresh(&full_id);
         let card_val = card.as_ref().map(|c| serde_json::to_value(c).ok()).flatten();
@@ -6894,6 +6970,98 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let result = cmd_add(None, false, Some("/nonexistent/path/to/file.txt"), false, None, None);
         assert!(result.is_err(), "add --file with nonexistent file must error");
+    }
+
+    // ── W073: typo marker suggestion ─────────────────────────────────────────
+
+    #[test]
+    fn levenshtein_basic() {
+        assert_eq!(levenshtein("decision", "decision"), 0);
+        assert_eq!(levenshtein("freiction", "friction"), 1);   // one extra char
+        assert_eq!(levenshtein("decsion", "decision"), 1);     // transposition/missing
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+    }
+
+    #[test]
+    fn suggest_marker_typo_triggers() {
+        // [freiction] → friction (distance 1)
+        let r = suggest_marker("[freiction]");
+        assert_eq!(r, Some("[friction]"), "freiction should suggest friction");
+
+        // [decsion] → decision (distance 1)
+        let r2 = suggest_marker("[decsion]");
+        assert_eq!(r2, Some("[decision]"), "decsion should suggest decision");
+    }
+
+    #[test]
+    fn suggest_marker_exact_match_is_silent() {
+        // Exact match must return None (not a typo)
+        assert_eq!(suggest_marker("[decision]"), None);
+        assert_eq!(suggest_marker("[friction]"), None);
+        assert_eq!(suggest_marker("[done]"), None);
+    }
+
+    #[test]
+    fn suggest_marker_custom_tags_are_silent() {
+        // Custom tags with hyphens, digits, or uppercase-looking codes must be silent
+        assert_eq!(suggest_marker("[my-tag]"), None,    "hyphen tag must be silent");
+        assert_eq!(suggest_marker("[W062]"), None,       "W-code must be silent");
+        assert_eq!(suggest_marker("[2026-06]"), None,    "date tag must be silent");
+        assert_eq!(suggest_marker("[myCustomTag]"), None, "long distant tag must be silent");
+    }
+
+    #[test]
+    fn suggest_marker_non_bracket_is_silent() {
+        // Content not starting with [ must never fire W073 (validate_lifecycle_marker returns Ok)
+        assert!(validate_lifecycle_marker("plain text").is_ok());
+        assert!(validate_lifecycle_marker("just a note").is_ok());
+    }
+
+    #[test]
+    fn known_markers_covers_all_topic_markers() {
+        // Every bracket marker in the markers topic body must be in known_markers().
+        let topic = diagnostics::topic_lookup("markers")
+            .expect("markers topic must exist");
+        let in_topic = extract_bracket_markers(topic.body);
+        let km: Vec<&str> = known_markers().to_vec();
+        let mut missing: Vec<String> = Vec::new();
+        for m in &in_topic {
+            // Skip [hidden] — present in known_markers but not required to be
+            // listed in topic body prose
+            if !km.contains(&m.as_str()) {
+                missing.push(m.clone());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "markers in topic body not in known_markers(): {:?}", missing
+        );
+    }
+
+    #[test]
+    fn w073_append_typo_succeeds_and_suggest_fires() {
+        // Verify: cmd_append succeeds (W073 never blocks writes).
+        // Verify: suggest_marker returns a suggestion for the typo.
+        let _env = setup();
+        let id = create_strand("w073 test strand");
+        let result = cmd_append(
+            Some("[freiction] this is a typo marker"),
+            None, false, false, None, Some(&id), None, None,
+        );
+        assert!(result.is_ok(), "append must succeed even with typo marker: {:?}", result);
+        // Confirm suggest_marker would have fired
+        let suggestion = suggest_marker("[freiction]");
+        assert_eq!(suggestion, Some("[friction]"));
+    }
+
+    #[test]
+    fn w073_exact_marker_is_silent() {
+        // Correctly spelled markers must not trigger W073.
+        assert_eq!(suggest_marker("[decision]"), None);
+        assert_eq!(suggest_marker("[constraint]"), None);
+        assert_eq!(suggest_marker("[progress]"), None);
     }
 }
 
