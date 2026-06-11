@@ -444,6 +444,7 @@ After orienting:
                     tasktree checkpoint --id <ID> --action \"<what and why>\"
 
 Closed strands are folded to a count; retrieve with tasktree list.
+Hidden strands are folded to a count; retrieve with tasktree list --all.
 Exit codes:
   0 ok
   1 journal missing or unreadable")]
@@ -2196,6 +2197,21 @@ fn cmd_timeline(
             "count": count,
             "max_offset": max_offset,
         }));
+    } else if entries.is_empty() {
+        // No dead ends (design principle): empty result must say something.
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(so) = since_offset { parts.push(format!("since-offset {}", so)); }
+        if let Some(st) = since_ts { parts.push(format!("since-ts {}", st)); }
+        if let Some(uo) = until_offset { parts.push(format!("until-offset {}", uo)); }
+        if let Some(ut) = until_ts { parts.push(format!("until-ts {}", ut)); }
+        if let Some(sid) = strand { parts.push(format!("strand {}", sid)); }
+        if let Some(lid) = links { parts.push(format!("links {}", lid)); }
+        if let Some(root) = tree_root { parts.push(format!("tree {}", root)); }
+        if parts.is_empty() {
+            println!("(journal is empty)");
+        } else {
+            println!("(no events match: {})", parts.join(", "));
+        }
     } else {
         for e in &entries {
             let ts_short = &e.ts[11..19]; // HH:MM:SS
@@ -2239,6 +2255,13 @@ fn build_orient(
     limit: usize,
     max_offset: usize,
 ) -> output::OrientOutput {
+    // strands contains ALL strands (hidden + visible); split here so that
+    // hidden_count can be computed regardless of include_hidden.
+    let hidden_count = if include_hidden {
+        0
+    } else {
+        strands.iter().filter(|s| s.hidden).count()
+    };
     let visible: Vec<&projection::ProjectedStrand> = strands
         .iter()
         .filter(|s| !s.hidden || include_hidden)
@@ -2272,6 +2295,7 @@ fn build_orient(
             })
             .collect(),
         closed_count,
+        hidden_count,
         remind: ORIENT_REMIND.to_string(),
     }
 }
@@ -2281,17 +2305,20 @@ fn cmd_orient(format: Option<&str>, include_hidden: bool, limit: Option<usize>) 
     let path = ensure_journal()?;
     let (events, skipped) = read_events_lossy(&path);
     let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
-    let strands = projection::project_strands(&events, include_hidden);
+    // Always project with include_hidden=true so build_orient can count hidden
+    // strands; the visible/hidden split is done inside build_orient.
+    let strands = projection::project_strands(&events, true);
     let out = build_orient(&strands, include_hidden, limit.unwrap_or(10), max_offset);
 
     if format == Some("json") {
         println!("{}", serde_json::to_string(&out).expect("serialize"));
     } else {
         println!(
-            "journal: max_offset {} | {} active | {} closed (tasktree list)",
+            "journal: max_offset {} | {} active | {} closed | {} hidden (tasktree list)",
             out.max_offset,
             out.active.len(),
-            out.closed_count
+            out.closed_count,
+            out.hidden_count
         );
         for s in &out.active {
             let type_info = s
@@ -3452,7 +3479,9 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let max_offset = events.last().map(|(o, _)| *o).unwrap();
-        let strands = projection::project_strands(&events, false);
+        // build_orient always receives the full strand list (include_hidden=true
+        // in projection); the visible/hidden split is done inside build_orient.
+        let strands = projection::project_strands(&events, true);
         let out = build_orient(&strands, false, 10, max_offset);
 
         assert_eq!(out.max_offset, max_offset);
@@ -3471,6 +3500,36 @@ fn create_strand(content: &str) -> String {
     }
 
     #[test]
+    fn orient_hidden_count_reflects_scar_principle() {
+        let _env = setup();
+        let open_id = create_strand("open work");
+        let hidden_id = create_strand("will be hidden");
+        cmd_hide(&hidden_id, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let max_offset = events.last().map(|(o, _)| *o).unwrap();
+        let strands = projection::project_strands(&events, true);
+
+        // Default view (include_hidden=false): hidden strand must be absent
+        // from active/closed pools but counted in hidden_count.
+        let out = build_orient(&strands, false, 10, max_offset);
+        assert_eq!(out.hidden_count, 1, "hidden strand must appear in hidden_count");
+        assert_eq!(out.closed_count, 0, "hidden strand must not inflate closed_count");
+        let open_short = shorten(&open_id);
+        let hidden_short = shorten(&hidden_id);
+        let active_ids: Vec<&str> = out.active.iter().map(|s| s.id.as_str()).collect();
+        assert!(active_ids.contains(&open_short.as_str()), "visible strand must be in menu");
+        assert!(!active_ids.contains(&hidden_short.as_str()), "hidden strand absent from menu");
+
+        // include_hidden=true: hidden strand joins the pool; hidden_count=0.
+        let out_all = build_orient(&strands, true, 10, max_offset);
+        assert_eq!(out_all.hidden_count, 0, "include_hidden=true must yield hidden_count=0");
+        let all_ids: Vec<&str> = out_all.active.iter().map(|s| s.id.as_str()).collect();
+        assert!(all_ids.contains(&hidden_short.as_str()), "include_hidden=true puts hidden strand in menu");
+    }
+
+    #[test]
     fn orient_limit_keeps_most_recent() {
         let _env = setup();
         let older = create_strand("older line");
@@ -3479,7 +3538,7 @@ fn create_strand(content: &str) -> String {
 
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
-        let strands = projection::project_strands(&events, false);
+        let strands = projection::project_strands(&events, true);
         let out = build_orient(&strands, false, 1, events.last().map(|(o, _)| *o).unwrap());
 
         assert_eq!(out.active.len(), 1);
@@ -3618,7 +3677,7 @@ fn create_strand(content: &str) -> String {
         let id = create_strand("a line");
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
-        let strands = projection::project_strands(&events, false);
+        let strands = projection::project_strands(&events, true);
         let out = build_orient(&strands, false, 10, 2);
         try_parse_example(&out.active[0].catch_up).unwrap();
         let _ = id;
@@ -3714,6 +3773,84 @@ fn create_strand(content: &str) -> String {
         let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
         let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
         assert!(diags.iter().all(|(c, _)| *c != "W062"), "same-strand pair must not fire: {:?}", diags);
+    }
+
+    // ── vocabulary consistency: catalog markers must be writable ──
+
+    /// Extract bracket markers of the form `[a-z][a-z0-9_:-]*]` from a string.
+    /// Hand-rolled to avoid a regex dependency.
+    fn extract_bracket_markers(s: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let bytes = s.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        while i < len {
+            if bytes[i] == b'[' {
+                // First char must be a-z
+                if i + 1 < len && bytes[i + 1].is_ascii_lowercase() {
+                    let start = i;
+                    let mut j = i + 1;
+                    while j < len {
+                        let b = bytes[j];
+                        if b.is_ascii_alphanumeric() || b == b'_' || b == b':' || b == b'-' {
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if j < len && bytes[j] == b']' {
+                        out.push(s[start..=j].to_string());
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn catalog_referenced_markers_are_writable() {
+        // Markers extracted from catalog prose that are NOT entry markers —
+        // they are placeholder tokens or descriptions, not bracket-prefixed
+        // log entries. Allowlist with comment per entry.
+        let allowlist: &[&str] = &[
+            // none yet
+        ];
+
+        // Markers the emitter code parses (from run_journal_diagnostics).
+        let emitter_markers: &[&str] = &[
+            "[deadline]", "[decision]", "[constraint]", "[verified]",
+            "[done]", "[cancelled]", "[failed]", "[merged]", "[ended]",
+        ];
+
+        let mut all_markers: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Collect from catalog prose.
+        for info in diagnostics::catalog() {
+            for s in [info.finding, info.impact, info.recovery.command_str] {
+                for marker in extract_bracket_markers(s) {
+                    all_markers.insert(marker);
+                }
+            }
+        }
+        // Always include the hardcoded emitter markers.
+        for m in emitter_markers {
+            all_markers.insert(m.to_string());
+        }
+
+        let mut failures: Vec<String> = Vec::new();
+        for marker in &all_markers {
+            if allowlist.contains(&marker.as_str()) {
+                continue;
+            }
+            let test_content = format!("{} x", marker);
+            if let Err(e) = validate_lifecycle_marker(&test_content) {
+                failures.push(format!("marker {} referenced in catalog/emitter but rejected by validate_lifecycle_marker: {}", marker, e));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     // ── context exposure axis (ADR-0002) ──

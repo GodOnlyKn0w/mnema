@@ -39,6 +39,9 @@ pub struct OrientOutput {
     /// Closed/hidden strands folded to a count (exposure axis: the dead
     /// folds into a scar, retrievable via `list`).
     pub closed_count: usize,
+    /// Strands excluded solely because they are hidden (scar principle).
+    /// Zero when include_hidden=true (they join the menu/closed pools instead).
+    pub hidden_count: usize,
     pub remind: String,
 }
 
