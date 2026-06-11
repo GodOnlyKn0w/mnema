@@ -98,6 +98,10 @@ Run:
   tasktree <command> --help"
 )]
 struct Cli {
+    /// Operate as if started in DIR (journal walk-up and relative paths use DIR)
+    #[arg(short = 'C', long = "chdir", value_name = "DIR", global = true)]
+    chdir: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -3648,6 +3652,19 @@ fn main() {
         }
     };
 
+    // -C / --chdir: change to DIR before any journal resolution
+    if let Some(dir) = &cli.chdir {
+        let target = std::path::Path::new(dir);
+        if !target.exists() {
+            eprintln!("error: -C {}: no such directory", dir);
+            std::process::exit(3);
+        }
+        if let Err(e) = std::env::set_current_dir(target) {
+            eprintln!("error: -C {}: {}", dir, e);
+            std::process::exit(3);
+        }
+    }
+
     // Checkpoint has its own error handling (exit codes 1/2/3, JSON output)
     if let Commands::Checkpoint { id, action, tail, format, include_hidden, provenance } = &cli.command {
         let fmt = format.as_deref() == Some("json");
@@ -3943,6 +3960,64 @@ mod tests {
         let result = with_tasktree_home(None, || resolve_journal_dir());
         std::env::set_current_dir(&prev_cwd).unwrap();
         assert!(result.is_err(), "should error, not infinite loop");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // -C / --chdir global flag tests
+    // ─────────────────────────────────────────────────────────────────
+
+    /// -C parses correctly from ['tasktree', '-C', 'X', 'orient']
+    #[test]
+    fn chdir_flag_parses_before_subcommand() {
+        use clap::CommandFactory;
+        let result = Cli::command()
+            .try_get_matches_from(["tasktree", "-C", "/some/dir", "orient"]);
+        assert!(result.is_ok(), "'-C DIR orient' must parse: {:?}", result);
+    }
+
+    /// --chdir long form also parses
+    #[test]
+    fn chdir_longform_parses() {
+        use clap::CommandFactory;
+        let result = Cli::command()
+            .try_get_matches_from(["tasktree", "--chdir", "/some/dir", "orient"]);
+        assert!(result.is_ok(), "--chdir long form must parse: {:?}", result);
+    }
+
+    /// -C after subcommand also works (global = true)
+    #[test]
+    fn chdir_global_after_subcommand_parses() {
+        use clap::CommandFactory;
+        let result = Cli::command()
+            .try_get_matches_from(["tasktree", "orient", "-C", "/some/dir"]);
+        assert!(result.is_ok(), "'-C' after subcommand (global) must parse: {:?}", result);
+    }
+
+    /// -C pointing at a real .tasktree dir resolves journal from unrelated cwd.
+    #[test]
+    fn chdir_resolves_journal_from_foreign_cwd() {
+        // env has .tasktree/ in its temp dir; we set cwd to a different temp dir
+        // (no .tasktree/), then set_current_dir to env path, and resolve succeeds.
+        let env = setup();     // cwd is now env.path() with .tasktree/
+        let foreign = tempfile::tempdir().unwrap();
+        // Move cwd to the foreign dir (no .tasktree/)
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(foreign.path()).unwrap();
+        // Simulate what -C does: set_current_dir to the project root
+        std::env::set_current_dir(env.path()).unwrap();
+        let result = with_tasktree_home(None, || resolve_journal_dir());
+        std::env::set_current_dir(&prev).unwrap();
+        assert!(result.is_ok(), "-C to project root must resolve journal: {:?}", result);
+        drop(env);
+    }
+
+    /// -C to a non-existent directory: the binary would exit 3.
+    /// We test that set_current_dir on a missing path returns Err.
+    #[test]
+    fn chdir_nonexistent_dir_errors() {
+        let missing = std::path::Path::new("/this/path/does/not/exist/hopefully/xyz");
+        let result = std::env::set_current_dir(missing);
+        assert!(result.is_err(), "set_current_dir to missing path must fail");
     }
 
     #[test]
