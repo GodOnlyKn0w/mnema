@@ -36,25 +36,39 @@ fn version_info() -> &'static str {
     name = "tasktree",
     version = version_info(),
     after_help = "\
-Commands:
-  orient      Session-start orientation: active strand menu + catch-up commands
-  add         Create a new strand
-  append      Append an entry to a strand
-  close       Close a strand (write a StrandClosed lifecycle event)
-  reopen      Reopen a closed strand (write a StrandReopened lifecycle event)
-  bind        Record a subject binding
-  checkpoint  Record context before an irreversible or state-closing action
-  current     Project the latest effective subject binding
-  doctor      Diagnose journal integrity
-  explain     Explain a diagnostic code or topic (card, markers, retry, json, grammar)
-  export      Export journal as standalone audit artifact
-  list        List strands
-  show        Show a strand
-  search      Search entries
-  find        Find a strand
+loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
 
-Run:
-  tasktree <command> --help"
+  orient        Session entry: active strand menu + catch-up commands
+
+看 / read:
+  list          List strands
+  show          Show one strand (--digest one-glance, --tail N recent)
+  timeline      Chronological entries across strands (+linked)
+  search        Full-text search across entries
+  find          Resolve a strand id
+  tree          Strand forest (belongs-to nesting)
+  current       Latest effective subject binding
+  agent-context Machine-readable active-strand context
+  context       Project a typed context slice
+
+做 / change:
+  add           Create a new strand
+  append        Append an entry to a strand
+  close         Close a strand (StrandClosed event)
+  reopen        Reopen a closed strand (StrandReopened event)
+  checkpoint    Record context before an irreversible action
+  link          Link strands (depends-on / belongs-to / why)
+  bind          Record a subject binding
+
+管 / manage:
+  init          Initialize .tasktree/ journal
+  hide          Hide a strand from active orient (parked, revivable)
+  unhide        Unhide a strand
+  doctor        Diagnose journal integrity
+  export        Export journal as standalone audit artifact
+  explain       Explain a diagnostic code or topic (markers, json, grammar, ...)
+
+Run:  tasktree <command> --help"
 )]
 struct Cli {
     /// Operate as if started in DIR (journal walk-up and relative paths use DIR)
@@ -78,7 +92,7 @@ struct IdTarget {
     id_flag: Option<String>,
 }
 impl IdTarget {
-    fn get(&self) -> Option<&str> { self.id_pos.as_deref().or(self.id_flag.as_deref()) }
+    fn get(&self) -> Option<&str> { self.id_pos.as_deref().or(self.id_flag.as_deref()).filter(|s| !s.trim().is_empty()) }
 }
 
 #[derive(Subcommand)]
@@ -653,6 +667,11 @@ fn cmd_init() -> Result<(), String> {
 
 
 pub(crate) fn find_strand(events: &[(usize, Event)], id: &str) -> Option<String> {
+    // Empty/whitespace id must not resolve: starts_with("") matches every
+    // strand, which would silently target the first one (data-integrity footgun).
+    if id.trim().is_empty() {
+        return None;
+    }
     // Prefix match: first strand whose id starts with the given string
     events
         .iter()
@@ -2873,11 +2892,11 @@ fn create_strand(content: &str) -> String {
         let entry = &out.active[0];
         assert_eq!(entry.id, open_id);
         assert_eq!(entry.summary, "open line of work");
-        // Catch-up command is copy-paste runnable and anchored on the
-        // strand's own last_offset (ADR-0003).
+        // Catch-up is copy-paste runnable and shows the strand's recent
+        // content (show --tail), never the empty-prone since-offset delta.
         assert_eq!(
             entry.catch_up,
-            format!("tasktree timeline --since-offset {} --links {}", entry.last_offset, open_id)
+            format!("tasktree show --id {} --tail 8", open_id)
         );
         assert!(out.remind.contains("checkpoint"));
         assert!(out.remind.contains("matter concluded"), "remind must carry the closing segment");
@@ -6073,6 +6092,37 @@ fn create_strand(content: &str) -> String {
         // digest = true; should succeed (census path, no full log dump)
         let r = cmd_show(Some(&id), false, None, false, false, true);
         assert!(r.is_ok(), "show --digest failed: {:?}", r);
+    }
+
+    #[test]
+    fn find_strand_rejects_empty_id() {
+        let _env = setup();
+        let id = create_strand("real strand");
+        let (events, _) = read_events_lossy(&ensure_journal().unwrap());
+        // empty / whitespace id must NOT silently resolve to the first strand
+        assert_eq!(find_strand(&events, ""), None, "empty id must not match any strand");
+        assert_eq!(find_strand(&events, "   "), None, "whitespace id must not match");
+        // a real prefix still resolves
+        assert_eq!(find_strand(&events, &id[..8]), Some(id.clone()));
+    }
+
+    #[test]
+    fn orient_catch_up_shows_content_not_empty_delta() {
+        let _env = setup();
+        let id = create_strand("catch up target");
+        let (events, _) = read_events_lossy(&ensure_journal().unwrap());
+        let strands = projection::project_strands(&events, true);
+        let s = strands.iter().find(|s| s.id == id).unwrap();
+        let card = render::make_card(s);
+        // catch-up must show the strand's recent content (never the empty-prone
+        // `--since-offset <last_offset>` form, which shows nothing at orient time).
+        assert!(card.catch_up.contains("show"), "catch_up must use show: {}", card.catch_up);
+        assert!(card.catch_up.contains("--tail"), "catch_up must show recent tail: {}", card.catch_up);
+        assert!(
+            !card.catch_up.contains("--since-offset"),
+            "catch_up must not use the empty-prone since-offset form: {}",
+            card.catch_up
+        );
     }
 }
 

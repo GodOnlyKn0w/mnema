@@ -27,11 +27,7 @@ pub(crate) fn make_card(s: &projection::ProjectedStrand) -> output::OrientStrand
         summary: truncate(s.first_summary(), 70),
         last_entry: truncate(s.last_summary(), 70),
         last_offset: s.last_offset(),
-        catch_up: format!(
-            "tasktree timeline --since-offset {} --links {}",
-            s.last_offset(),
-            s.id
-        ),
+        catch_up: format!("tasktree show --id {} --tail 8", s.id),
         lifecycle: s.state().to_string(),
     }
 }
