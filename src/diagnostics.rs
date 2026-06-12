@@ -46,10 +46,15 @@ static TOPICS: &[TopicInfo] = &[
   last:    <last_entry>（最近一条日志；entries>1 时出现）
   疤痕行   仅当命令产生 W 码时追加（如 W070、W071）
 
+把手行中的 <state> 显示生命周期（lifecycle），格式：
+  open:   registered（未关闭）
+  closed: closed:<disposition>（如 closed:done、closed:failed）
+  生命周期由 tasktree close / reopen 命令改变，append 的 marker 是注解。
+
 语义：
   回显即预付的验证——写命令输出卡片是为了让调用方
   无需再跑 show/orient 确认写入是否生效。
-  所有写命令（append/add/checkpoint/bind/hide/unhide/link）
+  所有写命令（append/add/checkpoint/bind/hide/unhide/link/close/reopen）
   都在写后回显受影响线的卡片。
 
 JSON 形态（OrientStrand，写命令 result 字段 / orient active[]）：
@@ -60,6 +65,7 @@ JSON 形态（OrientStrand，写命令 result 字段 / orient active[]）：
   - last_entry:   最近一条日志截断到 70 字符
   - last_offset:  该线最近事件的 journal offset
   - catch_up:     就绪的 timeline 追赶命令
+  - lifecycle:    生命周期（"registered" 或 "closed:<disposition>"）
 
 JSON shape 索引见 tasktree explain json"#,
     },
@@ -67,12 +73,14 @@ JSON shape 索引见 tasktree explain json"#,
         name: "markers",
         title: "Marker 词表——append 条目前缀规范",
         body: r#"Marker 是 append 条目首行的方括号前缀，机器可解析。
+Marker 是注解（annotation），不改变线的生命周期。
+生命周期由 close / reopen 命令控制，不由 marker 控制。
 
 judgment:    [decision] [constraint] [friction] [fixed] [lesson] [insight]
 observation: [observed] [check] [progress] [deliverable]
 planning:    [deadline] <text> by=YYYY-MM-DD  （或 by=<RFC3339>）
 structure:   [covers] [guide] [skill] [task] [session]
-closing:     [done] [verified] [cancelled] [failed] [merged] [ended]
+annotation:  [done] [verified] [cancelled] [failed] [merged] [ended]
              [dispatched] [registered]
 system:      [checkpoint] [hidden] [waiting:human] [grill]
 
@@ -80,21 +88,17 @@ Marker 语义（一行一条）：
   [decision]    已做的决定
   [constraint]  必须遵守的约束
   [friction]    阻力 / 未解决的问题
-  [fixed]       已修复的问题；引擎自动与前一条未配对 [friction] 配对（栈式就近）；
-                可用 fixes=<append_id前缀≥8位> 显式指定目标 friction
+  [fixed]       已修复；可用 fixes=<append_id前缀≥8位> 指定目标 friction
   [lesson]      学到的教训
   [insight]     洞见
   [observed]    观察到的事实
-  [check]       检查点记录
-  [progress]    进展
-  [deliverable] 交付物
+  [progress]    进展 / [deliverable] 交付物
   [deadline]    截止日期（by= 字段必须是日期或 RFC3339）
-  [done]        事情完成（关闭线的收尾标记）
+  [done]        完成注解（仅注解，不关闭线；关闭用 close --id <ID>）
   [checkpoint]  由 tasktree checkpoint 命令写入，勿手动添加
-  [waiting:human] 等待人工响应
 
-未知方括号前缀一律作为内容透传（不拒写）；与已知 marker
-编辑距离≤2 的拼错会在 stderr 收到 W073 提示。"#,
+未知方括号前缀一律透传（不拒写）；拼错收 W073；
+追加关闭类 marker 后收 W074 提醒改用 close 命令。"#,
     },
     TopicInfo {
         name: "retry",
@@ -431,6 +435,36 @@ static CATALOG: &[DiagnosticInfo] = &[
         },
         producer: "append",
     },
+    DiagnosticInfo {
+        code: "W074",
+        severity: Severity::Warning,
+        category: "lifecycle",
+        title: "closing marker appended — strand lifecycle unchanged",
+        finding: "The appended entry starts with a closing annotation marker ([done], [failed], [cancelled], [merged], or [verified]). Since lifecycle-from-marker semantics were removed, these markers are annotations only — the strand's lifecycle state was NOT changed by this append.",
+        impact: "If the intent was to close the strand, it remains open. Downstream tools that filter on lifecycle state (list --state done, orient closed_count) will not see this strand as closed.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::AppendMarker,
+            command_str: "tasktree close --id <STRAND_ID> [--as done|failed|cancelled|merged|verified]",
+            executable: false,
+            requires_human: false,
+        },
+        producer: "append",
+    },
+    DiagnosticInfo {
+        code: "W075",
+        severity: Severity::Warning,
+        category: "lifecycle",
+        title: "dangling fix reference — fixes= prefix unmatched",
+        finding: "A [fixed] entry carries a fixes=<prefix> token (prefix >= 8 hex chars) that does not match any [friction] entry's append_id in the same strand. The prefix either points to a nonexistent entry or to an entry that is not a [friction].",
+        impact: "The [fixed] entry is not folded and its intended friction target remains exposed as an unresolved live debt. The pairing was silently skipped.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Edit,
+            command_str: "check the fixes= prefix against tasktree show --id <STRAND_ID> and correct it",
+            executable: false,
+            requires_human: true,
+        },
+        producer: "context",
+    },
 ];
 
 // ── Lookup ──────────────────────────────────────────────────
@@ -650,6 +684,7 @@ mod tests {
             last_entry: "test".to_string(),
             last_offset: 0,
             catch_up: "tasktree timeline --since-offset 0 --links abc123".to_string(),
+            lifecycle: "registered".to_string(),
         };
         let v = serde_json::to_value(&sample).expect("serialize OrientStrand");
         let keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
@@ -755,7 +790,9 @@ mod tests {
         assert!(codes.contains(&"W070"));
         assert!(codes.contains(&"W071"));
         assert!(codes.contains(&"W073"));
-        assert_eq!(codes.len(), 6, "catalog size changed — update this test deliberately");
+        assert!(codes.contains(&"W074"));
+        assert!(codes.contains(&"W075"));
+        assert_eq!(codes.len(), 8, "catalog size changed — update this test deliberately");
     }
 
     #[test]
@@ -809,6 +846,22 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         assert_eq!(v["ok"], true);
         assert_eq!(v["code"], "W073");
+        assert_eq!(v["recovery"]["executable"], false);
+        assert_eq!(v["recovery"]["requires_human"], true);
+    }
+
+    #[test]
+    fn test_w075_can_explain() {
+        let info = lookup("W075").expect("W075 should be in catalog");
+        assert_eq!(info.code, "W075");
+        assert_eq!(info.title, "dangling fix reference — fixes= prefix unmatched");
+        assert!(matches!(info.severity, Severity::Warning));
+        assert_eq!(info.category, "lifecycle");
+        assert_eq!(info.producer, "context");
+        let output = cmd_explain("W075", true);
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["code"], "W075");
         assert_eq!(v["recovery"]["executable"], false);
         assert_eq!(v["recovery"]["requires_human"], true);
     }

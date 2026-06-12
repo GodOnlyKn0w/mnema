@@ -107,6 +107,26 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         provenance: Option<serde_json::Value>,
     },
+    /// Explicit close event written by `tasktree close`.
+    /// This is the only event type that changes a strand's lifecycle state to closed.
+    /// `disposition` is one of: done, failed, cancelled, merged, verified.
+    #[serde(rename = "strand_closed")]
+    StrandClosed {
+        id: String,
+        ts: String,
+        disposition: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        provenance: Option<serde_json::Value>,
+    },
+    /// Explicit reopen event written by `tasktree reopen`.
+    /// Moves the strand back to open/registered state.
+    #[serde(rename = "strand_reopened")]
+    StrandReopened {
+        id: String,
+        ts: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        provenance: Option<serde_json::Value>,
+    },
     /// Subject binding fact. Generic record of `subject_type + subject_id -> strand_id`.
     /// Consumers (e.g. `pi-strand`) decide what subject types mean; this crate only
     /// stores the binding, indexes it, and exposes it through `bind` / `current`.
@@ -130,7 +150,9 @@ impl Event {
             | Event::EdgeUnlinked { id, .. }
             | Event::StrandHidden { id, .. }
             | Event::StrandUnhidden { id, .. }
-            | Event::CheckpointCreated { id, .. } => id,
+            | Event::CheckpointCreated { id, .. }
+            | Event::StrandClosed { id, .. }
+            | Event::StrandReopened { id, .. } => id,
             // Binding events reference a strand but are not strand events.
             // Group them under the target strand so projection ignores them
             // (no StrandCreated match → filtered out by has_created gate).
@@ -254,6 +276,30 @@ pub fn make_edge_linked(
     }
 }
 
+/// Build a `StrandClosed` event.
+/// `disposition` must be one of: done, failed, cancelled, merged, verified.
+pub fn make_strand_closed(
+    id: &str,
+    disposition: &str,
+    provenance: Option<serde_json::Value>,
+) -> Event {
+    Event::StrandClosed {
+        id: id.to_string(),
+        ts: now(),
+        disposition: disposition.to_string(),
+        provenance,
+    }
+}
+
+/// Build a `StrandReopened` event.
+pub fn make_strand_reopened(id: &str, provenance: Option<serde_json::Value>) -> Event {
+    Event::StrandReopened {
+        id: id.to_string(),
+        ts: now(),
+        provenance,
+    }
+}
+
 pub fn make_strand_hidden(id: &str) -> Event {
     Event::StrandHidden {
         id: id.to_string(),
@@ -333,4 +379,8 @@ pub enum TimelineEventKind {
         subject_id: String,
         strand_id: String,
     },
+    StrandClosed {
+        disposition: String,
+    },
+    StrandReopened,
 }

@@ -3,6 +3,7 @@
 //! First-order projection only — builds tree structure, never interprets meaning.
 
 use crate::projection::ProjectedStrand;
+use crate::output::OrientStrand;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -161,4 +162,112 @@ fn resolve_id<'a>(
     } else {
         None
     }
+}
+
+// ── Orient forest (belongs-to projection) ────────────────────
+
+/// A node in the orient --tree forest. Carries the full OrientStrand card
+/// plus children that declared `belongs-to` this strand. Children are sorted
+/// by last_offset descending (same ordering as flat orient).
+#[derive(Debug, Serialize, Clone)]
+pub struct OrientForestNode {
+    #[serde(flatten)]
+    pub card: OrientStrand,
+    pub children: Vec<OrientForestNode>,
+}
+
+/// Build a belongs-to forest from a slice of active strands and their cards.
+///
+/// Algorithm:
+///   1. For each strand S, collect parent_ids = S.belongs_to_edges ∩ strand_ids_in_set.
+///      (A parent referenced but absent from the active set is treated as missing —
+///       the child becomes a root, visible at top level, not lost.)
+///   2. Strands with at least one known parent in the set get attached as children
+///      of their first resolved parent (deterministic: first belongs-to edge wins).
+///   3. Strands with no known parent in the set are roots.
+///   4. Children within each parent are sorted by last_offset descending.
+///   5. Roots are sorted by last_offset descending.
+///
+/// Contract: `strand_cards` are (ProjectedStrand, OrientStrand) pairs for the
+/// same strand set (same order not required). The set is typically the active
+/// (registered) strands from orient.
+pub fn build_orient_forest(
+    strand_cards: &[(&ProjectedStrand, OrientStrand)],
+) -> Vec<OrientForestNode> {
+    // 1. Index strand ids in the set for O(1) parent lookup
+    let id_set: HashSet<&str> = strand_cards.iter().map(|(s, _)| s.id.as_str()).collect();
+
+    // 2. Build adjacency: parent_id → vec of child strand_ids (in order encountered)
+    //    A strand declares its parent via belongs_to_edges. We use the first resolved
+    //    parent (first belongs_to edge whose target is in id_set).
+    let mut parent_of: HashMap<String, String> = HashMap::new(); // child_id → parent_id
+    for (s, _) in strand_cards {
+        for target in &s.belongs_to_edges {
+            if id_set.contains(target.as_str()) {
+                // First valid parent wins
+                parent_of.entry(s.id.clone()).or_insert_with(|| target.clone());
+                break;
+            }
+        }
+    }
+
+    // 3. Build node map: id → OrientForestNode (children empty for now)
+    let mut node_map: HashMap<String, OrientForestNode> = strand_cards
+        .iter()
+        .map(|(s, card)| {
+            (
+                s.id.clone(),
+                OrientForestNode {
+                    card: card.clone(),
+                    children: Vec::new(),
+                },
+            )
+        })
+        .collect();
+
+    // 4. Identify roots (strands with no parent in the set)
+    let child_ids: HashSet<String> = parent_of.keys().cloned().collect();
+    let mut root_ids: Vec<String> = strand_cards
+        .iter()
+        .filter(|(s, _)| !child_ids.contains(&s.id))
+        .map(|(s, _)| s.id.clone())
+        .collect();
+
+    // 5. Attach children to parents.
+    //    Collect (parent_id, child_id, child_last_offset) tuples for sorting.
+    let mut children_of: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+    for (child_id, parent_id) in &parent_of {
+        if let Some(node) = node_map.get(child_id) {
+            let offset = node.card.last_offset;
+            children_of
+                .entry(parent_id.clone())
+                .or_default()
+                .push((child_id.clone(), offset));
+        }
+    }
+
+    // Sort children by last_offset descending, then attach
+    for (parent_id, mut kids) in children_of {
+        kids.sort_by(|a, b| b.1.cmp(&a.1));
+        let child_nodes: Vec<OrientForestNode> = kids
+            .iter()
+            .filter_map(|(cid, _)| node_map.remove(cid))
+            .collect();
+        if let Some(parent_node) = node_map.get_mut(&parent_id) {
+            parent_node.children = child_nodes;
+        }
+    }
+
+    // 6. Collect roots; sort by last_offset descending
+    // Note: some child nodes were removed from node_map above; roots remain.
+    root_ids.sort_by(|a, b| {
+        let oa = node_map.get(a).map(|n| n.card.last_offset).unwrap_or(0);
+        let ob = node_map.get(b).map(|n| n.card.last_offset).unwrap_or(0);
+        ob.cmp(&oa)
+    });
+
+    root_ids
+        .into_iter()
+        .filter_map(|id| node_map.remove(&id))
+        .collect()
 }

@@ -18,7 +18,7 @@ use crate::projection::ProjectedStrand;
 // ── orient --format json ───────────────────────────────────
 
 /// One active strand in the orient menu.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct OrientStrand {
     pub id: String,
     pub strand_type: Option<String>,
@@ -29,6 +29,10 @@ pub struct OrientStrand {
     /// Ready-to-run catch-up command for this strand (ADR-0003: the cursor
     /// lives on the strand's last_offset, not on an observer).
     pub catch_up: String,
+    /// Lifecycle state: "registered" (open) or "closed:<disposition>"
+    /// (e.g. "closed:done", "closed:failed"). Set by close/reopen commands,
+    /// not by append markers. New field — additive to schema.
+    pub lifecycle: String,
 }
 
 /// External contract for `orient --format json`.
@@ -41,6 +45,21 @@ pub struct OrientOutput {
     pub closed_count: usize,
     /// Strands excluded solely because they are hidden (scar principle).
     /// Zero when include_hidden=true (they join the menu/closed pools instead).
+    pub hidden_count: usize,
+    pub remind: String,
+}
+
+/// External contract for `orient --tree --format json`.
+/// Strands are arranged as a belongs-to forest: strands declaring
+/// `belongs-to` edges to other active strands are nested under their parent.
+/// Strands with no known active parent appear as roots.
+#[derive(Debug, Serialize)]
+pub struct OrientTreeOutput {
+    pub max_offset: usize,
+    /// Forest roots (strands with no belongs-to parent in the active set).
+    /// Each root's `children` hold strands that declared `belongs-to` this root.
+    pub roots: Vec<crate::tree::OrientForestNode>,
+    pub closed_count: usize,
     pub hidden_count: usize,
     pub remind: String,
 }
@@ -201,6 +220,12 @@ pub enum TimelineEventKindOutput {
         subject_id: String,
         strand_id: String,
     },
+    #[serde(rename = "strand_closed")]
+    StrandClosed {
+        disposition: String,
+    },
+    #[serde(rename = "strand_reopened")]
+    StrandReopened,
 }
 
 fn is_false(b: &bool) -> bool { !b }
@@ -259,6 +284,10 @@ impl From<&crate::event::TimelineEntry> for TimelineEntryOutput {
                         subject_id: subject_id.clone(),
                         strand_id: strand_id.clone(),
                     },
+                crate::event::TimelineEventKind::StrandClosed { disposition } =>
+                    TimelineEventKindOutput::StrandClosed { disposition: disposition.clone() },
+                crate::event::TimelineEventKind::StrandReopened =>
+                    TimelineEventKindOutput::StrandReopened,
             },
             ts_skew: e.ts_skew,
         }

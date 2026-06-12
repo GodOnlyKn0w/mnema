@@ -83,6 +83,8 @@ Commands:
   orient      Session-start orientation: active strand menu + catch-up commands
   add         Create a new strand
   append      Append an entry to a strand
+  close       Close a strand (write a StrandClosed lifecycle event)
+  reopen      Reopen a closed strand (write a StrandReopened lifecycle event)
   bind        Record a subject binding
   checkpoint  Record context before an irreversible or state-closing action
   current     Project the latest effective subject binding
@@ -404,6 +406,50 @@ JSON shape: tasktree explain json")]
         format: Option<String>,
     },
 
+    /// Close a strand (write a StrandClosed lifecycle event)
+    ///
+    /// This is the only way to change a strand's lifecycle state to closed.
+    /// Appending [done] to a strand no longer closes it — use this command.
+    #[command(after_help = "\
+Dispositions (--as):
+  done       Work completed successfully (default)
+  failed     Work stopped due to failure
+  cancelled  Work abandoned intentionally
+  merged     Work merged into another strand
+  verified   Work completed and independently verified
+
+Examples:
+  tasktree close --id <ID>
+  tasktree close --id <ID> --as failed
+  tasktree close --id <ID> --as cancelled")]
+    Close {
+        /// Strand ID (prefix match)
+        #[arg(long = "id", value_name = "ID")]
+        id: String,
+        /// Disposition: done (default), failed, cancelled, merged, verified
+        #[arg(long = "as", value_name = "DISPOSITION")]
+        disposition: Option<String>,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+    },
+
+    /// Reopen a closed strand (write a StrandReopened lifecycle event)
+    ///
+    /// Moves the strand back to open/registered state.
+    #[command(after_help = "\
+Examples:
+  tasktree reopen --id <ID>
+  tasktree reopen --id <ID> --format json")]
+    Reopen {
+        /// Strand ID (prefix match)
+        #[arg(long = "id", value_name = "ID")]
+        id: String,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+    },
+
     /// Record a subject binding. Append-only. Newer bindings supersede
     /// older ones for the same (subject-type, subject-id) pair.
     #[command(after_help = "\
@@ -543,13 +589,18 @@ Output per active strand:
 After orienting:
   continue a line   tasktree append --id <ID> \"[decision] ...\"
   new matter        tasktree add \"<summary>\"
-  matter concluded  tasktree append --id <ID> \"[done] <how it ended>\"
-                    ([cancelled] or [failed] are alternatives)
+  matter concluded  tasktree close --id <ID> [--as done|failed|cancelled|merged|verified]
+                    (default: done; reopen with tasktree reopen --id <ID>)
   before anything irreversible
                     tasktree checkpoint --id <ID> --action \"<what and why>\"
 
 Closed strands are folded to a count; retrieve with tasktree list.
 Hidden strands are folded to a count; retrieve with tasktree list --all.
+
+--tree: render active strands as a belongs-to forest. Strands that declare
+  a belongs-to edge to another active strand are indented under their parent;
+  parallel siblings under the same parent are visible as a group.
+  Default orient (no --tree) is unchanged: flat list ordered by last_offset.
 Exit codes:
   0 ok
   1 journal missing or unreadable
@@ -564,6 +615,9 @@ JSON shape: tasktree explain json")]
         /// Maximum strands in the menu, most recent first (default: 10)
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
+        /// Render active strands as a belongs-to forest (parallel siblings visible under shared parent)
+        #[arg(long)]
+        tree: bool,
     },
     /// Render one-shot startup context for agents.
     AgentContext {
@@ -944,6 +998,18 @@ type EmittedDiag = (&'static str, String);
 /// Extract comparison tokens for W062 keyword matching: ASCII words of
 /// length >= 5 (lowercased) plus contiguous CJK runs of length >= 3.
 /// Conservative on purpose — shared full runs, not n-grams.
+/// W074 predicate: true when an appended entry's marker is a closing-class
+/// annotation ([done]/[failed]/[cancelled]/[merged]/[verified]) — these are
+/// annotations that no longer change strand lifecycle (lifecycle moves via
+/// `close`/`reopen`). Single source for the runtime nudge and its tests.
+fn is_closing_annotation_marker(content: &str) -> bool {
+    const CLOSING_ANNOTATION_MARKERS: &[&str] = &[
+        "[done]", "[failed]", "[cancelled]", "[merged]", "[verified]",
+    ];
+    let trimmed = content.trim_start();
+    CLOSING_ANNOTATION_MARKERS.iter().any(|m| trimmed.starts_with(*m))
+}
+
 fn w062_tokens(text: &str) -> std::collections::HashSet<String> {
     let mut tokens = std::collections::HashSet::new();
     let mut ascii_word = String::new();
@@ -1024,13 +1090,21 @@ fn run_journal_diagnostics(events: &[Event], now: chrono::DateTime<chrono::Utc>)
         }
     }
 
-    const CLOSING: [&str; 6] = ["[verified]", "[done]", "[cancelled]", "[failed]", "[merged]", "[ended]"];
+    // Build closed-strand set from explicit StrandClosed events (lifecycle state).
+    // Legacy CLOSING markers in log content are no longer authoritative.
+    let mut closed_strands: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut reopened_strands: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for event in events {
+        match event {
+            Event::StrandClosed { id, .. } => { closed_strands.insert(id.as_str()); reopened_strands.remove(id.as_str()); }
+            Event::StrandReopened { id, .. } => { reopened_strands.insert(id.as_str()); closed_strands.remove(id.as_str()); }
+            _ => {}
+        }
+    }
 
     // ── W068: deadline overdue ──
     for (id, entries) in &per_strand {
-        let closed = entries
-            .iter()
-            .any(|e| CLOSING.iter().any(|m| e.content.starts_with(m)));
+        let closed = closed_strands.contains(id);
         if closed {
             continue;
         }
@@ -1053,11 +1127,16 @@ fn run_journal_diagnostics(events: &[Event], now: chrono::DateTime<chrono::Utc>)
     // Same lifecycle marker on the same strand from >= 2 distinct
     // provenance producers. Entries without provenance can't be
     // attributed and are ignored (no guessing).
+    // Annotation markers (closing + state) are checked for concurrent writes.
+    const ANNOTATION_MARKERS: &[&str] = &[
+        "[verified]", "[done]", "[cancelled]", "[failed]", "[merged]", "[ended]",
+        "[dispatched]", "[registered]",
+    ];
     for (id, entries) in &per_strand {
         let mut writers: HashMap<&str, HashSet<&str>> = HashMap::new();
         for e in entries {
             if let Some(producer) = e.producer {
-                if let Some(marker) = CLOSING.iter().chain(["[dispatched]", "[registered]"].iter()).find(|m| e.content.starts_with(*m)) {
+                if let Some(marker) = ANNOTATION_MARKERS.iter().find(|m| e.content.starts_with(*m)) {
                     writers.entry(marker).or_default().insert(producer);
                 }
             }
@@ -1588,6 +1667,96 @@ fn cmd_unhide(id: &str, format_json: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Close a strand by writing a StrandClosed lifecycle event.
+/// `disposition` defaults to "done" when not specified.
+fn cmd_close(id: &str, disposition: Option<&str>, format_json: bool) -> Result<(), String> {
+    let disp = disposition.unwrap_or("done");
+    if !projection::CLOSE_DISPOSITIONS.contains(&disp) {
+        let valid = projection::CLOSE_DISPOSITIONS.join(", ");
+        return Err(format!(
+            "invalid disposition {:?}; valid values: {}",
+            disp, valid
+        ));
+    }
+    let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
+    // Check current state before writing (readable feedback, not a gate)
+    let path = ensure_journal()?;
+    let (events, _) = read_events_lossy(&path);
+    let (current_state, _, _) =
+        projection::compute_state_from_events(&events, &strand_id);
+    if current_state.starts_with("closed:") {
+        return Err(format!(
+            "strand {} is already {}; use reopen first",
+            shorten(&strand_id), current_state
+        ));
+    }
+    let close_event = event::make_strand_closed(&strand_id, disp, None);
+    with_journal_write_lock(|journal| {
+        append_event_unlocked(journal, &close_event)
+    })?;
+    if format_json {
+        let card_val = strand_card_fresh(&strand_id)
+            .as_ref()
+            .map(|c| serde_json::to_value(c).ok())
+            .flatten();
+        println!("{}", serde_json::to_string(&serde_json::json!({
+            "strand_id": strand_id,
+            "disposition": disp,
+            "lifecycle": format!("closed:{}", disp),
+            "status": "ok",
+            "result": card_val,
+        })).unwrap());
+    } else {
+        let lifecycle = format!("closed:{}", disp);
+        if let Some((card, _)) = strand_card_fresh_with_state(&strand_id) {
+            print_handle_line(&card, &lifecycle);
+            eprintln!("    {}", card.summary);
+        } else {
+            eprintln!("  closed {}", shorten(&strand_id));
+        }
+    }
+    Ok(())
+}
+
+/// Reopen a closed strand by writing a StrandReopened lifecycle event.
+fn cmd_reopen(id: &str, format_json: bool) -> Result<(), String> {
+    let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
+    let path = ensure_journal()?;
+    let (events, _) = read_events_lossy(&path);
+    let (current_state, _, _) =
+        projection::compute_state_from_events(&events, &strand_id);
+    if current_state == "registered" {
+        return Err(format!(
+            "strand {} is already open (registered); nothing to reopen",
+            shorten(&strand_id)
+        ));
+    }
+    let reopen_event = event::make_strand_reopened(&strand_id, None);
+    with_journal_write_lock(|journal| {
+        append_event_unlocked(journal, &reopen_event)
+    })?;
+    if format_json {
+        let card_val = strand_card_fresh(&strand_id)
+            .as_ref()
+            .map(|c| serde_json::to_value(c).ok())
+            .flatten();
+        println!("{}", serde_json::to_string(&serde_json::json!({
+            "strand_id": strand_id,
+            "lifecycle": "registered",
+            "status": "ok",
+            "result": card_val,
+        })).unwrap());
+    } else {
+        if let Some((card, state)) = strand_card_fresh_with_state(&strand_id) {
+            print_handle_line(&card, &state);
+            eprintln!("    {}", card.summary);
+        } else {
+            eprintln!("  reopened {}", shorten(&strand_id));
+        }
+    }
+    Ok(())
+}
+
 // ── Provenance helper (pi-strand V1 contract) ─────────────────────
 
 /// Parse a `--provenance` argument. Must be a JSON object when present.
@@ -2108,6 +2277,16 @@ fn cmd_append(
         }
     }
 
+    // W074: nudge when a closing marker is appended — markers are now annotations only.
+    // Fires only on exact closing-marker prefix matches (precision-first: no false positives).
+    if is_closing_annotation_marker(&stored) {
+        eprintln!(
+            "W074: [done]/[failed]/[cancelled]/[merged]/[verified] are annotations — \
+            they no longer close the strand. Use: tasktree close --id {} (tasktree explain W074)",
+            shorten(&full_id)
+        );
+    }
+
     if format == Some("json") {
         let card = strand_card_fresh(&full_id);
         let card_val = card.as_ref().map(|c| serde_json::to_value(c).ok()).flatten();
@@ -2508,12 +2687,20 @@ fn cmd_list(include_hidden: bool, links: Option<&str>, backlinks: Option<&str>, 
     if let Some(ref tgt) = backlinks {
         strands.retain(|n| n.edges.iter().any(|e| e.starts_with(*tgt)));
     }
-    // --state: filter by canonical state
+    // --state: filter by canonical state.
+    // "open" matches registered; disposition names (done/failed/cancelled/merged/verified)
+    // match closed:* strands; "closed" matches any closed strand.
     if let Some(ref state_filter) = state {
         strands.retain(|n| {
             match *state_filter {
-                // "open" is not a canonical state; match default (registered) for backward compat
+                // "open" is not a canonical state; match default (registered)
                 "open" => n.state() == "registered",
+                // "closed" matches any closed strand regardless of disposition
+                "closed" => n.state().starts_with("closed:"),
+                // disposition shorthand: "done" matches "closed:done", etc.
+                s if projection::CLOSE_DISPOSITIONS.contains(&s) => {
+                    n.state() == format!("closed:{}", s)
+                }
                 _ => n.state() == *state_filter,
             }
         });
@@ -2764,6 +2951,10 @@ fn cmd_timeline(
                 TimelineEventKind::SubjectBound { subject_type, subject_id, strand_id } => {
                     format!("bind: {}:{} -> {}", subject_type, subject_id, shorten(strand_id))
                 }
+                TimelineEventKind::StrandClosed { disposition } => {
+                    format!("closed:{}", disposition)
+                }
+                TimelineEventKind::StrandReopened => "reopened".to_string(),
             };
             let skew = if e.ts_skew { " ⚠" } else { "" };
             println!("{}  {}  {}{}", ts_short, id_short, kind_desc, skew);
@@ -2774,7 +2965,7 @@ fn cmd_timeline(
 
 /// Orient remind line: the whole operating loop in one line (ADR-0001:
 /// the rules travel with the orientation, the weave-in pointer stays thin).
-const ORIENT_REMIND: &str = "continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | matter concluded → append --id <ID> \"[done] ...\" | before irreversible → checkpoint --id <ID> --action \"<why>\" | more → tasktree --help";
+const ORIENT_REMIND: &str = "continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | more → tasktree --help";
 
 // ── Card helpers ──────────────────────────────────────────────────────────
 // "card" = the OrientStrand shape used both for orient menus and for
@@ -2800,6 +2991,7 @@ fn make_card(s: &projection::ProjectedStrand) -> output::OrientStrand {
             s.last_offset(),
             s.id
         ),
+        lifecycle: s.state().to_string(),
     }
 }
 
@@ -2903,7 +3095,7 @@ fn build_orient(
     }
 }
 
-fn cmd_orient(format: Option<&str>, include_hidden: bool, limit: Option<usize>) -> Result<(), String> {
+fn cmd_orient(format: Option<&str>, include_hidden: bool, limit: Option<usize>, show_tree: bool) -> Result<(), String> {
     let started = Instant::now();
     let path = ensure_journal()?;
     let (events, skipped) = read_events_lossy(&path);
@@ -2913,7 +3105,41 @@ fn cmd_orient(format: Option<&str>, include_hidden: bool, limit: Option<usize>) 
     let strands = projection::project_strands(&events, true);
     let out = build_orient(&strands, include_hidden, limit.unwrap_or(10), max_offset);
 
-    if format == Some("json") {
+    if show_tree {
+        // Build the belongs-to forest from the active strand set
+        let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+            .active
+            .iter()
+            .filter_map(|card| {
+                strands.iter().find(|s| s.id == card.id).map(|s| (s, card.clone()))
+            })
+            .collect();
+        let roots = tree::build_orient_forest(&strand_cards);
+        let tree_out = output::OrientTreeOutput {
+            max_offset: out.max_offset,
+            roots,
+            closed_count: out.closed_count,
+            hidden_count: out.hidden_count,
+            remind: out.remind.clone(),
+        };
+
+        if format == Some("json") {
+            println!("{}", serde_json::to_string(&tree_out).expect("serialize"));
+        } else {
+            println!(
+                "journal: max_offset {} | {} active | {} closed | {} hidden (tasktree list)",
+                out.max_offset,
+                out.active.len(),
+                out.closed_count,
+                out.hidden_count
+            );
+            print_orient_forest(&tree_out.roots, 0);
+            if out.active.is_empty() {
+                println!("(no active strands) — start one: tasktree add \"<summary>\"");
+            }
+            println!("remind: {}", out.remind);
+        }
+    } else if format == Some("json") {
         println!("{}", serde_json::to_string(&out).expect("serialize"));
     } else {
         println!(
@@ -2948,6 +3174,30 @@ fn cmd_orient(format: Option<&str>, include_hidden: bool, limit: Option<usize>) 
     }
     eprintln!("[tasktree] orient: {:.0?}", started.elapsed());
     Ok(())
+}
+
+/// Recursively print an orient forest node with indentation.
+/// Each node shows the same card fields as flat orient, prefixed with
+/// an indentation level so parent-child nesting is visible.
+fn print_orient_forest(nodes: &[tree::OrientForestNode], depth: usize) {
+    let indent = "  ".repeat(depth);
+    for node in nodes {
+        let s = &node.card;
+        let type_info = s
+            .strand_type
+            .as_deref()
+            .map(|t| format!(" [{}]", t))
+            .unwrap_or_default();
+        println!("{}  {}{}  {} entries", indent, shorten(&s.id), type_info, s.entry_count);
+        println!("{}    {}", indent, s.summary);
+        if s.entry_count > 1 {
+            println!("{}    last: {}", indent, s.last_entry);
+        }
+        println!("{}    catch-up: {}", indent, s.catch_up);
+        if !node.children.is_empty() {
+            print_orient_forest(&node.children, depth + 1);
+        }
+    }
 }
 
 fn cmd_agent_context(format_json: Option<&str>, include_hidden: bool) -> Result<(), String> {
@@ -3060,33 +3310,45 @@ struct FrictionPairing {
     /// For each paired friction index, the truncated content for the scar line.
     /// Key: friction log index; Value: "<friction truncated 50> → fixed"
     scar_content: std::collections::HashMap<usize, String>,
+    /// Dangling fix references: (log_index_of_fixed_entry, fixes= prefix string).
+    /// A dangling fix is a [fixed] entry whose `fixes=<prefix>` does not match
+    /// any [friction] entry in this log (nonexistent id or non-friction target).
+    /// These emit W075 warnings; the [fixed] entry is not folded.
+    dangling_fixes: Vec<(usize, String)>,
 }
 
 /// Compute friction↔fixed pairing for a strand's log entries.
 ///
 /// Rules (deterministic, engine-enforced):
-///   1. Explicit reference: if a `[fixed]` entry's content contains a token
+///   1. Explicit reference only: if a `[fixed]` entry's content contains a token
 ///      `fixes=<prefix>` (prefix >= 8 hex chars), match the first unpaired
 ///      `[friction]` entry in the same log whose `append_id` starts with that
-///      prefix. Explicit wins over proximity.
-///   2. Proximity (stack): if no explicit match, pair the `[fixed]` entry
-///      with the nearest preceding unpaired `[friction]` entry (LIFO stack).
-///   3. `[friction]` entries with no corresponding `[fixed]` remain unpaired
+///      prefix.
+///   2. `[fixed]` with no `fixes=` token: treated as a plain annotation —
+///      not folded, not paired, no warning. Degrades gracefully.
+///   3. `[fixed]` with a `fixes=` prefix that matches no [friction] entry:
+///      dangling fix — recorded in `dangling_fixes` for W075 emission.
+///      The [fixed] entry is not folded (exposed as normal annotation).
+///   4. `[friction]` entries with no corresponding `[fixed]` remain unpaired
 ///      and are exposed full-text (live strand) or folded (closed strand).
+///   5. Strict 1-1: one [fixed] pairs with at most one [friction].
+///
+/// Proximity inference is intentionally absent — the close-command footgun
+/// taught that implicit matching creates ambiguous history. All pairing is
+/// explicit via `fixes=`.
 ///
 /// This function is pure: it only reads `log`, never writes to the journal.
 fn pair_frictions(log: &[projection::LogEntry]) -> FrictionPairing {
     use std::collections::{HashMap, HashSet};
 
-    // Stack of unpaired friction indices (LIFO proximity match)
-    let mut friction_stack: Vec<usize> = Vec::new();
-    // append_id prefix → log index, for explicit `fixes=` lookup
-    // We index all friction entries by their append_id so O(1) lookup.
+    // append_id → log index, for explicit `fixes=` lookup.
+    // We index all friction entries by their append_id for O(n) lookup.
     let mut friction_by_append_id: Vec<(String, usize)> = Vec::new();
 
     let mut paired_friction: HashSet<usize> = HashSet::new();
     let mut paired_fixed: HashSet<usize> = HashSet::new();
     let mut scar_content: HashMap<usize, String> = HashMap::new();
+    let mut dangling_fixes: Vec<(usize, String)> = Vec::new();
 
     // First pass: collect friction indices and their append_ids
     for (idx, entry) in log.iter().enumerate() {
@@ -3099,51 +3361,43 @@ fn pair_frictions(log: &[projection::LogEntry]) -> FrictionPairing {
         }
     }
 
-    // Second pass: process entries in order
+    // Second pass: process [fixed] entries — explicit fixes= only
     for (idx, entry) in log.iter().enumerate() {
-        if entry.content.starts_with("[friction]") {
-            friction_stack.push(idx);
-        } else if entry.content.starts_with("[fixed]") {
-            // Try explicit `fixes=<prefix>` first
-            let explicit_match: Option<usize> = {
-                let mut found = None;
-                // Extract fixes= token from content
-                let body = entry.content.trim_start_matches("[fixed]").trim();
-                for token in body.split_whitespace() {
-                    if let Some(prefix) = token.strip_prefix("fixes=") {
-                        if prefix.len() >= 8 {
-                            // Find an unpaired friction with append_id starting with prefix
-                            for (aid, fidx) in &friction_by_append_id {
-                                if aid.starts_with(prefix) && !paired_friction.contains(fidx) {
-                                    found = Some(*fidx);
-                                    break;
-                                }
-                            }
-                        }
-                        break; // only first fixes= token
-                    }
-                }
-                found
-            };
+        if !entry.content.starts_with("[fixed]") {
+            continue;
+        }
 
-            let target_friction: Option<usize> = if let Some(fidx) = explicit_match {
-                Some(fidx)
+        // Extract the first `fixes=<prefix>` token (if any)
+        let fixes_prefix: Option<String> = {
+            let body = entry.content.trim_start_matches("[fixed]").trim();
+            let mut found = None;
+            for token in body.split_whitespace() {
+                if let Some(prefix) = token.strip_prefix("fixes=") {
+                    if prefix.len() >= 8 {
+                        found = Some(prefix.to_string());
+                    }
+                    break; // only first fixes= token, even if too short
+                }
+            }
+            found
+        };
+
+        let prefix = match fixes_prefix {
+            None => continue, // no fixes= token → plain annotation, skip
+            Some(p) => p,
+        };
+
+        // Find the first unpaired friction whose append_id starts with prefix
+        let matched: Option<usize> = friction_by_append_id.iter().find_map(|(aid, fidx)| {
+            if aid.starts_with(prefix.as_str()) && !paired_friction.contains(fidx) {
+                Some(*fidx)
             } else {
-                // Proximity: pop nearest unpaired friction from stack
-                // Walk stack from top to find an unpaired one
-                let mut found = None;
-                for i in (0..friction_stack.len()).rev() {
-                    let fidx = friction_stack[i];
-                    if !paired_friction.contains(&fidx) {
-                        friction_stack.remove(i);
-                        found = Some(fidx);
-                        break;
-                    }
-                }
-                found
-            };
+                None
+            }
+        });
 
-            if let Some(fidx) = target_friction {
+        match matched {
+            Some(fidx) => {
                 // Build scar content: friction text truncated at 50 chars → fixed
                 let friction_body = log[fidx].content
                     .trim_start_matches("[friction]")
@@ -3155,10 +3409,14 @@ fn pair_frictions(log: &[projection::LogEntry]) -> FrictionPairing {
                 paired_fixed.insert(idx);
                 scar_content.insert(fidx, scar);
             }
+            None => {
+                // fixes= prefix matched nothing → dangling fix
+                dangling_fixes.push((idx, prefix));
+            }
         }
     }
 
-    FrictionPairing { paired_friction, paired_fixed, scar_content }
+    FrictionPairing { paired_friction, paired_fixed, scar_content, dangling_fixes }
 }
 
 /// Pure projection for context (testable without stdout capture).
@@ -3228,8 +3486,23 @@ fn build_context_strands(
                 paired_friction: std::collections::HashSet::new(),
                 paired_fixed: std::collections::HashSet::new(),
                 scar_content: std::collections::HashMap::new(),
+                dangling_fixes: Vec::new(),
             }
         };
+        // ── W075: emit dangling fix warnings ───────────────────────────
+        // A [fixed] entry with fixes=<prefix> that matched no [friction] entry.
+        // Fired on every projection pass where the dangling fix is present.
+        // This is a precision-first check: no false positives (only exact mismatches).
+        for (fix_idx, prefix) in &pairing.dangling_fixes {
+            let fix_entry = &strand.log[*fix_idx];
+            eprintln!(
+                "W075: [fixed] fixes={} in strand {} does not match any [friction] entry \
+                 (append_id offset {}) (tasktree explain W075)",
+                &prefix[..prefix.len().min(12)],
+                shorten(&strand.id),
+                fix_entry.offset,
+            );
+        }
         let friction_paired = pairing.paired_friction.len();
 
         // ── B. observation-class tail-folding pre-pass ──────────────────
@@ -3736,6 +4009,16 @@ fn main() {
             None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
         },
 
+        Commands::Close { id, disposition, format } => {
+            let fmt = format.as_deref() == Some("json");
+            cmd_close(id, disposition.as_deref(), fmt)
+        },
+
+        Commands::Reopen { id, format } => {
+            let fmt = format.as_deref() == Some("json");
+            cmd_reopen(id, fmt)
+        },
+
         Commands::Timeline { since_offset, since_ts, until_offset, until_ts, strand, links, format, limit, tree } => {
             cmd_timeline(*since_offset, since_ts.as_deref(), *until_offset, until_ts.as_deref(), strand.as_deref(), links.as_deref(), format.as_deref(), *limit, tree.as_deref())
         }
@@ -3769,7 +4052,7 @@ fn main() {
             None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
         },
 
-        Commands::Orient { format, include_hidden, limit } => cmd_orient(format.as_deref(), *include_hidden, *limit),
+        Commands::Orient { format, include_hidden, limit, tree } => cmd_orient(format.as_deref(), *include_hidden, *limit, *tree),
 
         Commands::AgentContext { format, include_hidden } => cmd_agent_context(format.as_deref(), *include_hidden),
 
@@ -4408,7 +4691,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let open_id = create_strand("open line of work");
         let done_id = create_strand("finished line");
-        cmd_append(Some("[done] wrapped up"), None, false, false, None, Some(&done_id), None, None).unwrap();
+        cmd_close(&done_id, None, false).unwrap();
 
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
@@ -4478,6 +4761,228 @@ fn create_strand(content: &str) -> String {
         // `older` was touched last, so it outranks `newer` in the menu.
         assert_eq!(out.active[0].id, older);
         let _ = newer;
+    }
+
+    // ── orient --tree: belongs-to forest regression tests ──
+
+    /// Default orient (no --tree) is unchanged when belongs-to edges exist.
+    /// Regression guard: --tree is strictly opt-in.
+    #[test]
+    fn orient_flat_unaffected_by_belongs_to_edges() {
+        let _env = setup();
+        let parent = create_strand("parent task");
+        let child = create_strand("child task");
+        cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let max_offset = events.last().map(|(o, _)| *o).unwrap();
+        let strands = projection::project_strands(&events, true);
+        let out = build_orient(&strands, false, 10, max_offset);
+
+        // Flat orient must still return both strands in a flat list
+        assert_eq!(out.active.len(), 2, "flat orient: both strands must appear");
+        let ids: Vec<&str> = out.active.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&parent.as_str()), "flat orient: parent must appear");
+        assert!(ids.contains(&child.as_str()), "flat orient: child must appear");
+    }
+
+    /// orient --tree: child declared with belongs-to appears nested under parent.
+    #[test]
+    fn orient_tree_nests_belongs_to_child_under_parent() {
+        let _env = setup();
+        let parent = create_strand("parent task");
+        let child = create_strand("child task");
+        cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let max_offset = events.last().map(|(o, _)| *o).unwrap();
+        let strands = projection::project_strands(&events, true);
+        let out = build_orient(&strands, false, 10, max_offset);
+
+        // Build strand_cards for tree construction (mirror of cmd_orient logic)
+        let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+            .active
+            .iter()
+            .filter_map(|card| {
+                strands.iter().find(|s| s.id == card.id).map(|s| (s, card.clone()))
+            })
+            .collect();
+        let roots = tree::build_orient_forest(&strand_cards);
+
+        // Parent is a root; child is nested under it
+        assert_eq!(roots.len(), 1, "orient --tree: only the parent is a root");
+        assert_eq!(roots[0].card.id, parent, "root must be the parent strand");
+        assert_eq!(roots[0].children.len(), 1, "parent must have one child");
+        assert_eq!(roots[0].children[0].card.id, child, "child must be nested under parent");
+    }
+
+    /// orient --tree: parallel siblings under same parent are both visible.
+    #[test]
+    fn orient_tree_parallel_siblings_visible_under_parent() {
+        let _env = setup();
+        let parent = create_strand("parent task");
+        let sibling_a = create_strand("sibling A");
+        let sibling_b = create_strand("sibling B");
+        cmd_link(&sibling_a, &parent, Some("belongs-to"), false, None).unwrap();
+        cmd_link(&sibling_b, &parent, Some("belongs-to"), false, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let max_offset = events.last().map(|(o, _)| *o).unwrap();
+        let strands = projection::project_strands(&events, true);
+        let out = build_orient(&strands, false, 10, max_offset);
+
+        let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+            .active
+            .iter()
+            .filter_map(|card| {
+                strands.iter().find(|s| s.id == card.id).map(|s| (s, card.clone()))
+            })
+            .collect();
+        let roots = tree::build_orient_forest(&strand_cards);
+
+        assert_eq!(roots.len(), 1, "only parent is a root");
+        assert_eq!(roots[0].card.id, parent, "root is the parent");
+        assert_eq!(roots[0].children.len(), 2, "both siblings must appear under parent");
+        let child_ids: Vec<&str> = roots[0].children.iter().map(|n| n.card.id.as_str()).collect();
+        assert!(child_ids.contains(&sibling_a.as_str()), "sibling A must be visible");
+        assert!(child_ids.contains(&sibling_b.as_str()), "sibling B must be visible");
+    }
+
+    /// orient --tree: orphan strands (no belongs-to edge or parent not in active set)
+    /// appear as top-level roots.
+    #[test]
+    fn orient_tree_orphan_strands_are_roots() {
+        let _env = setup();
+        let orphan_a = create_strand("orphan A (no edges)");
+        let orphan_b = create_strand("orphan B (no edges)");
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let max_offset = events.last().map(|(o, _)| *o).unwrap();
+        let strands = projection::project_strands(&events, true);
+        let out = build_orient(&strands, false, 10, max_offset);
+
+        let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+            .active
+            .iter()
+            .filter_map(|card| {
+                strands.iter().find(|s| s.id == card.id).map(|s| (s, card.clone()))
+            })
+            .collect();
+        let roots = tree::build_orient_forest(&strand_cards);
+
+        assert_eq!(roots.len(), 2, "both orphan strands must appear as roots");
+        let root_ids: Vec<&str> = roots.iter().map(|n| n.card.id.as_str()).collect();
+        assert!(root_ids.contains(&orphan_a.as_str()), "orphan A must be a root");
+        assert!(root_ids.contains(&orphan_b.as_str()), "orphan B must be a root");
+        for root in &roots {
+            assert!(root.children.is_empty(), "orphan nodes must have no children");
+        }
+    }
+
+    /// orient --tree: no contention/conflict markers are emitted (precision discipline).
+    #[test]
+    fn orient_tree_no_contention_markers() {
+        let _env = setup();
+        let parent = create_strand("parent");
+        let child_a = create_strand("child A");
+        let child_b = create_strand("child B");
+        cmd_link(&child_a, &parent, Some("belongs-to"), false, None).unwrap();
+        cmd_link(&child_b, &parent, Some("belongs-to"), false, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let max_offset = events.last().map(|(o, _)| *o).unwrap();
+        let strands = projection::project_strands(&events, true);
+        let out = build_orient(&strands, false, 10, max_offset);
+
+        let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+            .active
+            .iter()
+            .filter_map(|card| {
+                strands.iter().find(|s| s.id == card.id).map(|s| (s, card.clone()))
+            })
+            .collect();
+        let roots = tree::build_orient_forest(&strand_cards);
+
+        // Serialize to JSON and assert no "contention" word appears
+        let json_str = serde_json::to_string(&roots).unwrap();
+        assert!(!json_str.contains("contention"), "orient --tree JSON must not emit contention markers");
+        assert!(!json_str.contains("conflict"), "orient --tree JSON must not emit conflict markers");
+    }
+
+    /// orient --tree --format json: JSON structure is nested (roots array with children).
+    #[test]
+    fn orient_tree_json_shape_is_nested() {
+        let _env = setup();
+        let parent = create_strand("parent task");
+        let child = create_strand("child task");
+        cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let max_offset = events.last().map(|(o, _)| *o).unwrap();
+        let strands = projection::project_strands(&events, true);
+        let out = build_orient(&strands, false, 10, max_offset);
+
+        let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+            .active
+            .iter()
+            .filter_map(|card| {
+                strands.iter().find(|s| s.id == card.id).map(|s| (s, card.clone()))
+            })
+            .collect();
+        let roots = tree::build_orient_forest(&strand_cards);
+        let tree_out = output::OrientTreeOutput {
+            max_offset,
+            roots,
+            closed_count: out.closed_count,
+            hidden_count: out.hidden_count,
+            remind: out.remind.clone(),
+        };
+
+        let json_str = serde_json::to_string(&tree_out).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        // Top-level has "roots" array
+        assert!(parsed["roots"].is_array(), "orient --tree JSON must have 'roots' array");
+        let roots_arr = parsed["roots"].as_array().unwrap();
+        assert_eq!(roots_arr.len(), 1, "one root (the parent)");
+
+        // Root has "id", "children" fields
+        let root = &roots_arr[0];
+        assert_eq!(root["id"].as_str().unwrap(), parent.as_str(), "root id matches parent");
+        assert!(root["children"].is_array(), "root must have 'children' array");
+        let children = root["children"].as_array().unwrap();
+        assert_eq!(children.len(), 1, "root has one child");
+        assert_eq!(children[0]["id"].as_str().unwrap(), child.as_str(), "child id matches");
+
+        // Verify no extra fields added/removed (additive-only contract)
+        assert!(parsed["max_offset"].is_number(), "max_offset must be present");
+        assert!(parsed["closed_count"].is_number(), "closed_count must be present");
+        assert!(parsed["hidden_count"].is_number(), "hidden_count must be present");
+        assert!(parsed["remind"].is_string(), "remind must be present");
+    }
+
+    /// orient --tree: parse check — `tasktree orient --tree` is a valid CLI invocation.
+    #[test]
+    fn orient_tree_flag_parses() {
+        use clap::CommandFactory;
+        let result = Cli::command()
+            .try_get_matches_from(["tasktree", "orient", "--tree"]);
+        assert!(result.is_ok(), "'orient --tree' must parse: {:?}", result);
+    }
+
+    /// orient --tree --format json: parse check.
+    #[test]
+    fn orient_tree_format_json_parses() {
+        use clap::CommandFactory;
+        let result = Cli::command()
+            .try_get_matches_from(["tasktree", "orient", "--tree", "--format", "json"]);
+        assert!(result.is_ok(), "'orient --tree --format json' must parse: {:?}", result);
     }
 
     // ── examples-as-contract (ADR-0001 rule 4) ──
@@ -4662,7 +5167,7 @@ fn create_strand(content: &str) -> String {
         assert!(diags.iter().any(|(c, _)| *c == "W068"), "expected W068, got {:?}", diags);
 
         // Closing the strand silences the warning (precision over recall).
-        cmd_append(Some("[cancelled] re-planned"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_close(&id, Some("cancelled"), false).unwrap();
         let (events, _) = read_events_lossy(&path);
         let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
         let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
@@ -4850,7 +5355,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id = create_prompt_strand("closed guidance");
         cmd_append(Some("[friction] hole, since resolved"), None, false, false, None, Some(&id), None, None).unwrap();
-        cmd_append(Some("[done] wrapped up"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_close(&id, Some("done"), false).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let strands = projection::project_strands(&events, false);
@@ -4878,14 +5383,28 @@ fn create_strand(content: &str) -> String {
 
     #[test]
     fn context_friction_fixed_pair_produces_scar() {
-        // A single [friction] followed by [fixed] on a live strand:
+        // A single [friction] followed by [fixed fixes=<id>] on a live strand:
         // - scar entry appears (marker=[friction], content contains "→ fixed")
         // - neither the original friction nor the [fixed] appear as separate entries
         // - friction_paired == 1
+        // Explicit fixes= is required; proximity inference is not supported.
         let _env = setup();
         let id = create_prompt_strand("live guidance");
         cmd_append(Some("[friction] a hole to fill"), None, false, false, None, Some(&id), None, None).unwrap();
-        cmd_append(Some("[fixed] filled the hole"), None, false, false, None, Some(&id), None, None).unwrap();
+        // Read back the friction's append_id to form a fixes= reference
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let friction_append_id = events.iter().rev().find_map(|(_, e)| {
+            if let event::Event::LogAppended { id: eid, content, append_id, .. } = e {
+                if eid == &id && content.contains("a hole to fill") {
+                    return append_id.clone();
+                }
+            }
+            None
+        }).expect("friction must have append_id");
+        let prefix = &friction_append_id[..8.min(friction_append_id.len())];
+        let fixed_content = format!("[fixed] filled the hole fixes={}", prefix);
+        cmd_append(Some(&fixed_content), None, false, false, None, Some(&id), None, None).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let strands = projection::project_strands(&events, false);
@@ -4906,31 +5425,34 @@ fn create_strand(content: &str) -> String {
     }
 
     #[test]
-    fn context_two_frictions_one_fixed_proximity_pair() {
-        // Two [friction] entries, one [fixed]: proximity rule pairs the NEAREST
-        // preceding friction (the second one). The first friction remains full-text.
+    fn context_fixed_without_fixes_is_plain_annotation() {
+        // [fixed] with no fixes= token is a plain annotation — not folded,
+        // not paired. The [friction] stays full-text (live debt, unresolved).
+        // Proximity inference was intentionally removed (close-command footgun lesson).
         let _env = setup();
         let id = create_prompt_strand("live guidance");
         cmd_append(Some("[friction] first hole"), None, false, false, None, Some(&id), None, None).unwrap();
         cmd_append(Some("[friction] second hole"), None, false, false, None, Some(&id), None, None).unwrap();
-        cmd_append(Some("[fixed] fixed second"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some("[fixed] fixed something but no reference"), None, false, false, None, Some(&id), None, None).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let strands = projection::project_strands(&events, false);
         let out = build_context_strands(&strands, "prompt-strand", &[], None, false, false);
         assert_eq!(out.len(), 1);
         let entries = &out[0].entries;
-        // First friction: still full-text (unpaired)
+        // Both frictions remain full-text (neither is a scar)
         let first_full = entries.iter().find(|e| {
             e.marker == "[friction]" && e.content.contains("first hole") && !e.content.contains("→ fixed")
         });
         assert!(first_full.is_some(), "first friction must remain full-text (unpaired)");
-        // Second friction: scar
-        let scar = entries.iter().find(|e| {
-            e.marker == "[friction]" && e.content.contains("→ fixed")
+        let second_full = entries.iter().find(|e| {
+            e.marker == "[friction]" && e.content.contains("second hole") && !e.content.contains("→ fixed")
         });
-        assert!(scar.is_some(), "second friction must become a scar");
-        assert_eq!(out[0].friction_paired, 1, "only one pair");
+        assert!(second_full.is_some(), "second friction must remain full-text (no proximity pairing)");
+        // [fixed] without fixes= appears as a plain annotation entry
+        let fixed_entry = entries.iter().find(|e| e.marker == "[fixed]");
+        assert!(fixed_entry.is_some(), "[fixed] without fixes= must appear as a plain annotation");
+        assert_eq!(out[0].friction_paired, 0, "no pairing without explicit fixes=");
     }
 
     #[test]
@@ -4982,10 +5504,24 @@ fn create_strand(content: &str) -> String {
     #[test]
     fn context_exclude_friction_also_suppresses_scars() {
         // --exclude-friction (explicit blindness) must suppress scar entries too.
+        // Uses explicit fixes= to produce a real pair/scar first.
         let _env = setup();
         let id = create_prompt_strand("live guidance");
         cmd_append(Some("[friction] a hole"), None, false, false, None, Some(&id), None, None).unwrap();
-        cmd_append(Some("[fixed] filled"), None, false, false, None, Some(&id), None, None).unwrap();
+        // Read back the friction's append_id
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let friction_append_id = events.iter().rev().find_map(|(_, e)| {
+            if let event::Event::LogAppended { id: eid, content, append_id, .. } = e {
+                if eid == &id && content.contains("a hole") {
+                    return append_id.clone();
+                }
+            }
+            None
+        }).expect("friction must have append_id");
+        let prefix = &friction_append_id[..8.min(friction_append_id.len())];
+        let fixed_content = format!("[fixed] filled fixes={}", prefix);
+        cmd_append(Some(&fixed_content), None, false, false, None, Some(&id), None, None).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let strands = projection::project_strands(&events, false);
@@ -4993,6 +5529,73 @@ fn create_strand(content: &str) -> String {
         assert_eq!(out.len(), 1);
         assert!(out[0].entries.iter().all(|e| e.marker != "[friction]"),
             "exclude_friction must suppress scar entries too");
+    }
+
+    #[test]
+    fn context_dangling_fixes_produces_no_fold() {
+        // [fixed] with fixes=<prefix> that matches nothing → dangling fix.
+        // The [fixed] entry is a plain annotation (exposed), not folded.
+        // The [friction] stays full-text (live debt).
+        // W075 would be emitted to stderr; we test that no folding happens.
+        let _env = setup();
+        let id = create_prompt_strand("live guidance");
+        cmd_append(Some("[friction] unresolved hole"), None, false, false, None, Some(&id), None, None).unwrap();
+        // Use a fake/nonexistent append_id prefix (all zeros, ≥8 chars)
+        cmd_append(Some("[fixed] pretend fix fixes=00000000deadbeef"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let out = build_context_strands(&strands, "prompt-strand", &[], None, false, false);
+        assert_eq!(out.len(), 1);
+        let entries = &out[0].entries;
+        // friction stays full-text (unresolved)
+        let friction_full = entries.iter().find(|e| {
+            e.marker == "[friction]" && e.content.contains("unresolved hole") && !e.content.contains("→ fixed")
+        });
+        assert!(friction_full.is_some(), "friction must remain full-text when fixes= is dangling; entries: {:?}", entries);
+        // [fixed] with dangling ref is exposed as annotation
+        let fixed_entry = entries.iter().find(|e| e.marker == "[fixed]");
+        assert!(fixed_entry.is_some(), "dangling [fixed] must appear as annotation entry");
+        assert_eq!(out[0].friction_paired, 0, "no pairing on dangling fix");
+        // pair_frictions itself must record the dangling fix
+        let pairing = pair_frictions(&strands[0].log);
+        assert_eq!(pairing.dangling_fixes.len(), 1, "one dangling fix recorded");
+        let (_, ref prefix) = pairing.dangling_fixes[0];
+        assert!(prefix.starts_with("00000000"), "prefix must match what was written");
+    }
+
+    #[test]
+    fn context_one_fixed_pairs_at_most_one_friction() {
+        // Strict 1-1: a [fixed] entry with fixes=<prefix_A> pairs exactly one friction.
+        // A second [fixed] entry pointing to the same friction (already paired) → dangling.
+        let _env = setup();
+        let id = create_prompt_strand("live guidance");
+        cmd_append(Some("[friction] target hole"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let friction_append_id = events.iter().rev().find_map(|(_, e)| {
+            if let event::Event::LogAppended { id: eid, content, append_id, .. } = e {
+                if eid == &id && content.contains("target hole") {
+                    return append_id.clone();
+                }
+            }
+            None
+        }).expect("friction must have append_id");
+        let prefix = &friction_append_id[..8.min(friction_append_id.len())];
+        // Two [fixed] entries both referencing the same friction
+        let fixed1 = format!("[fixed] first fix fixes={}", prefix);
+        let fixed2 = format!("[fixed] second fix fixes={}", prefix);
+        cmd_append(Some(&fixed1), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_append(Some(&fixed2), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, false);
+        let pairing = pair_frictions(&strands[0].log);
+        // Only one friction → only one pairing possible
+        assert_eq!(pairing.paired_friction.len(), 1, "only one friction, only one pair");
+        assert_eq!(pairing.paired_fixed.len(), 1, "only first matching [fixed] is paired");
+        // Second [fixed] targeting already-paired friction → dangling
+        assert_eq!(pairing.dangling_fixes.len(), 1, "second [fixed] with same ref → dangling");
     }
 
     // ── Part B: observation-class folding ────────────────────────
@@ -5197,8 +5800,8 @@ fn create_strand(content: &str) -> String {
         create_strand("a line");
         let path = ensure_journal().unwrap();
         let before = std::fs::read(&path).unwrap();
-        cmd_orient(None, false, None).unwrap();
-        cmd_orient(Some("json"), true, Some(3)).unwrap();
+        cmd_orient(None, false, None, false).unwrap();
+        cmd_orient(Some("json"), true, Some(3), false).unwrap();
         let after = std::fs::read(&path).unwrap();
         assert_eq!(before, after, "orient must never write to the journal");
     }
@@ -5519,7 +6122,7 @@ fn create_strand(content: &str) -> String {
     fn w071_fires_on_closed_strand() {
         let _env = setup();
         let id = create_strand("closed work");
-        cmd_append(Some("[done] finished"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_close(&id, Some("done"), false).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let strands = projection::project_strands(&events, true);
@@ -5549,7 +6152,7 @@ fn create_strand(content: &str) -> String {
     fn checkpoint_on_closed_strand_still_succeeds() {
         let _env = setup();
         let id = create_strand("done work");
-        cmd_append(Some("[done] all finished"), None, false, false, None, Some(&id), None, None).unwrap();
+        cmd_close(&id, Some("done"), false).unwrap();
         // Checkpoint must still succeed — W071 is a warning, not a gate.
         let result = cmd_checkpoint(Some(&id), "tag the release", None, false, false, None);
         assert!(result.is_ok(), "checkpoint on closed strand must exit 0: {:?}", result);
@@ -7137,6 +7740,142 @@ fn create_strand(content: &str) -> String {
         assert_eq!(suggest_marker("[decision]"), None);
         assert_eq!(suggest_marker("[constraint]"), None);
         assert_eq!(suggest_marker("[progress]"), None);
+    }
+
+    // ── Lifecycle: close / reopen / W074 regression tests ─────────────────
+
+    /// Footgun nail: appending [done] to a strand must NOT close it.
+    /// This is the principal regression test for the lifecycle refactor.
+    #[test]
+    fn append_subtask_done_leaves_strand_open() {
+        let _env = setup();
+        let id = create_strand("parent line of work");
+        // Simulate what an operator agent would do: record a sub-task completion.
+        cmd_append(Some("[done] subtask A completed"), None, false, false, None, Some(&id), None, None).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let strand = strands.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(
+            strand.state(), "registered",
+            "appending [done] must NOT close the strand; state was: {}",
+            strand.state()
+        );
+    }
+
+    /// close with default disposition → closed:done.
+    #[test]
+    fn close_default_sets_closed_done() {
+        let _env = setup();
+        let id = create_strand("work to close");
+        cmd_close(&id, None, false).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let strand = strands.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(strand.state(), "closed:done", "close default must give closed:done");
+    }
+
+    /// close --as failed → closed:failed.
+    #[test]
+    fn close_as_failed_sets_closed_failed() {
+        let _env = setup();
+        let id = create_strand("work that failed");
+        cmd_close(&id, Some("failed"), false).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let strand = strands.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(strand.state(), "closed:failed", "close --as failed must give closed:failed");
+    }
+
+    /// reopen after close → back to registered (open).
+    #[test]
+    fn reopen_after_close_restores_registered() {
+        let _env = setup();
+        let id = create_strand("work to reopen");
+        cmd_close(&id, None, false).unwrap();
+        cmd_reopen(&id, false).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let strand = strands.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(strand.state(), "registered", "reopen must restore registered state");
+    }
+
+    /// close → closed:cancelled.
+    #[test]
+    fn close_as_cancelled_sets_closed_cancelled() {
+        let _env = setup();
+        let id = create_strand("cancelled plan");
+        cmd_close(&id, Some("cancelled"), false).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let strand = strands.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(strand.state(), "closed:cancelled");
+    }
+
+    /// close twice must error (already closed).
+    #[test]
+    fn close_already_closed_errors() {
+        let _env = setup();
+        let id = create_strand("once-closed work");
+        cmd_close(&id, None, false).unwrap();
+        let result = cmd_close(&id, None, false);
+        assert!(result.is_err(), "closing an already-closed strand must error");
+        assert!(result.unwrap_err().contains("already"), "error must say already");
+    }
+
+    /// reopen an already-open strand must error.
+    #[test]
+    fn reopen_already_open_errors() {
+        let _env = setup();
+        let id = create_strand("never closed");
+        let result = cmd_reopen(&id, false);
+        assert!(result.is_err(), "reopening an already-open strand must error");
+    }
+
+    /// W074 fires when a closing-marker annotation is appended.
+    #[test]
+    fn w074_fires_on_closing_annotation_marker() {
+        let _env = setup();
+        let id = create_strand("some work");
+        // The predicate that gates the W074 nudge must be true for a closing marker.
+        assert!(is_closing_annotation_marker("[done] sub-step done"), "closing marker must gate W074");
+        let result = cmd_append(Some("[done] sub-step done"), None, false, false, None, Some(&id), None, None);
+        assert!(result.is_ok(), "append must succeed even with closing marker");
+        // Strand must still be open (that's the whole point of W074's warning).
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let strand = strands.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(strand.state(), "registered", "W074 scenario: strand must remain open after closing-marker append");
+    }
+
+    /// W074 must NOT fire on non-closing markers (precision-first).
+    #[test]
+    fn w074_silent_on_non_closing_markers() {
+        // Exercises the real predicate the runtime nudge uses (not a duplicated
+        // constant): non-closing markers must not gate W074.
+        for m in ["[decision]", "[progress]", "[friction]", "[observed]", "[insight]"] {
+            assert!(!is_closing_annotation_marker(m), "{} must not trigger W074", m);
+        }
+    }
+
+    /// orient / remind must NOT contain the old "append [done]" pattern.
+    #[test]
+    fn orient_remind_does_not_say_append_done() {
+        assert!(
+            !ORIENT_REMIND.contains("append --id") || !ORIENT_REMIND.contains("[done]"),
+            "ORIENT_REMIND must not suggest 'append [done]' as the close idiom: {}",
+            ORIENT_REMIND
+        );
+        assert!(
+            ORIENT_REMIND.contains("close --id"),
+            "ORIENT_REMIND must mention 'close --id': {}",
+            ORIENT_REMIND
+        );
     }
 }
 

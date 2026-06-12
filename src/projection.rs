@@ -16,7 +16,10 @@ pub struct LogEntry {
 
 // ── State Markers ──────────────────────────────────────────
 
-const STATE_MARKERS: &[&str] = &[
+/// Legacy content-based state markers — kept for display/annotation purposes
+/// only. These no longer affect compute_state; lifecycle state is set
+/// exclusively by StrandClosed / StrandReopened events.
+pub const STATE_MARKERS: &[&str] = &[
     "[merged]",
     "[cancelled]",
     "[failed]",
@@ -26,23 +29,57 @@ const STATE_MARKERS: &[&str] = &[
     "[registered]",
 ];
 
-/// Compute canonical state from log entries by priority scan.
-/// Returns (state, marker_name, marker_offset).
-/// state: one of merged/cancelled/failed/verified/done/dispatched/registered
-/// marker_name: the bracket prefix that decided the state (e.g. "[verified]")
-/// marker_offset: journal_offset of the deciding log entry (0 if no marker)
-pub fn compute_state(log: &[LogEntry]) -> (String, String, usize) {
-    for marker in STATE_MARKERS {
-        for entry in log {
-            if entry.content.starts_with(marker) {
-                let state = marker
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .to_string();
-                return (state, marker.to_string(), entry.offset);
+/// Valid close dispositions accepted by `tasktree close --as <DISPOSITION>`.
+pub const CLOSE_DISPOSITIONS: &[&str] = &[
+    "done",
+    "failed",
+    "cancelled",
+    "merged",
+    "verified",
+];
+
+/// Compute canonical lifecycle state from raw events (not log content).
+/// Only StrandClosed and StrandReopened events affect state;
+/// the last such event wins. No events → "registered" (open).
+///
+/// Returns (state_str, disposition_or_empty, deciding_offset).
+/// state_str: "registered" (open) or "closed:<disposition>"
+/// disposition_or_empty: the disposition string when closed, empty when open
+/// deciding_offset: journal offset of the deciding event (0 when no event)
+pub fn compute_state_from_events(
+    raw_events: &[(usize, crate::event::Event)],
+    strand_id: &str,
+) -> (String, String, usize) {
+    use crate::event::Event;
+    let mut last: Option<(usize, &Event)> = None;
+    for (offset, event) in raw_events {
+        if event.strand_id() != strand_id {
+            continue;
+        }
+        match event {
+            Event::StrandClosed { .. } | Event::StrandReopened { .. } => {
+                last = Some((*offset, event));
             }
+            _ => {}
         }
     }
+    match last {
+        Some((offset, Event::StrandClosed { disposition, .. })) => {
+            (format!("closed:{}", disposition), disposition.clone(), offset)
+        }
+        Some((_, Event::StrandReopened { .. })) => {
+            ("registered".to_string(), String::new(), 0)
+        }
+        _ => ("registered".to_string(), String::new(), 0),
+    }
+}
+
+/// Compute canonical state from log entries (legacy stub — used only for
+/// test compatibility during the transition. Prefer compute_state_from_events
+/// when the event stream is available).
+/// Returns (state, marker_name, marker_offset).
+pub fn compute_state(log: &[LogEntry]) -> (String, String, usize) {
+    let _ = log; // legacy markers no longer drive state
     ("registered".to_string(), String::new(), 0)
 }
 
@@ -55,6 +92,9 @@ pub struct ProjectedStrand {
     pub id: String,
     pub log: Vec<LogEntry>,
     pub edges: Vec<String>,
+    /// Target IDs of edges whose edge_type is "belongs-to". Subset of `edges`.
+    /// Used by orient --tree to build the belongs-to forest.
+    pub belongs_to_edges: Vec<String>,
     pub hidden: bool,
     pub strand_type: Option<String>,
     pub cached_state: Option<String>,
@@ -155,12 +195,26 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
                 }
             })
             .collect();
-        // Collect edges
+        // Collect edges (all) and belongs-to edges (subset typed "belongs-to")
         let edges: Vec<String> = node_events
             .iter()
             .filter_map(|(_, e)| {
                 if let Event::EdgeLinked { to, .. } = e {
                     Some(to.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let belongs_to_edges: Vec<String> = node_events
+            .iter()
+            .filter_map(|(_, e)| {
+                if let Event::EdgeLinked { to, edge_type, .. } = e {
+                    if edge_type.as_deref() == Some("belongs-to") {
+                        Some(to.clone())
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -174,14 +228,16 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
                 None
             }
         });
-        let (state, state_marker, state_offset) = compute_state(&logs);
+        let strand_id_str = node_events[0].1.strand_id().to_string();
+        let (state, state_marker, state_offset) = compute_state_from_events(events, &strand_id_str);
         if !include_hidden && hidden {
             continue;
         }
         nodes.push(ProjectedStrand {
-            id: node_events[0].1.strand_id().to_string(),
+            id: strand_id_str,
             log: logs,
             edges,
+            belongs_to_edges,
             hidden,
             strand_type,
             cached_state: Some(state),
@@ -216,6 +272,8 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
             Event::StrandUnhidden { ts, .. } => ts,
             Event::CheckpointCreated { ts, .. } => ts,
             Event::SubjectBound { ts, .. } => ts,
+            Event::StrandClosed { ts, .. } => ts,
+            Event::StrandReopened { ts, .. } => ts,
         };
         let ts_str = ts.clone();
         let ts_skew = match &prev_ts {
@@ -252,6 +310,10 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
                     strand_id: strand_id.clone(),
                 }
             }
+            Event::StrandClosed { disposition, .. } => TimelineEventKind::StrandClosed {
+                disposition: disposition.clone(),
+            },
+            Event::StrandReopened { .. } => TimelineEventKind::StrandReopened,
         };
         entries.push(TimelineEntry {
             journal_offset: *offset,
