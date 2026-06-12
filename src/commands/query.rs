@@ -1,5 +1,5 @@
-/// Query-command family: cmd_list, cmd_search, cmd_timeline, cmd_orient,
-/// cmd_agent_context, cmd_tree (+ print_tree_text helper).
+/// Query-command family: cmd_list, cmd_show, cmd_search, cmd_timeline,
+/// cmd_orient, cmd_agent_context, cmd_tree (+ print_tree_text helper).
 /// Moved from main.rs (Layer 4b refactor); function bodies are byte-identical to
 /// the originals (only cross-module path qualification added where required).
 ///
@@ -449,6 +449,151 @@ pub(crate) fn cmd_agent_context(format_json: Option<&str>, include_hidden: bool)
         println!("\nUse JSON for machine startup context:\n  tasktree agent-context --format json");
     }
     Ok(())
+}
+
+pub(crate) fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format_json: bool, locked: bool, digest: bool) -> Result<(), String> {
+    let started = Instant::now();
+    let path = ensure_journal()?;
+    let (events, skipped) = if locked {
+        read_events_lossy_locked()
+    } else {
+        read_events_lossy(&path)
+    };
+    let strands = projection::project_strands(&events, true);
+
+    let strand = if last {
+        // Show most recently active strand
+        if id.is_some() {
+            return Err("choose one: positional id or --last, not both".to_string());
+        }
+        if strands.is_empty() {
+            return Err("no strands found".to_string());
+        }
+        let mut sorted: Vec<_> = strands.iter().collect();
+        sorted.sort_by(|a, b| b.last_ts().cmp(&a.last_ts()));
+        sorted.into_iter().next().unwrap()
+    } else {
+        let id_str = id.ok_or("provide a strand id or use --last")?;
+        let full = find_strand(&events, id_str)
+            .ok_or_else(|| format!("strand {} not found", id_str))?;
+        strands.iter().find(|s| s.id == full).unwrap()
+    };
+
+    // Summary
+    let entry_count = strand.log_count();
+    let last_summary = strand.last_summary();
+    let canonical_state = strand.state();
+
+    if format_json {
+        let output = output::StrandDetailOutput::from(strand);
+        println!("{}", serde_json::to_string(&output).expect("serialize"));
+        if skipped > 0 {
+            eprintln!("[tasktree] WARNING: {} corrupted lines skipped", skipped);
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
+    println!(
+        "strand: {} | {} entries | state: {}",
+        shorten(&strand.id),
+        entry_count,
+        canonical_state
+    );
+    println!("summary: {}", truncate(strand.first_summary(), 60));
+    println!("next: {}", truncate(last_summary, 100));
+    if strand.hidden {
+        println!("status: hidden");
+    }
+    if !strand.edges.is_empty() {
+        println!("edges: {}", strand.edges.join(", "));
+    }
+
+    if digest {
+        // One-glance digest: typed marker census, no full log dump.
+        let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        let mut unmarked = 0usize;
+        for entry in &strand.log {
+            match leading_marker(&entry.content) {
+                Some(m) => *counts.entry(m).or_insert(0) += 1,
+                None => unmarked += 1,
+            }
+        }
+        let mut pairs: Vec<(&str, usize)> = counts.into_iter().collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let mut parts: Vec<String> = pairs.iter().map(|(m, c)| format!("{} {}", c, m)).collect();
+        if unmarked > 0 {
+            parts.push(format!("{} unmarked", unmarked));
+        }
+        let census = if parts.is_empty() { "—".to_string() } else { parts.join(", ") };
+        println!("markers: {}", census);
+        eprintln!(
+            "[tasktree] show:   {:.0?}  (digest, {} entries)",
+            started.elapsed(),
+            entry_count
+        );
+        if skipped > 0 {
+            eprintln!("[tasktree] WARNING: {} corrupted lines skipped", skipped);
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
+    // Determine which entries to show
+    let entries: Vec<_> = strand.log.iter().collect();
+    let slice = if let Some(n) = tail {
+        let skip = entries.len().saturating_sub(n);
+        &entries[skip..]
+    } else {
+        &entries[..]
+    };
+    let shown = slice.len();
+
+    println!("log:");
+    for entry in slice {
+        let ref_str = entry
+            .ref_
+            .as_ref()
+            .map(|r| format!(" [ref: {}]", r))
+            .unwrap_or_default();
+        let id_str = entry
+            .append_id
+            .as_ref()
+            .map(|a| format!(" [{}]", &a[..12]))
+            .unwrap_or_default();
+        println!(
+            "  [{}]{} {}{}",
+            &entry.ts[..19],
+            id_str,
+            entry.content,
+            ref_str
+        );
+    }
+    eprintln!(
+        "[tasktree] show:   {:.0?}  ({} entries, {} shown)",
+        started.elapsed(),
+        entry_count,
+        shown
+    );
+    if skipped > 0 {
+        eprintln!("[tasktree] WARNING: {} corrupted lines skipped", skipped);
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+/// Extract the leading `[marker]` token from an entry's content, if present.
+/// `"[decision] ..."` -> `Some("decision")`; unmarked content -> `None`.
+pub(crate) fn leading_marker(content: &str) -> Option<&str> {
+    let trimmed = content.trim_start();
+    let rest = trimmed.strip_prefix('[')?;
+    let end = rest.find(']')?;
+    let token = &rest[..end];
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
 }
 
 // ── Tree projection ─────────────────────────────────────
