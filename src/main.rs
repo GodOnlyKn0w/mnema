@@ -753,58 +753,7 @@ fn find_strand(events: &[(usize, Event)], id: &str) -> Option<String> {
 // precision-first: a W code that mostly cries wolf teaches agents to
 // ignore the whole channel.
 
-/// One emitted diagnostic: (code, one-line detail). The code resolves via
-/// `tasktree explain <code>`.
-type EmittedDiag = (&'static str, String);
-
-/// Extract comparison tokens for W062 keyword matching: ASCII words of
-/// length >= 5 (lowercased) plus contiguous CJK runs of length >= 3.
-/// Conservative on purpose — shared full runs, not n-grams.
-/// W074 predicate: true when an appended entry's marker is a closing-class
-/// annotation ([done]/[failed]/[cancelled]/[merged]/[verified]) — these are
-/// annotations that no longer change strand lifecycle (lifecycle moves via
-/// `close`/`reopen`). Single source for the runtime nudge and its tests.
-fn is_closing_annotation_marker(content: &str) -> bool {
-    const CLOSING_ANNOTATION_MARKERS: &[&str] = &[
-        "[done]", "[failed]", "[cancelled]", "[merged]", "[verified]",
-    ];
-    let trimmed = content.trim_start();
-    CLOSING_ANNOTATION_MARKERS.iter().any(|m| trimmed.starts_with(*m))
-}
-
-fn w062_tokens(text: &str) -> std::collections::HashSet<String> {
-    let mut tokens = std::collections::HashSet::new();
-    let mut ascii_word = String::new();
-    let mut cjk_run = String::new();
-    for c in text.chars() {
-        if c.is_ascii_alphanumeric() {
-            ascii_word.push(c.to_ascii_lowercase());
-        } else {
-            if ascii_word.len() >= 5 {
-                tokens.insert(ascii_word.clone());
-            }
-            ascii_word.clear();
-        }
-        let is_cjk = ('\u{4e00}'..='\u{9fff}').contains(&c);
-        if is_cjk {
-            cjk_run.push(c);
-        } else {
-            if cjk_run.chars().count() >= 3 {
-                tokens.insert(cjk_run.clone());
-            }
-            cjk_run.clear();
-        }
-    }
-    if ascii_word.len() >= 5 {
-        tokens.insert(ascii_word);
-    }
-    if cjk_run.chars().count() >= 3 {
-        tokens.insert(cjk_run);
-    }
-    tokens
-}
-
-fn parse_event_ts(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn parse_event_ts(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(ts)
         .ok()
         .map(|t| t.with_timezone(&chrono::Utc))
@@ -813,7 +762,7 @@ fn parse_event_ts(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// Parse the `by=` token of a [deadline] entry. Accepts RFC3339 or a bare
 /// date (YYYY-MM-DD, overdue after that day ends, UTC). Unparseable values
 /// emit nothing — don't guess.
-fn parse_deadline_by(content: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn parse_deadline_by(content: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let by_val = content
         .split_whitespace()
         .find_map(|tok| tok.strip_prefix("by="))?;
@@ -824,152 +773,6 @@ fn parse_deadline_by(content: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         .ok()
         .and_then(|d| d.and_hms_opt(23, 59, 59))
         .map(|dt| chrono::DateTime::from_naive_utc_and_offset(dt, chrono::Utc))
-}
-
-/// Run the W062/W068/W069 emitters over the journal events.
-/// Pure: `now` is a parameter, nothing is written.
-fn run_journal_diagnostics(events: &[Event], now: chrono::DateTime<chrono::Utc>) -> Vec<EmittedDiag> {
-    use std::collections::{HashMap, HashSet};
-    let mut diags: Vec<EmittedDiag> = Vec::new();
-
-    // Group LogAppended per strand, keeping ts + provenance
-    struct EntryRef<'a> {
-        ts: &'a str,
-        content: &'a str,
-        producer: Option<&'a str>,
-    }
-    let mut per_strand: HashMap<&str, Vec<EntryRef>> = HashMap::new();
-    for event in events {
-        if let Event::LogAppended { id, ts, content, provenance, .. } = event {
-            per_strand.entry(id.as_str()).or_default().push(EntryRef {
-                ts: ts.as_str(),
-                content: content.as_str(),
-                producer: provenance
-                    .as_ref()
-                    .and_then(|p| p.get("producer"))
-                    .and_then(|v| v.as_str()),
-            });
-        }
-    }
-
-    // Build closed-strand set from explicit StrandClosed events (lifecycle state).
-    // Legacy CLOSING markers in log content are no longer authoritative.
-    let mut closed_strands: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut reopened_strands: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for event in events {
-        match event {
-            Event::StrandClosed { id, .. } => { closed_strands.insert(id.as_str()); reopened_strands.remove(id.as_str()); }
-            Event::StrandReopened { id, .. } => { reopened_strands.insert(id.as_str()); closed_strands.remove(id.as_str()); }
-            _ => {}
-        }
-    }
-
-    // ── W068: deadline overdue ──
-    for (id, entries) in &per_strand {
-        let closed = closed_strands.contains(id);
-        if closed {
-            continue;
-        }
-        for e in entries {
-            if !e.content.starts_with("[deadline]") {
-                continue;
-            }
-            if let Some(by) = parse_deadline_by(e.content) {
-                if now > by {
-                    diags.push((
-                        "W068",
-                        format!("strand {} deadline passed ({})", shorten(id), by.to_rfc3339()),
-                    ));
-                }
-            }
-        }
-    }
-
-    // ── W069: concurrent marker write ──
-    // Same lifecycle marker on the same strand from >= 2 distinct
-    // provenance producers. Entries without provenance can't be
-    // attributed and are ignored (no guessing).
-    // Annotation markers (closing + state) are checked for concurrent writes.
-    const ANNOTATION_MARKERS: &[&str] = &[
-        "[verified]", "[done]", "[cancelled]", "[failed]", "[merged]", "[ended]",
-        "[dispatched]", "[registered]",
-    ];
-    for (id, entries) in &per_strand {
-        let mut writers: HashMap<&str, HashSet<&str>> = HashMap::new();
-        for e in entries {
-            if let Some(producer) = e.producer {
-                if let Some(marker) = ANNOTATION_MARKERS.iter().find(|m| e.content.starts_with(*m)) {
-                    writers.entry(marker).or_default().insert(producer);
-                }
-            }
-        }
-        for (marker, producers) in writers {
-            if producers.len() >= 2 {
-                let mut who: Vec<&str> = producers.into_iter().collect();
-                who.sort();
-                diags.push((
-                    "W069",
-                    format!("strand {} marker {} written by: {}", shorten(id), marker, who.join(", ")),
-                ));
-            }
-        }
-    }
-
-    // ── W062: contradictory decision/constraint ──
-    // [decision] and [constraint] sharing a keyword, written within 10
-    // minutes, from different strands.
-    struct Governed<'a> {
-        strand: &'a str,
-        ts: chrono::DateTime<chrono::Utc>,
-        tokens: std::collections::HashSet<String>,
-    }
-    let mut decisions: Vec<Governed> = Vec::new();
-    let mut constraints: Vec<Governed> = Vec::new();
-    for (id, entries) in &per_strand {
-        for e in entries {
-            let bucket = if e.content.starts_with("[decision]") {
-                &mut decisions
-            } else if e.content.starts_with("[constraint]") {
-                &mut constraints
-            } else {
-                continue;
-            };
-            if let Some(ts) = parse_event_ts(e.ts) {
-                bucket.push(Governed { strand: id, ts, tokens: w062_tokens(e.content) });
-            }
-        }
-    }
-    let mut seen_pairs: HashSet<(String, String, String)> = HashSet::new();
-    for d in &decisions {
-        for c in &constraints {
-            if d.strand == c.strand {
-                continue;
-            }
-            if (d.ts - c.ts).num_seconds().abs() > 600 {
-                continue;
-            }
-            if let Some(shared) = d.tokens.intersection(&c.tokens).next() {
-                let key = (
-                    shorten(d.strand),
-                    shorten(c.strand),
-                    shared.clone(),
-                );
-                if seen_pairs.insert(key) {
-                    diags.push((
-                        "W062",
-                        format!(
-                            "decision in {} vs constraint in {} share keyword \"{}\" within 10min",
-                            shorten(d.strand),
-                            shorten(c.strand),
-                            shared
-                        ),
-                    ));
-                }
-            }
-        }
-    }
-
-    diags
 }
 
 fn cmd_doctor_journal() -> Result<bool, String> {
@@ -1200,7 +1003,7 @@ fn cmd_doctor_journal() -> Result<bool, String> {
     }
 
     // ── W-code diagnostics ──────────────────────────────
-    let diags = run_journal_diagnostics(&events, chrono::Utc::now());
+    let diags = diagnostics::run_journal_diagnostics(&events, chrono::Utc::now());
     println!();
     println!("  diagnostics:");
     if diags.is_empty() {
@@ -2041,7 +1844,7 @@ fn cmd_append(
 
     // W074: nudge when a closing marker is appended — markers are now annotations only.
     // Fires only on exact closing-marker prefix matches (precision-first: no false positives).
-    if is_closing_annotation_marker(&stored) {
+    if diagnostics::is_closing_annotation_marker(&stored) {
         eprintln!(
             "W074: [done]/[failed]/[cancelled]/[merged]/[verified] are annotations — \
             they no longer close the strand. Use: tasktree close --id {} (tasktree explain W074)",
@@ -2113,77 +1916,6 @@ fn humanize_duration(secs: i64) -> String {
         format!("{}h", secs / 3600)
     } else {
         format!("{}d", secs / 86400)
-    }
-}
-
-/// Check W070: checkpoint's provenance.producer differs from the last
-/// LogAppended entry's provenance.producer on the target strand.
-///
-/// Both producers must be non-empty strings for this check to fire;
-/// if either is absent the function returns None (no guessing).
-///
-/// Returns `Some((code, detail))` when the check fires, `None` otherwise.
-fn check_w070_strand_moved(
-    events: &[(usize, Event)],
-    strand_id: &str,
-    checkpoint_producer: Option<&str>,
-) -> Option<EmittedDiag> {
-    let cp_producer = checkpoint_producer?;
-    if cp_producer.is_empty() {
-        return None;
-    }
-    // Find the last LogAppended event for this strand.
-    let last_entry_producer: Option<&str> = events
-        .iter()
-        .filter_map(|(_, e)| {
-            if let Event::LogAppended { id, provenance, .. } = e {
-                if id == strand_id {
-                    Some(
-                        provenance
-                            .as_ref()
-                            .and_then(|p| p.get("producer"))
-                            .and_then(|v| v.as_str()),
-                    )
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .last()
-        .flatten();
-    let last_producer = last_entry_producer?;
-    if last_producer.is_empty() {
-        return None;
-    }
-    if last_producer != cp_producer {
-        Some((
-            "W070",
-            format!(
-                "strand moved under you: last entry by \"{}\", you are \"{}\"",
-                last_producer, cp_producer
-            ),
-        ))
-    } else {
-        None
-    }
-}
-
-/// Check W071: checkpoint target strand state is not "registered" (already closed).
-///
-/// Returns `Some((code, detail))` when the check fires, `None` otherwise.
-fn check_w071_closed_strand(strand: &projection::ProjectedStrand) -> Option<EmittedDiag> {
-    if strand.state() != "registered" {
-        Some((
-            "W071",
-            format!(
-                "checkpoint on closed strand: state is {}",
-                strand.state()
-            ),
-        ))
-    } else {
-        None
     }
 }
 
@@ -2284,8 +2016,8 @@ fn cmd_checkpoint(
         .as_ref()
         .and_then(|p| p.get("producer"))
         .and_then(|v| v.as_str());
-    let w070 = check_w070_strand_moved(&events, &strand.id, checkpoint_producer);
-    let w071 = check_w071_closed_strand(strand);
+    let w070 = diagnostics::check_w070_strand_moved(&events, &strand.id, checkpoint_producer);
+    let w071 = diagnostics::check_w071_closed_strand(strand);
 
     let observed_entries_before_append = strand.log_count();
     let escaped_action = escape_checkpoint_value(action);
@@ -2318,7 +2050,7 @@ fn cmd_checkpoint(
     // Run diagnostics on the pre-append events (checkpoint itself is not a
     // diagnostic target; re-reading after append would be equivalent here).
     let raw_events: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
-    let diags = run_journal_diagnostics(&raw_events, chrono::Utc::now());
+    let diags = diagnostics::run_journal_diagnostics(&raw_events, chrono::Utc::now());
     let diag_count = diags.len();
 
     // Build warning list (W070/W071) for output.
@@ -3657,7 +3389,7 @@ fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format_json: bool
     Ok(())
 }
 
-fn shorten(id: &str) -> String {
+pub(crate) fn shorten(id: &str) -> String {
     if id.len() > 12 {
         id[..12].to_string()
     } else {
@@ -4925,14 +4657,14 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
-        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        let diags = diagnostics::run_journal_diagnostics(&raw, chrono::Utc::now());
         assert!(diags.iter().any(|(c, _)| *c == "W068"), "expected W068, got {:?}", diags);
 
         // Closing the strand silences the warning (precision over recall).
         cmd_close(&id, Some("cancelled"), false).unwrap();
         let (events, _) = read_events_lossy(&path);
         let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
-        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        let diags = diagnostics::run_journal_diagnostics(&raw, chrono::Utc::now());
         assert!(!diags.iter().any(|(c, _)| *c == "W068"));
     }
 
@@ -4944,7 +4676,7 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
-        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        let diags = diagnostics::run_journal_diagnostics(&raw, chrono::Utc::now());
         assert!(diags.is_empty(), "future deadline must not fire: {:?}", diags);
     }
 
@@ -4957,7 +4689,7 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
-        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        let diags = diagnostics::run_journal_diagnostics(&raw, chrono::Utc::now());
         let w069: Vec<_> = diags.iter().filter(|(c, _)| *c == "W069").collect();
         assert_eq!(w069.len(), 1, "expected one W069, got {:?}", diags);
         assert!(w069[0].1.contains("alpha") && w069[0].1.contains("beta"));
@@ -4972,7 +4704,7 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
-        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        let diags = diagnostics::run_journal_diagnostics(&raw, chrono::Utc::now());
         assert!(diags.iter().all(|(c, _)| *c != "W069"));
     }
 
@@ -4986,7 +4718,7 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
-        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        let diags = diagnostics::run_journal_diagnostics(&raw, chrono::Utc::now());
         let w062: Vec<_> = diags.iter().filter(|(c, _)| *c == "W062").collect();
         assert_eq!(w062.len(), 1, "expected one W062, got {:?}", diags);
         assert!(w062[0].1.contains("sqlite"));
@@ -5003,7 +4735,7 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
-        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        let diags = diagnostics::run_journal_diagnostics(&raw, chrono::Utc::now());
         assert!(diags.iter().all(|(c, _)| *c != "W062"), "same-strand pair must not fire: {:?}", diags);
     }
 
@@ -5681,7 +5413,7 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
-        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        let diags = diagnostics::run_journal_diagnostics(&raw, chrono::Utc::now());
         assert!(
             diags.iter().any(|(c, _)| *c == "W068"),
             "expected W068 diagnostic for overdue deadline, got {:?}", diags
@@ -5832,7 +5564,7 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         // Checkpoint as "beta" — should fire W070.
-        let result = check_w070_strand_moved(&events, &id, Some("beta"));
+        let result = diagnostics::check_w070_strand_moved(&events, &id, Some("beta"));
         assert!(result.is_some(), "W070 must fire when producers differ");
         let (code, detail) = result.unwrap();
         assert_eq!(code, "W070");
@@ -5848,7 +5580,7 @@ fn create_strand(content: &str) -> String {
             Some(r#"{"producer":"alpha"}"#)).unwrap();
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
-        let result = check_w070_strand_moved(&events, &id, Some("alpha"));
+        let result = diagnostics::check_w070_strand_moved(&events, &id, Some("alpha"));
         assert!(result.is_none(), "W070 must not fire when same producer");
     }
 
@@ -5861,7 +5593,7 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         // No checkpoint producer → silent.
-        let result = check_w070_strand_moved(&events, &id, None);
+        let result = diagnostics::check_w070_strand_moved(&events, &id, None);
         assert!(result.is_none(), "W070 must not fire when checkpoint producer absent");
     }
 
@@ -5874,7 +5606,7 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         // Last entry has no producer → silent.
-        let result = check_w070_strand_moved(&events, &id, Some("beta"));
+        let result = diagnostics::check_w070_strand_moved(&events, &id, Some("beta"));
         assert!(result.is_none(), "W070 must not fire when last entry has no producer");
     }
 
@@ -5889,7 +5621,7 @@ fn create_strand(content: &str) -> String {
         let (events, _) = read_events_lossy(&path);
         let strands = projection::project_strands(&events, true);
         let strand = strands.iter().find(|s| s.id == id).unwrap();
-        let result = check_w071_closed_strand(strand);
+        let result = diagnostics::check_w071_closed_strand(strand);
         assert!(result.is_some(), "W071 must fire on closed strand");
         let (code, detail) = result.unwrap();
         assert_eq!(code, "W071");
@@ -5904,7 +5636,7 @@ fn create_strand(content: &str) -> String {
         let (events, _) = read_events_lossy(&path);
         let strands = projection::project_strands(&events, true);
         let strand = strands.iter().find(|s| s.id == id).unwrap();
-        let result = check_w071_closed_strand(strand);
+        let result = diagnostics::check_w071_closed_strand(strand);
         assert!(result.is_none(), "W071 must not fire on registered strand");
     }
 
@@ -6801,7 +6533,7 @@ fn create_strand(content: &str) -> String {
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
         let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
-        let diags = run_journal_diagnostics(&raw, chrono::Utc::now());
+        let diags = diagnostics::run_journal_diagnostics(&raw, chrono::Utc::now());
 
         for (code, detail) in &diags {
             // No truncation marker in detail strings (id handles inside details
@@ -7604,7 +7336,7 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id = create_strand("some work");
         // The predicate that gates the W074 nudge must be true for a closing marker.
-        assert!(is_closing_annotation_marker("[done] sub-step done"), "closing marker must gate W074");
+        assert!(diagnostics::is_closing_annotation_marker("[done] sub-step done"), "closing marker must gate W074");
         let result = cmd_append(Some("[done] sub-step done"), None, false, false, None, Some(&id), None, None);
         assert!(result.is_ok(), "append must succeed even with closing marker");
         // Strand must still be open (that's the whole point of W074's warning).
@@ -7621,7 +7353,7 @@ fn create_strand(content: &str) -> String {
         // Exercises the real predicate the runtime nudge uses (not a duplicated
         // constant): non-closing markers must not gate W074.
         for m in ["[decision]", "[progress]", "[friction]", "[observed]", "[insight]"] {
-            assert!(!is_closing_annotation_marker(m), "{} must not trigger W074", m);
+            assert!(!diagnostics::is_closing_annotation_marker(m), "{} must not trigger W074", m);
         }
     }
 
