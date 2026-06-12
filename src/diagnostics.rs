@@ -156,7 +156,26 @@ hide / unhide: strand_id / status / noop /
   active_count / closed_count / hidden_count / result（卡片）
 link: source_id / target_id / edge_type / status /
   result.source / result.target（卡片）
-卡片/result 形态见 tasktree explain card"#,
+卡片/result 形态见 tasktree explain card
+jq 整型（切 JSON 成你要的形）见 tasktree explain jq"#,
+    },
+    TopicInfo {
+        name: "jq",
+        title: "jq 整型——把 JSON 投影切成你要的形",
+        body: r#"JSON 是空间(tree)/时间(timeline)两视角投影，jq 是塑形层。
+顶层字段见 tasktree explain json。常用：
+
+取 strand id（免脆弱解析，取代手搓字符串切割）：
+  tasktree add "..." --format json | jq -r .id
+
+取日志行：
+  tasktree show --id <ID> --format json | jq -r '.events[].entry'
+
+数值筛选（offset / count / entry_count 是数，可比较）：
+  tasktree list --format json | jq '.strands[] | select(.entry_count > 10) | .id'
+
+时间线切成精简视图：
+  tasktree timeline --format json | jq '.timeline[] | {ts, strand_id, kind}'"#,
     },
     TopicInfo {
         name: "grammar",

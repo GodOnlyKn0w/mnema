@@ -482,13 +482,14 @@ Rules:
     #[command(after_help = "\
 Namespaces:
   Diagnostic codes   uppercase-initial: W062, E053, w062 (case-insensitive)
-  Topics             all-lowercase:     card, markers, retry, json, grammar
+  Topics             all-lowercase:     card, markers, retry, json, jq, grammar
 
 Topics:
   card      卡片：统一输出文法单元（格式、字段、回显语义）
   markers   Marker 词表（[decision]、[done] 等前缀规范）
   retry     重试语义：哪些命令可盲目重试
   json      JSON 形态索引：各读命令 --format json 的顶层字段
+  jq        jq 整型：把 --format json 输出切成你要的形
 
 Examples:
   tasktree explain W062
