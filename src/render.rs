@@ -11,7 +11,7 @@ use serde_json::json;
 
 /// Orient remind line: the whole operating loop in one line (ADR-0001:
 /// the rules travel with the orientation, the weave-in pointer stays thin).
-pub(crate) const ORIENT_REMIND: &str = "continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | more → tasktree --help";
+pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想（难处小步高分辨，有把握大步迈） | continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | more → tasktree --help";
 
 /// Build an OrientStrand card from a projected strand. Identical to the
 /// inline construction in build_orient; extracted so write commands can

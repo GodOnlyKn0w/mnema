@@ -294,6 +294,9 @@ JSON shape: tasktree explain json")]
         /// Show only the last N log entries
         #[arg(long, value_name = "N")]
         tail: Option<usize>,
+        /// One-glance digest: header + marker census, no full log dump
+        #[arg(long)]
+        digest: bool,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -1913,7 +1916,7 @@ pub(crate) fn parse_duration(s: &str) -> Result<usize, String> {
     }
 }
 
-fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format_json: bool, locked: bool) -> Result<(), String> {
+fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format_json: bool, locked: bool, digest: bool) -> Result<(), String> {
     let started = Instant::now();
     let path = ensure_journal()?;
     let (events, skipped) = if locked {
@@ -1971,6 +1974,36 @@ fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format_json: bool
         println!("edges: {}", strand.edges.join(", "));
     }
 
+    if digest {
+        // One-glance digest: typed marker census, no full log dump.
+        let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        let mut unmarked = 0usize;
+        for entry in &strand.log {
+            match leading_marker(&entry.content) {
+                Some(m) => *counts.entry(m).or_insert(0) += 1,
+                None => unmarked += 1,
+            }
+        }
+        let mut pairs: Vec<(&str, usize)> = counts.into_iter().collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let mut parts: Vec<String> = pairs.iter().map(|(m, c)| format!("{} {}", c, m)).collect();
+        if unmarked > 0 {
+            parts.push(format!("{} unmarked", unmarked));
+        }
+        let census = if parts.is_empty() { "—".to_string() } else { parts.join(", ") };
+        println!("markers: {}", census);
+        eprintln!(
+            "[tasktree] show:   {:.0?}  (digest, {} entries)",
+            started.elapsed(),
+            entry_count
+        );
+        if skipped > 0 {
+            eprintln!("[tasktree] WARNING: {} corrupted lines skipped", skipped);
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
     // Determine which entries to show
     let entries: Vec<_> = strand.log.iter().collect();
     let slice = if let Some(n) = tail {
@@ -2012,6 +2045,20 @@ fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format_json: bool
         std::process::exit(2);
     }
     Ok(())
+}
+
+/// Extract the leading `[marker]` token from an entry's content, if present.
+/// `"[decision] ..."` → `Some("decision")`; unmarked content → `None`.
+pub(crate) fn leading_marker(content: &str) -> Option<&str> {
+    let trimmed = content.trim_start();
+    let rest = trimmed.strip_prefix('[')?;
+    let end = rest.find(']')?;
+    let token = &rest[..end];
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
 }
 
 pub(crate) fn shorten(id: &str) -> String {
@@ -2103,9 +2150,9 @@ fn main() {
             let fmt = format.as_deref() == Some("json");
             cmd_list(*all, links.as_deref(), backlinks.as_deref(), state.as_deref(), list_type.as_deref(), stale.as_deref(), *stale_offset, *since_offset, fmt)
         },
-        Commands::Show { target, last, tail, format, locked } => {
+        Commands::Show { target, last, tail, digest, format, locked } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_show(target.get(), *last, *tail, fmt, *locked)
+            cmd_show(target.get(), *last, *tail, fmt, *locked, *digest)
         },
         Commands::Search { query, format, include_hidden } => {
             let fmt = format.as_deref() == Some("json");
@@ -4848,7 +4895,7 @@ fn create_strand(content: &str) -> String {
         let id = create_strand("show me");
         cmd_append(Some("entry"), Some(&id), false, false, None, None, None, None).unwrap();
         // show
-        let r = cmd_show(Some(&id), false, None, false, false);
+        let r = cmd_show(Some(&id), false, None, false, false, false);
         assert!(r.is_ok());
         // search
         let r = cmd_search("entry", false, false);
@@ -5394,8 +5441,8 @@ fn create_strand(content: &str) -> String {
         let _env = setup();
         let id = create_strand("id_target behavioral test");
         // Both should succeed and produce the same output
-        let r1 = cmd_show(Some(&id), false, None, false, false);
-        let r2 = cmd_show(Some(&id), false, None, false, false);
+        let r1 = cmd_show(Some(&id), false, None, false, false, false);
+        let r2 = cmd_show(Some(&id), false, None, false, false, false);
         assert!(r1.is_ok(), "show with positional id failed: {:?}", r1);
         assert!(r2.is_ok(), "show with --id failed: {:?}", r2);
     }
@@ -5441,13 +5488,13 @@ fn create_strand(content: &str) -> String {
         cmd_append(Some("entry three"), Some(&id), false, false, None, None, None, None).unwrap();
 
         // tail with explicit id — must succeed and show only last 2 entries
-        let result = cmd_show(Some(&id), false, Some(2), false, false);
+        let result = cmd_show(Some(&id), false, Some(2), false, false, false);
         assert!(
             result.is_ok(),
             "show <ID> --tail 2 must succeed: {:?}", result
         );
         // --last + --tail must still work
-        let result2 = cmd_show(None, true, Some(2), false, false);
+        let result2 = cmd_show(None, true, Some(2), false, false, false);
         assert!(result2.is_ok(), "show --last --tail must still work: {:?}", result2);
     }
 
@@ -5995,6 +6042,37 @@ fn create_strand(content: &str) -> String {
             "ORIENT_REMIND must mention 'close --id': {}",
             ORIENT_REMIND
         );
+    }
+
+    /// remind carries the loop methodology (act → observe → think), not just
+    /// the command cheat-sheet.
+    #[test]
+    fn orient_remind_carries_the_loop_stance() {
+        assert!(
+            ORIENT_REMIND.contains("loop:"),
+            "ORIENT_REMIND must carry the loop stance: {}",
+            ORIENT_REMIND
+        );
+    }
+
+    #[test]
+    fn leading_marker_extracts_token_or_none() {
+        assert_eq!(leading_marker("[decision] foo"), Some("decision"));
+        assert_eq!(leading_marker("  [friction] bar"), Some("friction"));
+        assert_eq!(leading_marker("plain text"), None);
+        assert_eq!(leading_marker("[] empty"), None);
+        assert_eq!(leading_marker("no close bracket [x"), None);
+    }
+
+    #[test]
+    fn show_digest_returns_ok_without_dumping_log() {
+        let _env = setup();
+        let id = create_strand("digest target");
+        cmd_append(Some("[decision] one"), Some(&id), false, false, None, None, None, None).unwrap();
+        cmd_append(Some("[friction] two"), Some(&id), false, false, None, None, None, None).unwrap();
+        // digest = true; should succeed (census path, no full log dump)
+        let r = cmd_show(Some(&id), false, None, false, false, true);
+        assert!(r.is_ok(), "show --digest failed: {:?}", r);
     }
 }
 
