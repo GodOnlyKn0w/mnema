@@ -12,6 +12,7 @@ pub struct LogEntry {
     pub content: String,
     pub ref_: Option<String>,
     pub append_id: Option<String>,
+    pub provenance: Option<serde_json::Value>,
 }
 
 // ── State Markers ──────────────────────────────────────────
@@ -180,6 +181,7 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
                     content,
                     ref_,
                     append_id,
+                    provenance,
                     ..
                 } = e
                 {
@@ -189,6 +191,7 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
                         content: content.clone(),
                         ref_: ref_.clone(),
                         append_id: append_id.clone(),
+                        provenance: provenance.clone(),
                     })
                 } else {
                     None

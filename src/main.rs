@@ -972,11 +972,25 @@ fn cmd_doctor_journal() -> Result<bool, String> {
 pub(crate) fn resolve_id(events: &[(usize, Event)], id: &str) -> Result<String, String> {
     find_strand(events, id).ok_or_else(|| format!("strand {} not found", id))
 }
+/// Default provenance from the `TASKTREE_PRODUCER` env var (per-session agent
+/// identity), applied when no explicit `--provenance` is passed. Returns `None`
+/// if the var is unset or blank. Explicit `--provenance` always wins.
+pub(crate) fn env_producer_provenance() -> Option<serde_json::Value> {
+    let producer = std::env::var("TASKTREE_PRODUCER").ok()?;
+    let producer = producer.trim();
+    if producer.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({ "producer": producer }))
+    }
+}
+
 /// Parse a `--provenance` argument. Must be a JSON object when present.
-/// Returns `None` for `None` input; `Err` for malformed JSON or non-object shapes.
+/// Returns the `TASKTREE_PRODUCER` env default for `None` input (or `None` if
+/// unset); `Err` for malformed JSON or non-object shapes.
 pub(crate) fn parse_provenance_arg(raw: Option<&str>) -> Result<Option<serde_json::Value>, String> {
     match raw {
-        None => Ok(None),
+        None => Ok(env_producer_provenance()),
         Some(s) => {
             let trimmed = s.trim();
             if trimmed.is_empty() {
@@ -1337,6 +1351,48 @@ mod tests {
             None => unsafe { std::env::remove_var("TASKTREE_HOME") },
         }
         result
+    }
+
+    #[test]
+    fn provenance_defaults_to_env_producer_when_set() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var("TASKTREE_PRODUCER").ok();
+        unsafe { std::env::set_var("TASKTREE_PRODUCER", "codex") };
+        assert_eq!(
+            parse_provenance_arg(None).unwrap(),
+            Some(serde_json::json!({ "producer": "codex" }))
+        );
+        // Explicit --provenance always overrides the env default.
+        assert_eq!(
+            parse_provenance_arg(Some(r#"{"producer":"claude"}"#)).unwrap(),
+            Some(serde_json::json!({ "producer": "claude" }))
+        );
+        // Blank env → no default (treated as unset).
+        unsafe { std::env::set_var("TASKTREE_PRODUCER", "   ") };
+        assert_eq!(parse_provenance_arg(None).unwrap(), None);
+        match prev {
+            Some(v) => unsafe { std::env::set_var("TASKTREE_PRODUCER", v) },
+            None => unsafe { std::env::remove_var("TASKTREE_PRODUCER") },
+        }
+    }
+
+    #[test]
+    fn show_json_exposes_per_entry_provenance() {
+        let _env = setup();
+        let id = create_strand("provenance projection test");
+        cmd_append(
+            Some("[observed] tagged"), Some(&id), false, false, None, None, None,
+            Some(r#"{"producer":"codex"}"#),
+        ).unwrap();
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let full = find_strand(&events, &id).unwrap();
+        let strands = projection::project_strands(&events, true);
+        let s = strands.iter().find(|s| s.id == full).unwrap();
+        let out = output::StrandDetailOutput::from(s);
+        let tagged = out.events.iter().find(|e| e.provenance.is_some())
+            .expect("at least one event must carry provenance");
+        assert_eq!(tagged.provenance.as_ref().unwrap()["producer"], "codex");
     }
 
     #[test]

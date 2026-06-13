@@ -195,7 +195,7 @@ pub(crate) fn cmd_add(
     if format_json {
         let card = strand_card_fresh(&id);
         let card_val = card.as_ref().map(|c| serde_json::to_value(c).ok()).flatten();
-        println!("{}", json!({"id": id, "status": "ok", "result": card_val}));
+        println!("{}", json!({"id": id, "status": "ok", "provenance": provenance, "result": card_val}));
     } else {
         println!("{}", id);
         if let Some((card, state)) = strand_card_fresh_with_state(&id) {
@@ -346,7 +346,7 @@ pub(crate) fn cmd_append(
     };
 
     let provenance = parse_provenance_arg(provenance_raw)?;
-    let event = event::make_log_appended(&full_id, &stored, provenance);
+    let event = event::make_log_appended(&full_id, &stored, provenance.clone());
     let append_id = match &event {
         Event::LogAppended { append_id, .. } => append_id.clone(),
         _ => None,
@@ -390,14 +390,21 @@ pub(crate) fn cmd_append(
             "strand_id": full_id,
             "append_id": append_id,
             "content_preview": stored.chars().take(120).collect::<String>(),
+            "provenance": provenance,
             "result": card_val,
         })).unwrap());
     } else {
+        let prod = provenance
+            .as_ref()
+            .and_then(|p| p.get("producer"))
+            .and_then(|v| v.as_str())
+            .map(|p| format!(" producer={}", p))
+            .unwrap_or_default();
         if let Some((card, state)) = strand_card_fresh_with_state(&full_id) {
-            println!("appended to {} (offset {})", shorten(&full_id), card.last_offset);
+            println!("appended to {} (offset {}){}", shorten(&full_id), card.last_offset, prod);
             print_card_with_state(&card, &state);
         } else {
-            println!("appended to {}", shorten(&full_id));
+            println!("appended to {}{}", shorten(&full_id), prod);
         }
     }
     Ok(())

@@ -97,6 +97,9 @@ pub struct EventOutput {
     pub ts: String,
     pub append_id: Option<String>,
     pub entry: String,
+    /// Per-entry provenance (e.g. {"producer":"codex"}). Always serialised —
+    /// `null` when absent — per the show JSON contract (see module header).
+    pub provenance: Option<serde_json::Value>,
 }
 
 /// External contract for `show --format json`.
@@ -171,6 +174,7 @@ impl From<&ProjectedStrand> for StrandDetailOutput {
                 ts: e.ts.clone(),
                 append_id: e.append_id.clone(),
                 entry: e.content.clone(),
+                provenance: e.provenance.clone(),
             }).collect(),
         }
     }
