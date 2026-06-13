@@ -205,6 +205,7 @@ pub(crate) fn cmd_add(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn cmd_append(
     content: Option<&str>,
     legacy_id: Option<&str>,
@@ -214,6 +215,30 @@ pub(crate) fn cmd_append(
     explicit_id: Option<&str>,
     format: Option<&str>,
     provenance_raw: Option<&str>,
+) -> Result<(), String> {
+    cmd_append_with_seen_offset(
+        content,
+        legacy_id,
+        new,
+        stdin,
+        file,
+        explicit_id,
+        format,
+        provenance_raw,
+        None,
+    )
+}
+
+pub(crate) fn cmd_append_with_seen_offset(
+    content: Option<&str>,
+    legacy_id: Option<&str>,
+    new: bool,
+    stdin: bool,
+    file: Option<&str>,
+    explicit_id: Option<&str>,
+    format: Option<&str>,
+    provenance_raw: Option<&str>,
+    seen_offset: Option<usize>,
 ) -> Result<(), String> {
     // ---- Content Source Resolution ----
     if (stdin || file.is_some())
@@ -345,6 +370,12 @@ pub(crate) fn cmd_append(
         recent.id.clone()
     };
 
+    let strand_last_offset = projection::project_strands(&events, true)
+        .iter()
+        .find(|s| s.id == full_id)
+        .map(|s| s.last_offset())
+        .unwrap_or(0);
+    let w076 = diagnostics::check_w076_seen_offset(&full_id, seen_offset, strand_last_offset);
     let provenance = parse_provenance_arg(provenance_raw)?;
     let event = event::make_log_appended(&full_id, &stored, provenance.clone());
     let append_id = match &event {
@@ -383,14 +414,32 @@ pub(crate) fn cmd_append(
         );
     }
 
+    if let Some(w) = &w076 {
+        eprintln!("{}: {} (tasktree explain {})", w.code, w.detail, w.code);
+    }
+
     if format == Some("json") {
         let card = strand_card_fresh(&full_id);
         let card_val = card.as_ref().map(|c| serde_json::to_value(c).ok()).flatten();
+        let warnings_json: Vec<serde_json::Value> = w076
+            .iter()
+            .map(|w| json!({
+                "code": w.code,
+                "detail": w.detail,
+                "seen_offset": w.seen_offset,
+                "strand_last_offset": w.strand_last_offset,
+                "seen_gap": w.seen_gap,
+                "catch_up": w.catch_up,
+            }))
+            .collect();
         println!("{}", serde_json::to_string(&serde_json::json!({
             "strand_id": full_id,
             "append_id": append_id,
             "content_preview": stored.chars().take(120).collect::<String>(),
             "provenance": provenance,
+            "seen_offset": seen_offset,
+            "seen_gap": w076.as_ref().map(|w| w.seen_gap),
+            "warnings": warnings_json,
             "result": card_val,
         })).unwrap());
     } else {
@@ -532,6 +581,7 @@ pub(crate) fn escape_checkpoint_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+#[cfg(test)]
 pub(crate) fn cmd_checkpoint(
     requested_id: Option<&str>,
     action: &str,
@@ -539,6 +589,26 @@ pub(crate) fn cmd_checkpoint(
     format_json: bool,
     include_hidden: bool,
     provenance_raw: Option<&str>,
+) -> Result<(), CheckpointFailure> {
+    cmd_checkpoint_with_seen_offset(
+        requested_id,
+        action,
+        tail,
+        format_json,
+        include_hidden,
+        provenance_raw,
+        None,
+    )
+}
+
+pub(crate) fn cmd_checkpoint_with_seen_offset(
+    requested_id: Option<&str>,
+    action: &str,
+    tail: Option<usize>,
+    format_json: bool,
+    include_hidden: bool,
+    provenance_raw: Option<&str>,
+    seen_offset: Option<usize>,
 ) -> Result<(), CheckpointFailure> {
     if action.trim().is_empty() {
         return Err(CheckpointFailure {
@@ -631,6 +701,7 @@ pub(crate) fn cmd_checkpoint(
         .and_then(|v| v.as_str());
     let w070 = diagnostics::check_w070_strand_moved(&events, &strand.id, checkpoint_producer);
     let w071 = diagnostics::check_w071_closed_strand(strand);
+    let w076 = diagnostics::check_w076_seen_offset(&strand.id, seen_offset, strand_last_offset);
 
     let observed_entries_before_append = strand.log_count();
     let escaped_action = escape_checkpoint_value(action);
@@ -666,10 +737,24 @@ pub(crate) fn cmd_checkpoint(
     let diags = diagnostics::run_journal_diagnostics(&raw_events, chrono::Utc::now());
     let diag_count = diags.len();
 
-    // Build warning list (W070/W071) for output.
-    let mut cp_warnings: Vec<(&'static str, String)> = Vec::new();
-    if let Some(w) = w070 { cp_warnings.push(w); }
-    if let Some(w) = w071 { cp_warnings.push(w); }
+    // Build warning list (W070/W071/W076) for output.
+    let mut cp_warnings: Vec<serde_json::Value> = Vec::new();
+    if let Some((code, detail)) = w070 {
+        cp_warnings.push(json!({"code": code, "detail": detail}));
+    }
+    if let Some((code, detail)) = w071 {
+        cp_warnings.push(json!({"code": code, "detail": detail}));
+    }
+    if let Some(w) = &w076 {
+        cp_warnings.push(json!({
+            "code": w.code,
+            "detail": w.detail,
+            "seen_offset": w.seen_offset,
+            "strand_last_offset": w.strand_last_offset,
+            "seen_gap": w.seen_gap,
+            "catch_up": w.catch_up,
+        }));
+    }
 
     if format_json {
         let card = strand_card_fresh(&strand.id);
@@ -682,10 +767,6 @@ pub(crate) fn cmd_checkpoint(
         } else {
             serde_json::Value::Null
         };
-        let warnings_json: Vec<serde_json::Value> = cp_warnings
-            .iter()
-            .map(|(code, detail)| json!({"code": code, "detail": detail}))
-            .collect();
         println!(
             "{}",
             json!({
@@ -702,8 +783,10 @@ pub(crate) fn cmd_checkpoint(
                 "result": card_val,
                 "staleness_seconds": staleness_seconds,
                 "journal_delta": journal_delta,
+                "seen_offset": seen_offset,
+                "seen_gap": w076.as_ref().map(|w| w.seen_gap),
                 "catch_up": catch_up_val,
-                "warnings": warnings_json,
+                "warnings": cp_warnings,
             })
         );
     } else {
@@ -752,7 +835,9 @@ pub(crate) fn cmd_checkpoint(
             println!("  [{}]{} {}", &entry.ts[..19], id_str, entry.content);
         }
         // W-code scar lines — printed before the general diagnostics count.
-        for (code, detail) in &cp_warnings {
+        for warning in &cp_warnings {
+            let code = warning["code"].as_str().unwrap_or("W");
+            let detail = warning["detail"].as_str().unwrap_or("");
             println!("  {} {}  (tasktree explain {})", code, detail, code);
         }
         if diag_count > 0 {

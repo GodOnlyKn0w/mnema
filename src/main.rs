@@ -179,7 +179,9 @@ Markers (optional bracket prefix on the first line):
 Provenance:
   --provenance <JSON>  Optional structured metadata. Must be a JSON
                        object. Stored on the LogAppended event, not in
-                       the entry text. Older journals ignore it.")]
+                       the entry text. Older journals ignore it.
+  --seen-offset <N>    Caller-declared last observed offset for the target
+                       strand. If stale, emits W076 but still writes.")]
     Append {
         /// Log content
         content: Option<String>,
@@ -205,6 +207,10 @@ Provenance:
         /// LogAppended event; the entry text is unchanged.
         #[arg(long = "provenance", value_name = "JSON")]
         provenance: Option<String>,
+        /// Caller-declared last observed offset for the target strand.
+        /// If behind the target's current last_offset, emits W076 but still writes.
+        #[arg(long = "seen-offset", value_name = "N")]
+        seen_offset: Option<usize>,
     },
     /// Record context before an irreversible or state-closing action
     #[command(after_help = "\
@@ -230,10 +236,11 @@ Output:
                      since that entry. Catch-up command shown when delta > 0.
   catch-up           tasktree timeline --since-offset <N> --links <STRAND_ID>
                      (emitted verbatim when journal delta > 0)
-  warnings           W070 (strand moved under you) and W071 (closed strand) fire
-                     as scar lines in text output; in json output, a \"warnings\"
-                     array (elements: {\"code\", \"detail\"}) is always present.
-                     Both codes are informational — exit is still 0.
+  warnings           W070 (strand moved under you), W071 (closed strand), and
+                     W076 (--seen-offset behind target last_offset) fire as scar
+                     lines in text output; in json output, a \"warnings\" array
+                     is always present.
+                     These warnings are informational — exit is still 0.
 
 Exit codes:
   0 ok
@@ -268,6 +275,10 @@ JSON shape: tasktree explain json")]
         /// `append --provenance`.
         #[arg(long = "provenance", value_name = "JSON")]
         provenance: Option<String>,
+        /// Caller-declared last observed offset for the target strand.
+        /// If behind the target's current last_offset, emits W076 but still writes.
+        #[arg(long = "seen-offset", value_name = "N")]
+        seen_offset: Option<usize>,
     },
     /// List all strands (reverse chronological, most recent last)
     List {
@@ -1127,9 +1138,17 @@ fn main() {
     }
 
     // Checkpoint has its own error handling (exit codes 1/2/3, JSON output)
-    if let Commands::Checkpoint { id, action, tail, format, include_hidden, provenance } = &cli.command {
+    if let Commands::Checkpoint { id, action, tail, format, include_hidden, provenance, seen_offset } = &cli.command {
         let fmt = format.as_deref() == Some("json");
-        match cmd_checkpoint(id.as_deref(), action, *tail, fmt, *include_hidden, provenance.as_deref()) {
+        match cmd_checkpoint_with_seen_offset(
+            id.as_deref(),
+            action,
+            *tail,
+            fmt,
+            *include_hidden,
+            provenance.as_deref(),
+            *seen_offset,
+        ) {
             Ok(()) => return,
             Err(failure) => {
                 if fmt {
@@ -1158,7 +1177,8 @@ fn main() {
             explicit_id,
             format,
             provenance,
-        } => cmd_append(
+            seen_offset,
+        } => cmd_append_with_seen_offset(
             content.as_deref(),
             id.as_deref(),
             *new,
@@ -1167,6 +1187,7 @@ fn main() {
             explicit_id.as_deref(),
             format.as_deref(),
             provenance.as_deref(),
+            *seen_offset,
         ),
         Commands::List { all, links, backlinks, state, list_type, stale, stale_offset, since_offset, format } => {
             let fmt = format.as_deref() == Some("json");
@@ -2938,6 +2959,20 @@ fn create_strand(content: &str) -> String {
     }
 
     #[test]
+    fn seen_offset_flag_parses_on_write_commands() {
+        use clap::CommandFactory;
+        let append = Cli::command().try_get_matches_from([
+            "tasktree", "append", "--id", "0000019dd34b", "--seen-offset", "2", "note",
+        ]);
+        assert!(append.is_ok(), "append --seen-offset must parse: {:?}", append.err());
+
+        let checkpoint = Cli::command().try_get_matches_from([
+            "tasktree", "checkpoint", "--id", "0000019dd34b", "--seen-offset", "2", "--action", "before commit",
+        ]);
+        assert!(checkpoint.is_ok(), "checkpoint --seen-offset must parse: {:?}", checkpoint.err());
+    }
+
+    #[test]
     fn grammar_json_field_naming() {
         let _env = setup();
         let id = create_strand("naming probe");
@@ -3408,6 +3443,70 @@ fn create_strand(content: &str) -> String {
         let delta = max_offset.saturating_sub(strand_a.last_offset());
         // The two entries on B occurred after A's last offset → delta >= 2.
         assert!(delta >= 2, "delta must be >= 2, got {}", delta);
+    }
+
+    #[test]
+    fn append_seen_offset_stale_still_writes() {
+        let _env = setup();
+        let id = create_strand("seen offset append target");
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let seen = strands.iter().find(|s| s.id == id).unwrap().last_offset();
+
+        cmd_append(Some("[progress] moved after read"), None, false, false, None, Some(&id), None, None).unwrap();
+        let result = cmd_append_with_seen_offset(
+            Some("[progress] write with stale seen offset"),
+            None,
+            false,
+            false,
+            None,
+            Some(&id),
+            Some("json"),
+            None,
+            Some(seen),
+        );
+        assert!(result.is_ok(), "stale --seen-offset is a warning, not a gate: {:?}", result);
+
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let strand = strands.iter().find(|s| s.id == id).unwrap();
+        assert!(
+            strand.log.iter().any(|e| e.content.contains("write with stale seen offset")),
+            "append must still write the requested entry"
+        );
+    }
+
+    #[test]
+    fn checkpoint_seen_offset_stale_still_writes() {
+        let _env = setup();
+        let id = create_strand("seen offset checkpoint target");
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+        let seen = strands.iter().find(|s| s.id == id).unwrap().last_offset();
+
+        cmd_append(Some("[progress] moved after read"), None, false, false, None, Some(&id), None, None).unwrap();
+        let result = cmd_checkpoint_with_seen_offset(
+            Some(&id),
+            "checkpoint with stale seen offset",
+            None,
+            true,
+            false,
+            None,
+            Some(seen),
+        );
+        assert!(result.is_ok(), "stale --seen-offset is a warning, not a gate: {:?}", result);
+
+        let (events, _) = read_events_lossy(&path);
+        let found = events.iter().any(|(_, e)| {
+            if let Event::LogAppended { id: event_id, content, .. } = e {
+                event_id == &id && content.contains("checkpoint with stale seen offset")
+            } else {
+                false
+            }
+        });
+        assert!(found, "checkpoint must still append its journal entry");
     }
 
     #[test]

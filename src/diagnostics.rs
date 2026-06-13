@@ -45,7 +45,7 @@ static TOPICS: &[TopicInfo] = &[
   把手行   <id> [type] | <n> entries | <state>
   首条     <summary>（第一条日志，概述这条线的主题）
   last:    <last_entry>（最近一条日志；entries>1 时出现）
-  疤痕行   仅当命令产生 W 码时追加（如 W070、W071）
+  疤痕行   仅当命令产生 W 码时追加（如 W070、W071、W076）
 
 把手行中的 <state> 显示生命周期（lifecycle），格式：
   open:   registered（未关闭）
@@ -151,7 +151,7 @@ timeline（TimelineOutput）：
   ※ timeline[] 每元素：journal_offset / ts / strand_id /
     strand_type / kind / ts_skew
 
-add / find: id / status / result（result = 卡片，find 只有 id）
+append/checkpoint: seen_offset / seen_gap / warnings / result；add/find: id / status / result
 hide / unhide: strand_id / status / noop /
   active_count / closed_count / hidden_count / result（卡片）
 link: source_id / target_id / edge_type / status /
@@ -187,7 +187,7 @@ jq 整型（切 JSON 成你要的形）见 tasktree explain jq"#,
 旗标词表（同一概念只有一个名字）：
   --include-hidden  含隐藏线（list 的 --all 是兼容别名）
   --format json     机器输出唯一正典（explain --json 是兼容快捷）
-  --provenance      写命令的出处标注
+  --provenance / --seen-offset <N>  写命令出处 / 上次看到的目标线 offset
   --tail <N>        只限显示、不改账，对任何目标可用
   --edge-type       link 的边类型（--type 是 deprecated 别名）
 
@@ -484,6 +484,21 @@ static CATALOG: &[DiagnosticInfo] = &[
             requires_human: true,
         },
         producer: "context",
+    },
+    DiagnosticInfo {
+        code: "W076",
+        severity: Severity::Warning,
+        category: "lifecycle",
+        title: "seen offset behind strand",
+        finding: "A write command was passed --seen-offset <N>, and N is behind the target strand's current last_offset before the write.",
+        impact: "The caller is writing after the strand changed behind its last observed position; its local view may be stale.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "tasktree timeline --since-offset <N> --links <STRAND_ID>",
+            executable: false,
+            requires_human: true,
+        },
+        producer: "lifecycle",
     },
 ];
 
@@ -845,6 +860,46 @@ pub(crate) fn check_w071_closed_strand(strand: &crate::projection::ProjectedStra
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SeenOffsetWarning {
+    pub(crate) code: &'static str,
+    pub(crate) detail: String,
+    pub(crate) seen_offset: usize,
+    pub(crate) strand_last_offset: usize,
+    pub(crate) seen_gap: usize,
+    pub(crate) catch_up: String,
+}
+
+/// Check W076: caller-declared --seen-offset is behind the target strand's
+/// pre-write last_offset. Missing or future offsets are best-effort ignored.
+pub(crate) fn check_w076_seen_offset(
+    strand_id: &str,
+    seen_offset: Option<usize>,
+    strand_last_offset: usize,
+) -> Option<SeenOffsetWarning> {
+    let seen = seen_offset?;
+    if seen >= strand_last_offset {
+        return None;
+    }
+    let gap = strand_last_offset - seen;
+    let catch_up = format!(
+        "tasktree timeline --since-offset {} --links {}",
+        seen,
+        crate::shorten(strand_id)
+    );
+    Some(SeenOffsetWarning {
+        code: "W076",
+        detail: format!(
+            "seen offset {} is {} entries behind strand last offset {}; catch-up: {}",
+            seen, gap, strand_last_offset, catch_up
+        ),
+        seen_offset: seen,
+        strand_last_offset,
+        seen_gap: gap,
+        catch_up,
+    })
+}
+
 pub fn all_codes() -> Vec<&'static str> {
     CATALOG.iter().map(|d| d.code).collect()
 }
@@ -1087,7 +1142,8 @@ mod tests {
         assert!(codes.contains(&"W073"));
         assert!(codes.contains(&"W074"));
         assert!(codes.contains(&"W075"));
-        assert_eq!(codes.len(), 8, "catalog size changed — update this test deliberately");
+        assert!(codes.contains(&"W076"));
+        assert_eq!(codes.len(), 9, "catalog size changed — update this test deliberately");
     }
 
     #[test]
@@ -1197,5 +1253,36 @@ mod tests {
         assert_eq!(v["code"], "W071");
         assert_eq!(v["recovery"]["executable"], false);
         assert_eq!(v["recovery"]["requires_human"], true);
+    }
+
+    #[test]
+    fn test_w076_can_explain() {
+        let info = lookup("W076").expect("W076 should be in catalog");
+        assert_eq!(info.code, "W076");
+        assert_eq!(info.title, "seen offset behind strand");
+        assert!(matches!(info.severity, Severity::Warning));
+        assert_eq!(info.category, "lifecycle");
+        let output = cmd_explain("W076", true);
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["code"], "W076");
+        assert_eq!(v["recovery"]["executable"], false);
+        assert_eq!(v["recovery"]["requires_human"], true);
+    }
+
+    #[test]
+    fn w076_seen_offset_gap_and_catch_up_are_precise() {
+        let id = "0000019dd34b111111111111";
+        let warning = check_w076_seen_offset(id, Some(2), 5).expect("stale seen offset");
+        assert_eq!(warning.code, "W076");
+        assert_eq!(warning.seen_offset, 2);
+        assert_eq!(warning.strand_last_offset, 5);
+        assert_eq!(warning.seen_gap, 3);
+        assert!(warning.catch_up.contains("--since-offset 2"));
+        assert!(warning.catch_up.contains("0000019dd34b"));
+
+        assert!(check_w076_seen_offset(id, Some(5), 5).is_none());
+        assert!(check_w076_seen_offset(id, Some(9), 5).is_none());
+        assert!(check_w076_seen_offset(id, None, 5).is_none());
     }
 }
