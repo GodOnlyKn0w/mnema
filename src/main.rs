@@ -350,13 +350,30 @@ JSON shape: tasktree explain json")]
         format: Option<String>,
     },
     /// Create a directed link between two strands
+    #[command(after_help = "\
+Direction (read SOURCE first): the edge always points from SOURCE to TARGET.
+
+  belongs-to   SOURCE belongs to TARGET — source is the child, target is the
+               parent. tree and orient --tree nest SOURCE under TARGET.
+  depends-on   SOURCE depends on TARGET (TARGET must advance first). [default]
+  why          SOURCE's reason is TARGET (TARGET explains SOURCE).
+
+Examples:
+  tasktree link <CHILD> <PARENT> --edge-type belongs-to
+               (CHILD nests under PARENT in tree / orient --tree)
+  tasktree link <TASK> <BLOCKER> --edge-type depends-on
+               (TASK waits on BLOCKER)
+
+Forest projection (how belongs-to nests): tasktree explain card
+JSON shape: tasktree explain json")]
     Link {
-        /// Source strand ID (prefix match)
+        /// Source strand ID (prefix match). For belongs-to, this is the child.
         source: String,
-        /// Target strand ID (prefix match)
+        /// Target strand ID (prefix match). For belongs-to, this is the parent.
         target: String,
         /// Edge type: depends-on, belongs-to, why (default: depends-on).
-        /// [alias: --type (deprecated)]
+        /// Direction: SOURCE <edge-type> TARGET (e.g. SOURCE belongs-to TARGET
+        /// = source is child of target). [alias: --type (deprecated)]
         #[arg(long = "edge-type", visible_alias = "type", value_name = "TYPE")]
         edge_type: Option<String>,
         /// Output format: text (default) or json
@@ -2234,6 +2251,212 @@ fn create_strand(content: &str) -> String {
         let result = Cli::command()
             .try_get_matches_from(["tasktree", "orient", "--tree", "--format", "json"]);
         assert!(result.is_ok(), "'orient --tree --format json' must parse: {:?}", result);
+    }
+
+    // ── tree / project_tree: canonical belongs-to direction regression ──
+    // The `tree` command (cmd_tree → project_tree) must nest SOURCE under
+    // TARGET for belongs-to edges, identical to orient --tree
+    // (build_orient_forest). Guards against the reversed-direction +
+    // all-edge-types + no-dedup divergence project_tree used to carry.
+
+    /// tree: after `link child parent --belongs-to`, the parent node holds the
+    /// child as a descendant (child nested under parent — canonical direction).
+    #[test]
+    fn tree_nests_belongs_to_child_under_parent() {
+        let _env = setup();
+        let parent = create_strand("parent task");
+        let child = create_strand("child task");
+        cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+
+        // Root the tree at the parent: parent must own the child.
+        let root = tree::project_tree(&parent, &strands).expect("parent resolves");
+        assert_eq!(root.id, parent, "tree root rooted at parent is the parent");
+        assert_eq!(root.children.len(), 1, "parent must have exactly one child");
+        assert_eq!(root.children[0].id, child, "child must nest under parent");
+        assert!(root.children[0].children.is_empty(), "child is a leaf");
+    }
+
+    /// tree: rooting at the child must NOT pull the parent in as a descendant.
+    /// Direct regression on the old reversed direction (which nested parent
+    /// under child by walking source→target as parent→child).
+    #[test]
+    fn tree_rooted_at_child_does_not_contain_parent() {
+        let _env = setup();
+        let parent = create_strand("parent task");
+        let child = create_strand("child task");
+        cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+
+        let root = tree::project_tree(&child, &strands).expect("child resolves");
+        assert_eq!(root.id, child, "root rooted at child is the child");
+        assert!(
+            root.children.is_empty(),
+            "child has no descendants; parent must not be nested under it (reversed-direction guard)"
+        );
+    }
+
+    /// tree and orient --tree must agree on parent→child nesting for the same
+    /// journal: single source of truth across both builders.
+    #[test]
+    fn tree_and_orient_forest_agree_on_nesting() {
+        let _env = setup();
+        let parent = create_strand("parent task");
+        let child_a = create_strand("child A");
+        let child_b = create_strand("child B");
+        cmd_link(&child_a, &parent, Some("belongs-to"), false, None).unwrap();
+        cmd_link(&child_b, &parent, Some("belongs-to"), false, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let max_offset = events.last().map(|(o, _)| *o).unwrap();
+        let strands = projection::project_strands(&events, true);
+
+        // project_tree (cmd_tree) view
+        let root = tree::project_tree(&parent, &strands).expect("parent resolves");
+        let mut tree_child_ids: Vec<String> =
+            root.children.iter().map(|c| c.id.clone()).collect();
+        tree_child_ids.sort();
+
+        // build_orient_forest (orient --tree) view
+        let out = build_orient(&strands, false, 10, max_offset);
+        let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+            .active
+            .iter()
+            .filter_map(|card| {
+                strands.iter().find(|s| s.id == card.id).map(|s| (s, card.clone()))
+            })
+            .collect();
+        let roots = tree::build_orient_forest(&strand_cards);
+        let parent_root = roots
+            .iter()
+            .find(|n| n.card.id == parent)
+            .expect("parent is a root in the forest");
+        let mut forest_child_ids: Vec<String> =
+            parent_root.children.iter().map(|c| c.card.id.clone()).collect();
+        forest_child_ids.sort();
+
+        assert_eq!(
+            tree_child_ids, forest_child_ids,
+            "tree and orient --tree must list the same children under the parent"
+        );
+        assert_eq!(tree_child_ids, vec![child_a.clone(), child_b.clone()]);
+    }
+
+    /// tree: a duplicate belongs-to link must not double-project the child.
+    /// Read-side dedup folds repeated EdgeLinked targets (journal keeps both).
+    #[test]
+    fn tree_duplicate_belongs_to_link_does_not_double_project() {
+        let _env = setup();
+        let parent = create_strand("parent task");
+        let child = create_strand("child task");
+        // Link twice — same source, same target, same edge type.
+        cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+        cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+
+        // The journal is append-only: both EdgeLinked events are present.
+        let link_events = events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::EdgeLinked { .. }))
+            .count();
+        assert_eq!(link_events, 2, "journal keeps both link events (append-only)");
+
+        // The projection folds them: belongs_to_edges holds one entry.
+        let strands = projection::project_strands(&events, true);
+        let child_proj = strands.iter().find(|s| s.id == child).unwrap();
+        assert_eq!(
+            child_proj.belongs_to_edges.len(),
+            1,
+            "duplicate links fold to one belongs_to edge in the projection"
+        );
+
+        // And the tree shows the child exactly once.
+        let root = tree::project_tree(&parent, &strands).expect("parent resolves");
+        assert_eq!(root.children.len(), 1, "child must appear exactly once under parent");
+        assert_eq!(root.children[0].id, child);
+    }
+
+    /// tree: non-belongs-to edges (depends-on) do not form the strand tree.
+    /// project_tree uses belongs_to_edges only — a depends-on link must not nest.
+    #[test]
+    fn tree_ignores_non_belongs_to_edges() {
+        let _env = setup();
+        let task = create_strand("task");
+        let blocker = create_strand("blocker");
+        cmd_link(&task, &blocker, Some("depends-on"), false, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+
+        // Rooting at either end yields a lone node — depends-on does not nest.
+        let root_task = tree::project_tree(&task, &strands).expect("task resolves");
+        assert!(root_task.children.is_empty(), "depends-on must not nest under source");
+        let root_blocker = tree::project_tree(&blocker, &strands).expect("blocker resolves");
+        assert!(root_blocker.children.is_empty(), "depends-on must not nest under target");
+    }
+
+    /// subtree_ids: descends from root through belongs-to children (same
+    /// canonical direction as project_tree).
+    #[test]
+    fn subtree_ids_descends_through_belongs_to_children() {
+        let _env = setup();
+        let parent = create_strand("parent");
+        let child = create_strand("child");
+        let grandchild = create_strand("grandchild");
+        cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+        cmd_link(&grandchild, &child, Some("belongs-to"), false, None).unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strands = projection::project_strands(&events, true);
+
+        // From parent: the whole chain is reachable.
+        let from_parent = tree::subtree_ids(&parent, &strands).expect("parent resolves");
+        assert!(from_parent.contains(&parent), "root included");
+        assert!(from_parent.contains(&child), "child reachable from parent");
+        assert!(from_parent.contains(&grandchild), "grandchild reachable from parent");
+
+        // From child: parent is an ancestor, must NOT be in the descendant set.
+        let from_child = tree::subtree_ids(&child, &strands).expect("child resolves");
+        assert!(from_child.contains(&child), "root included");
+        assert!(from_child.contains(&grandchild), "grandchild reachable from child");
+        assert!(!from_child.contains(&parent), "parent (ancestor) must not be in subtree");
+    }
+
+    /// link --help carries the direction semantics required by the work order:
+    /// belongs-to marks source as child of target, and names tree / orient --tree.
+    #[test]
+    fn link_help_documents_belongs_to_direction() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let link = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "link")
+            .expect("link subcommand exists");
+        let help = link
+            .get_after_help()
+            .map(|h| h.to_string())
+            .unwrap_or_default();
+        assert!(help.contains("belongs-to"), "link help must document belongs-to");
+        assert!(help.contains("depends-on"), "link help must document depends-on");
+        assert!(
+            help.to_lowercase().contains("child") && help.to_lowercase().contains("parent"),
+            "link help must explain source=child / target=parent"
+        );
+        assert!(
+            help.contains("orient --tree") || help.contains("tree"),
+            "link help must name the tree projection that consumes belongs-to"
+        );
     }
 
     // ── examples-as-contract (ADR-0001 rule 4) ──

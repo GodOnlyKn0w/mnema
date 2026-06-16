@@ -1,5 +1,7 @@
 //! tasktree tree projection layer.
-//! Projects strand edges into nested tree structures.
+//! Projects strand `belongs-to` edges into nested tree structures.
+//! Direction is canonical (same as `build_orient_forest`): a `belongs-to`
+//! edge means SOURCE belongs to TARGET, so the source nests under the target.
 //! First-order projection only — builds tree structure, never interprets meaning.
 
 use crate::projection::ProjectedStrand;
@@ -30,26 +32,51 @@ pub struct TreeOutput {
 
 // ── Entry point ──────────────────────────────────────────────
 
-/// Build a nested tree rooted at `root_id` from the given strand projections.
-/// BFS traversal — avoids deep recursion stack. Tracks visited IDs to guard
-/// against cycles. Returns a single TreeNode representing the root and all
-/// reachable descendants via edges.
-pub fn project_tree(root_id: &str, strands: &[ProjectedStrand]) -> Option<TreeNode> {
-    // 1. Build ID→strand map + adjacency list (children: parent_id → child_ids)
+/// Index strands and build the canonical parent→children adjacency.
+///
+/// Direction is the same as `build_orient_forest` (the canonical builder):
+/// a `belongs-to` edge means SOURCE belongs to TARGET, so the source is the
+/// child and the target is the parent. The adjacency therefore maps
+/// `parent_id → [child_ids]` — walking it from a root descends toward
+/// children, nesting each child under its parent.
+///
+/// Only `belongs-to` edges contribute (other edge types — depends-on, why —
+/// do not form the strand tree). Children are deduplicated per parent,
+/// first occurrence wins (order preserved), so a repeated link never
+/// double-nests.
+fn index_and_adjacency<'a>(
+    strands: &'a [ProjectedStrand],
+) -> (
+    HashMap<String, &'a ProjectedStrand>,
+    HashMap<String, Vec<String>>,
+) {
     let mut strand_map: HashMap<String, &ProjectedStrand> = HashMap::new();
-    // Edges on strand S mean "S links TO target" — so target is a child of S.
-    // adjacency[parent_id] = vec of child strand IDs
     let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+    let mut seen_child: HashMap<String, HashSet<String>> = HashMap::new();
 
     for s in strands {
         strand_map.insert(s.id.clone(), s);
-        for edge_target in &s.edges {
-            adjacency
-                .entry(s.id.clone())
-                .or_default()
-                .push(edge_target.clone());
+        // s is the child; each belongs-to target is a parent of s.
+        for parent_id in &s.belongs_to_edges {
+            let children = adjacency.entry(parent_id.clone()).or_default();
+            let seen = seen_child.entry(parent_id.clone()).or_default();
+            if seen.insert(s.id.clone()) {
+                children.push(s.id.clone());
+            }
         }
     }
+
+    (strand_map, adjacency)
+}
+
+/// Build a nested tree rooted at `root_id` from the given strand projections.
+/// BFS traversal — avoids deep recursion stack. Tracks visited IDs to guard
+/// against cycles. Returns a single TreeNode representing the root and all
+/// reachable descendants via `belongs-to` edges (children nested under parent,
+/// matching `build_orient_forest`).
+pub fn project_tree(root_id: &str, strands: &[ProjectedStrand]) -> Option<TreeNode> {
+    // 1. Build ID→strand map + canonical parent→children adjacency.
+    let (strand_map, adjacency) = index_and_adjacency(strands);
 
     // 2. Resolve root_id via prefix match
     let resolved_root = resolve_id(root_id, &strand_map)?;
@@ -109,23 +136,14 @@ pub fn project_tree(root_id: &str, strands: &[ProjectedStrand]) -> Option<TreeNo
     node_map.remove(&resolved_root)
 }
 
-/// Collect all strand IDs reachable from root via edges (BFS).
+/// Collect all strand IDs reachable from root via `belongs-to` children (BFS).
 /// Returns the set of IDs including root. Does NOT build full TreeNode structures.
 /// Used by subtree timeline filtering — avoids building the full tree when only
 /// ID membership is needed.
 pub fn subtree_ids(root_id: &str, strands: &[ProjectedStrand]) -> Option<HashSet<String>> {
-    let mut strand_map: HashMap<String, &ProjectedStrand> = HashMap::new();
-    let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
-
-    for s in strands {
-        strand_map.insert(s.id.clone(), s);
-        for edge_target in &s.edges {
-            adjacency
-                .entry(s.id.clone())
-                .or_default()
-                .push(edge_target.clone());
-        }
-    }
+    // Same canonical parent→children adjacency as project_tree: descend from
+    // root through belongs-to children.
+    let (strand_map, adjacency) = index_and_adjacency(strands);
 
     let resolved_root = resolve_id(root_id, &strand_map)?;
 

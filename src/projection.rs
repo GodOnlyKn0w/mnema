@@ -2,6 +2,20 @@
 //! Projects raw event streams into structured strand and timeline views.
 
 use crate::event::{Event, TimelineEntry, TimelineEventKind};
+use std::collections::HashSet;
+
+/// Collapse repeated values, keeping the first occurrence of each (order
+/// preserved). Used to fold duplicate edge links at the read layer.
+fn dedup_preserve_order<I: Iterator<Item = String>>(iter: I) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for v in iter {
+        if seen.insert(v.clone()) {
+            out.push(v);
+        }
+    }
+    out
+}
 
 // ── Log Entry ──────────────────────────────────────────────
 
@@ -198,20 +212,20 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
                 }
             })
             .collect();
-        // Collect edges (all) and belongs-to edges (subset typed "belongs-to")
-        let edges: Vec<String> = node_events
-            .iter()
-            .filter_map(|(_, e)| {
-                if let Event::EdgeLinked { to, .. } = e {
-                    Some(to.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let belongs_to_edges: Vec<String> = node_events
-            .iter()
-            .filter_map(|(_, e)| {
+        // Collect edges (all) and belongs-to edges (subset typed "belongs-to").
+        // Read-side fold: a repeated link to the same target is collapsed to one
+        // entry, first occurrence wins (order preserved). The journal keeps every
+        // EdgeLinked event (append-only); folding only shapes the projection, so a
+        // duplicate link does not double-project into the edges field or the tree.
+        let edges: Vec<String> = dedup_preserve_order(node_events.iter().filter_map(|(_, e)| {
+            if let Event::EdgeLinked { to, .. } = e {
+                Some(to.clone())
+            } else {
+                None
+            }
+        }));
+        let belongs_to_edges: Vec<String> =
+            dedup_preserve_order(node_events.iter().filter_map(|(_, e)| {
                 if let Event::EdgeLinked { to, edge_type, .. } = e {
                     if edge_type.as_deref() == Some("belongs-to") {
                         Some(to.clone())
@@ -221,8 +235,7 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
                 } else {
                     None
                 }
-            })
-            .collect();
+            }));
         // Extract strand_type from StrandCreated event
         let strand_type: Option<String> = node_events.iter().find_map(|(_, e)| {
             if let Event::StrandCreated { strand_type, .. } = e {
