@@ -377,7 +377,7 @@ pub(crate) fn cmd_orient(format: Option<&str>, include_hidden: bool, limit: Opti
                 .as_deref()
                 .map(|t| format!(" [{}]", t))
                 .unwrap_or_default();
-            println!("  {}{}  {} entries", shorten(&s.id), type_info, s.entry_count);
+            println!("  {}{}  {} entries | last_offset {}", shorten(&s.id), type_info, s.entry_count, s.last_offset);
             println!("    {}", s.summary);
             if s.entry_count > 1 {
                 println!("    last: {}", s.last_entry);
@@ -495,10 +495,11 @@ pub(crate) fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format
     }
 
     println!(
-        "strand: {} | {} entries | state: {}",
+        "strand: {} | {} entries | state: {} | last_entry_offset: {}",
         shorten(&strand.id),
         entry_count,
-        canonical_state
+        canonical_state,
+        strand.last_offset()
     );
     println!("summary: {}", truncate(strand.first_summary(), 60));
     println!("next: {}", truncate(last_summary, 100));

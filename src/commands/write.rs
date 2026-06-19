@@ -35,7 +35,7 @@ pub fn known_markers() -> &'static [&'static str] {
         // judgment
         "[decision]", "[constraint]", "[friction]", "[fixed]", "[lesson]", "[insight]",
         // observation
-        "[observed]", "[check]", "[progress]", "[deliverable]",
+        "[observed]", "[check]", "[progress]", "[deliverable]", "[metric]",
         // planning
         "[deadline]",
         // structure

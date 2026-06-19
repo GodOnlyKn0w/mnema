@@ -112,6 +112,10 @@ pub struct StrandDetailOutput {
     pub status: String,
     pub state_marker: Option<String>,
     pub state_offset: usize,
+    /// Journal offset of this strand's last log entry — the value to pass as
+    /// `--seen-offset <N>` on the next write so W076 can detect drift. Mirrors
+    /// the list contract's field of the same name. Additive (schema only grows).
+    pub last_entry_offset: usize,
     pub edges: Vec<String>,
     /// Deprecated field; always null; consumers must not rely on this value.
     pub strand_branch: Option<String>,
@@ -168,6 +172,7 @@ impl From<&ProjectedStrand> for StrandDetailOutput {
             status: s.state().to_string(),
             state_marker: s.state_marker.clone(),
             state_offset: s.state_offset,
+            last_entry_offset: s.last_offset(),
             edges: s.edges.clone(),
             strand_branch: None,   // deprecated; always null
             events: s.log.iter().map(|e| EventOutput {

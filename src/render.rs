@@ -11,7 +11,7 @@ use serde_json::json;
 
 /// Orient remind line: the whole operating loop in one line (ADR-0001:
 /// the rules travel with the orientation, the weave-in pointer stays thin).
-pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | more → tasktree --help";
+pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | read/extract → --format json | jq（id/offset/status，非文本切割）| more → tasktree --help";
 
 /// Build an OrientStrand card from a projected strand. Identical to the
 /// inline construction in build_orient; extracted so write commands can
@@ -173,7 +173,7 @@ pub(crate) fn print_orient_forest(nodes: &[tree::OrientForestNode], depth: usize
             .as_deref()
             .map(|t| format!(" [{}]", t))
             .unwrap_or_default();
-        println!("{}  {}{}  {} entries", indent, shorten(&s.id), type_info, s.entry_count);
+        println!("{}  {}{}  {} entries | last_offset {}", indent, shorten(&s.id), type_info, s.entry_count, s.last_offset);
         println!("{}    {}", indent, s.summary);
         if s.entry_count > 1 {
             println!("{}    last: {}", indent, s.last_entry);

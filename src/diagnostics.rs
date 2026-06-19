@@ -46,6 +46,7 @@ static TOPICS: &[TopicInfo] = &[
   首条     <summary>（第一条日志，概述这条线的主题）
   last:    <last_entry>（最近一条日志；entries>1 时出现）
   疤痕行   仅当命令产生 W 码时追加（如 W070、W071、W076）
+           （W 码=写时瞬态诊断：骑写回显，不入账/不成疤/show 不复显，须当场捕证。ADR-0003）
 
 把手行中的 <state> 显示生命周期（lifecycle），格式：
   open:   registered（未关闭）
@@ -53,8 +54,7 @@ static TOPICS: &[TopicInfo] = &[
   生命周期由 tasktree close / reopen 命令改变，append 的 marker 是注解。
 
 语义：
-  回显即预付的验证——写命令输出卡片是为了让调用方
-  无需再跑 show/orient 确认写入是否生效。
+  回显即预付的验证——写后输出卡片，调用方无需再跑 show/orient 确认。
   所有写命令（append/add/checkpoint/bind/hide/unhide/link/close/reopen）
   都在写后回显受影响线的卡片。
 
@@ -78,7 +78,7 @@ Marker 是注解（annotation），不改变线的生命周期。
 生命周期由 close / reopen 命令控制，不由 marker 控制。
 
 judgment:    [decision] [constraint] [friction] [fixed] [lesson] [insight]
-observation: [observed] [check] [progress] [deliverable]
+observation: [observed] [check] [progress] [deliverable] [metric]
 planning:    [deadline] <text> by=YYYY-MM-DD  （或 by=<RFC3339>）
 structure:   [covers] [guide] [skill] [task] [session]
 annotation:  [done] [verified] [cancelled] [failed] [merged] [ended]
@@ -94,6 +94,8 @@ Marker 语义（一行一条）：
   [insight]     洞见
   [observed]    观察到的事实
   [progress]    进展 / [deliverable] 交付物
+  [metric]      落账的测量值；约定写 name=val（如 [metric] win_count=26）
+                可被 jq capture 抽成序列，见 tasktree explain jq
   [deadline]    截止日期（by= 字段必须是日期或 RFC3339）
   [done]        完成注解（仅注解，不关闭线；关闭用 close --id <ID>）
   [checkpoint]  由 tasktree checkpoint 命令写入，勿手动添加
@@ -129,9 +131,9 @@ Marker 语义（一行一条）：
         name: "json",
         title: "JSON 形态索引——各读命令 --format json 的顶层字段",
         body: r#"show（StrandDetailOutput）：
-  id / hidden / summary / entry_count / status /
-  state_marker / state_offset / edges / strand_branch / events
-  ※ entry_count 是计数，日志行在 events[].entry
+  id / hidden / summary / entry_count / status / state_marker /
+  state_offset / last_entry_offset / edges / strand_branch / events
+  ※ 日志行在 events[].entry；last_entry_offset = 下次 --seen-offset 的 N
 
 list（StrandListOutput.strands[]，StrandListItem）：
   id / entry_count / first_summary / last_summary / hidden /
@@ -163,6 +165,9 @@ jq 整型（切 JSON 成你要的形）见 tasktree explain jq"#,
         name: "jq",
         title: "jq 整型——把 JSON 投影切成你要的形",
         body: r#"JSON 是空间(tree)/时间(timeline)两视角投影，jq 是塑形层。
+边界：jq 只塑形结构够的内容——埋在散文里的数/状态它抓不动，
+故"写得可解析"是前提（marker 前缀、name=val），不是 tasktree 多建命令。
+（orient 开场 remind 的 read/extract 段即指向此页。）
 顶层字段见 tasktree explain json。常用：
 
 取 strand id（免脆弱解析，取代手搓字符串切割）：
@@ -171,8 +176,19 @@ jq 整型（切 JSON 成你要的形）见 tasktree explain jq"#,
 取日志行：
   tasktree show --id <ID> --format json | jq -r '.events[].entry'
 
+按 marker 聚条目（marker 是 .entry 前缀，取代 show 文字墙 + grep）：
+  tasktree show --id <ID> --format json | jq -r '.events[] | select(.entry | startswith("[friction]")) | .entry'
+  坑：用 startswith；勿用 test("^\[...")——shell 里反斜杠转义会炸。
+
+抽数字轨迹（先按约定写 [metric] name=val，再 capture 出序列）：
+  tasktree append --id <ID> "[metric] win_count=26"
+  tasktree show --id <ID> --format json | jq '[.events[].entry | capture("win_count=(?<v>[0-9]+)") | .v | tonumber]'
+
 数值筛选（offset / count / entry_count 是数，可比较）：
   tasktree list --format json | jq '.strands[] | select(.entry_count > 10) | .id'
+
+中途现状合成（"我在哪"：活线 + 各自 last_offset 即下次 --seen-offset 的 N）：
+  tasktree orient --format json | jq -r '.active[] | "\(.id[0:12]) n=\(.last_offset) :: \(.last_entry)"'
 
 时间线切成精简视图：
   tasktree timeline --format json | jq '.timeline[] | {ts, strand_id, kind}'"#,
@@ -491,7 +507,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         category: "lifecycle",
         title: "seen offset behind strand",
         finding: "A write command was passed --seen-offset <N>, and N is behind the target strand's current last_offset before the write.",
-        impact: "The caller is writing after the strand changed behind its last observed position; its local view may be stale.",
+        impact: "The caller is writing after the strand changed behind its last observed position; its local view may be stale. W076 is a transient write-time signal (rides the append/checkpoint echo on stderr + JSON warnings[]/seen_gap, exit 0). By design it is NOT persisted as a scar and will NOT reappear in a later `show` — scars are lifecycle state (close/reopen), not diagnostics, and recording a read cursor would violate ADR-0003. Capture the evidence on the spot from the write echo; do not audit it via show.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
             command_str: "tasktree timeline --since-offset <N> --links <STRAND_ID>",
@@ -1065,6 +1081,7 @@ mod tests {
             status: "registered".to_string(),
             state_marker: None,
             state_offset: 0,
+            last_entry_offset: 0,
             edges: vec![],
             strand_branch: None,
             events: vec![],
