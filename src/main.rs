@@ -1119,10 +1119,23 @@ pub(crate) fn shorten(id: &str) -> String {
     }
 }
 
+/// Collapse prose to a single-line preview, char-bounded by `max`.
+///
+/// 散文预览统一走这里：先在首个换行处截断（多行 entry/brief 只露首行，
+/// orient/list/show 的「一眼扫」不被多行 blob 刷爆），再按字符数截断。
+/// 任一处被截断都加 "..." 提示后面还有内容。完整正文仍可经 show 读取，
+/// JSON 全保真字段（list 的 first_summary）不走本函数，故契约不变。
 pub(crate) fn truncate(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
+    // First line only: a multi-line first entry must not flood one-line views.
+    let first_line = s.split('\n').next().unwrap_or("");
+    let has_more_lines = first_line.len() < s.len();
+    let chars: Vec<char> = first_line.chars().collect();
     if chars.len() <= max {
-        s.to_string()
+        if has_more_lines {
+            format!("{}...", first_line)
+        } else {
+            first_line.to_string()
+        }
     } else {
         format!("{}...", chars[..max].iter().collect::<String>())
     }
@@ -4324,6 +4337,23 @@ fn create_strand(content: &str) -> String {
         assert!(card.summary.len() <= 73, "summary must be truncated to 70 chars + ...");
         // id is never truncated: always shorten(full_id) = 12 chars
         assert_eq!(card.id.len(), 24);
+    }
+
+    #[test]
+    fn truncate_collapses_to_first_line() {
+        // 多行首条 entry（如 add --file <长 brief>）只露首行 + "..."，
+        // 不把后续行灌进 orient/list 的一眼扫视图。
+        let blob = "## 项目背景\n这是第二行\n这是第三行";
+        let out = truncate(blob, 70);
+        assert_eq!(out, "## 项目背景...");
+        assert!(!out.contains('\n'), "preview must be single line");
+
+        // 单行短内容原样返回，不加省略号。
+        assert_eq!(truncate("short single line", 70), "short single line");
+
+        // 单行超长仍按字符数截断 + "..."。
+        let long = "x".repeat(100);
+        assert_eq!(truncate(&long, 70).chars().count(), 73);
     }
 
     // ── card echo: strand_card_fresh / append paths ──
