@@ -384,3 +384,31 @@ pub enum TimelineEventKind {
     },
     StrandReopened,
 }
+
+/// Resolve a strand-id prefix to the first matching full strand id, scanning
+/// `StrandCreated` events in order. Lives here (not util.rs) because it is the
+/// one resolver that depends on the `Event` type. Moved from main.rs in the
+/// Layer 5-shape refactor.
+pub(crate) fn find_strand(events: &[(usize, Event)], id: &str) -> Option<String> {
+    // Empty/whitespace id must not resolve: starts_with("") matches every
+    // strand, which would silently target the first one (data-integrity footgun).
+    if id.trim().is_empty() {
+        return None;
+    }
+    // Prefix match: first strand whose id starts with the given string
+    events
+        .iter()
+        .filter_map(|(_, e)| {
+            if let Event::StrandCreated { id: nid, .. } = e {
+                Some(nid.clone())
+            } else {
+                None
+            }
+        })
+        .find(|nid| nid.starts_with(id))
+}
+
+/// Resolve a strand ID prefix to a full strand ID, returning Result.
+pub(crate) fn resolve_id(events: &[(usize, Event)], id: &str) -> Result<String, String> {
+    find_strand(events, id).ok_or_else(|| format!("strand {} not found", id))
+}

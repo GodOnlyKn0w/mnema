@@ -2,7 +2,7 @@
 /// Moved from main.rs (Layer 4c-context refactor).
 use crate::journal::*;
 use crate::projection;
-use crate::shorten;
+use crate::util::shorten;
 
 // ── Context projection ───────────────────────────────────
 // Context projection layer.

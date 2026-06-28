@@ -5,15 +5,15 @@
 /// Dependency direction: write → journal, event, projection, diagnostics, render (via crate::*)
 /// write ← main.rs (mod commands; pub(crate) use commands::write::*)
 use crate::diagnostics;
-use crate::event::{self, Event};
+use crate::event::{self, Event, find_strand, resolve_id};
 use crate::journal::{ensure_journal, read_events_lossy, read_events_strict,
                      with_journal_write_lock, append_event_unlocked};
 use crate::projection;
-use crate::{shorten, strand_card_fresh, strand_card_fresh_with_state,
+use crate::{strand_card_fresh, strand_card_fresh_with_state,
             print_card_with_state, print_handle_line};
-use crate::{find_strand, resolve_id, read_stdin_content, read_file_content,
-            looks_like_strand_id, parse_provenance_arg, humanize_duration,
-            parse_event_ts};
+use crate::util::{shorten, read_stdin_content, read_file_content,
+                  looks_like_strand_id, parse_provenance_arg, humanize_duration,
+                  parse_event_ts};
 use serde_json::json;
 
 /// Strip at most one trailing newline (\n or \r\n).

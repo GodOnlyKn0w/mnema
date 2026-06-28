@@ -706,11 +706,11 @@ pub(crate) fn run_journal_diagnostics(events: &[crate::event::Event], now: chron
             if !e.content.starts_with("[deadline]") {
                 continue;
             }
-            if let Some(by) = crate::parse_deadline_by(e.content) {
+            if let Some(by) = crate::util::parse_deadline_by(e.content) {
                 if now > by {
                     diags.push((
                         "W068",
-                        format!("strand {} deadline passed ({})", crate::shorten(id), by.to_rfc3339()),
+                        format!("strand {} deadline passed ({})", crate::util::shorten(id), by.to_rfc3339()),
                     ));
                 }
             }
@@ -741,7 +741,7 @@ pub(crate) fn run_journal_diagnostics(events: &[crate::event::Event], now: chron
                 who.sort();
                 diags.push((
                     "W069",
-                    format!("strand {} marker {} written by: {}", crate::shorten(id), marker, who.join(", ")),
+                    format!("strand {} marker {} written by: {}", crate::util::shorten(id), marker, who.join(", ")),
                 ));
             }
         }
@@ -766,7 +766,7 @@ pub(crate) fn run_journal_diagnostics(events: &[crate::event::Event], now: chron
             } else {
                 continue;
             };
-            if let Some(ts) = crate::parse_event_ts(e.ts) {
+            if let Some(ts) = crate::util::parse_event_ts(e.ts) {
                 bucket.push(Governed { strand: id, ts, tokens: w062_tokens(e.content) });
             }
         }
@@ -782,8 +782,8 @@ pub(crate) fn run_journal_diagnostics(events: &[crate::event::Event], now: chron
             }
             if let Some(shared) = d.tokens.intersection(&c.tokens).next() {
                 let key = (
-                    crate::shorten(d.strand),
-                    crate::shorten(c.strand),
+                    crate::util::shorten(d.strand),
+                    crate::util::shorten(c.strand),
                     shared.clone(),
                 );
                 if seen_pairs.insert(key) {
@@ -791,8 +791,8 @@ pub(crate) fn run_journal_diagnostics(events: &[crate::event::Event], now: chron
                         "W062",
                         format!(
                             "decision in {} vs constraint in {} share keyword \"{}\" within 10min",
-                            crate::shorten(d.strand),
-                            crate::shorten(c.strand),
+                            crate::util::shorten(d.strand),
+                            crate::util::shorten(c.strand),
                             shared
                         ),
                     ));
@@ -901,7 +901,7 @@ pub(crate) fn check_w076_seen_offset(
     let catch_up = format!(
         "tasktree timeline --since-offset {} --links {}",
         seen,
-        crate::shorten(strand_id)
+        crate::util::shorten(strand_id)
     );
     Some(SeenOffsetWarning {
         code: "W076",

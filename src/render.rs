@@ -6,7 +6,7 @@
 /// render ← main.rs (mod render; pub(crate) use render::*)
 use crate::journal::{ensure_journal, read_events_lossy};
 use crate::{output, projection, tree};
-use crate::{shorten, truncate};
+use crate::util::{shorten, truncate};
 use serde_json::json;
 
 /// Orient remind line: the whole operating loop in one line (ADR-0001:

@@ -1,11 +1,12 @@
 /// Manage/metadata command family: cmd_find, cmd_link, cmd_hide/cmd_unhide,
 /// cmd_bind/cmd_current, cmd_export.
 /// Moved from main.rs (Layer 4d-manage refactor).
-use crate::event::{self, Event};
+use crate::event::{self, Event, find_strand, resolve_id};
 use crate::journal::*;
+use crate::util::{parse_provenance_arg, shorten};
 use crate::{
-    find_strand, parse_provenance_arg, print_handle_line, print_visibility_ledger, resolve_id,
-    shorten, strand_card_fresh, strand_card_fresh_with_state, visibility_ledger_json,
+    print_handle_line, print_visibility_ledger,
+    strand_card_fresh, strand_card_fresh_with_state, visibility_ledger_json,
 };
 use serde_json::json;
 use std::io::{Read, Write};

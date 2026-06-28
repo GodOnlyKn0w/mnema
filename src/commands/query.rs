@@ -10,8 +10,8 @@ use crate::render::*;
 use crate::projection;
 use crate::tree;
 use crate::output;
-use crate::event::{Event, TimelineEventKind};
-use crate::{find_strand, truncate, shorten, parse_duration};
+use crate::event::{Event, TimelineEventKind, find_strand};
+use crate::util::{truncate, shorten, parse_duration};
 use serde_json::json;
 use std::time::Instant;
 
