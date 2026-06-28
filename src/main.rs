@@ -701,7 +701,17 @@ fn cmd_init() -> Result<(), String> {
 // without parsing stderr. Do not refactor to return Result without
 // updating all call sites and preserving the exit code.
 fn main() {
-    let cli = match Cli::try_parse() {
+    let cli = parse_cli_or_exit();
+    apply_chdir(cli.chdir.as_deref());
+    if let Err(e) = run(&cli.command) {
+        exit_with_error(&e);
+    }
+}
+
+/// Parse argv into a `Cli`, or print clap's help/error and exit: code 0 for
+/// `--help`/`--version`, code 3 for a parse/usage error.
+fn parse_cli_or_exit() -> Cli {
+    match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {
             let code = match err.kind() {
@@ -711,10 +721,13 @@ fn main() {
             let _ = err.print();
             std::process::exit(code);
         }
-    };
+    }
+}
 
-    // -C / --chdir: change to DIR before any journal resolution
-    if let Some(dir) = &cli.chdir {
+/// Apply `-C/--chdir` before any journal resolution; exit 3 on a missing or
+/// unusable directory.
+fn apply_chdir(chdir: Option<&str>) {
+    if let Some(dir) = chdir {
         let target = std::path::Path::new(dir);
         if !target.exists() {
             eprintln!("error: -C {}: no such directory", dir);
@@ -725,9 +738,16 @@ fn main() {
             std::process::exit(3);
         }
     }
+}
 
-    // Checkpoint has its own error handling (exit codes 1/2/3, JSON output)
-    if let Commands::Checkpoint { id, action, tail, format, include_hidden, provenance, seen_offset } = &cli.command {
+/// Dispatch a parsed command to its handler. Kept free of `std::process::exit`
+/// (except checkpoint, which owns its codes) so the dispatch table is unit-
+/// testable and the exit-code policy lives solely in `exit_with_error`.
+fn run(command: &Commands) -> Result<(), String> {
+    // Checkpoint has its own error handling (exit codes 1/2/3, JSON output).
+    // On failure it prints and exits directly; on success it returns Ok(()) so
+    // stdout is flushed by the normal main() return path.
+    if let Commands::Checkpoint { id, action, tail, format, include_hidden, provenance, seen_offset } = command {
         let fmt = format.as_deref() == Some("json");
         match cmd_checkpoint_with_seen_offset(
             id.as_deref(),
@@ -738,7 +758,7 @@ fn main() {
             provenance.as_deref(),
             *seen_offset,
         ) {
-            Ok(()) => return,
+            Ok(()) => return Ok(()),
             Err(failure) => {
                 if fmt {
                     checkpoint_error_json(&failure);
@@ -751,7 +771,7 @@ fn main() {
         }
     }
 
-    let result = match &cli.command {
+    match command {
         Commands::Init => cmd_init(),
         Commands::Add { content, stdin, file, format, strand_type, provenance } => {
             let fmt = format.as_deref() == Some("json");
@@ -874,17 +894,28 @@ fn main() {
         }
 
         Commands::Checkpoint { .. } => unreachable!(),
-    };
-    if let Err(e) = result {
-        if e.starts_with("warn:") {
-            eprintln!("{}", e);
-        } else {
-            eprintln!("error: {}", e);
-        }
-        if e.starts_with("journal unreadable:") {
-            std::process::exit(2);
-        }
-        std::process::exit(1);
+    }
+}
+
+/// Print a command error to stderr and exit with its mapped code. The single
+/// place exit-code classification lives. A `warn:`-prefixed message is printed
+/// as-is (no `error:` prefix); everything else gets the `error:` prefix.
+fn exit_with_error(e: &str) -> ! {
+    if e.starts_with("warn:") {
+        eprintln!("{}", e);
+    } else {
+        eprintln!("error: {}", e);
+    }
+    std::process::exit(exit_code_for(e));
+}
+
+/// Map a command error message to its process exit code: a `journal
+/// unreadable:` failure is 2 (read error), everything else is 1.
+fn exit_code_for(e: &str) -> i32 {
+    if e.starts_with("journal unreadable:") {
+        2
+    } else {
+        1
     }
 }
 
@@ -3094,6 +3125,20 @@ fn create_strand(content: &str) -> String {
 
         let after = read_events_lossy(&ensure_journal().unwrap()).0.len();
         assert_eq!(before, after);
+    }
+
+    // ── exit_code_for (exit-code contract) ─────────────────────────────────
+
+    #[test]
+    fn exit_code_for_journal_unreadable_is_2() {
+        assert_eq!(exit_code_for("journal unreadable: bad bytes"), 2);
+    }
+
+    #[test]
+    fn exit_code_for_generic_and_warn_are_1() {
+        assert_eq!(exit_code_for("strand abc not found"), 1);
+        assert_eq!(exit_code_for("warn: stdin and --file require --id"), 1);
+        assert_eq!(exit_code_for("journal issues detected"), 1);
     }
 
     // ── humanize_duration ──────────────────────────────────────────────────
