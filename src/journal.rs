@@ -6,6 +6,31 @@ use crate::event::Event;
 pub(crate) const JOURNAL_DIR: &str = ".tasktree";
 pub(crate) const JOURNAL_FILE: &str = ".tasktree/journal.jsonl";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JournalParseDiagnostic {
+    pub(crate) line: usize,
+    pub(crate) error: String,
+    pub(crate) raw: Option<String>,
+    pub(crate) unreadable: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct JournalRead {
+    pub(crate) events: Vec<(usize, Event)>,
+    pub(crate) diagnostics: Vec<JournalParseDiagnostic>,
+    pub(crate) read_error: Option<String>,
+}
+
+impl JournalRead {
+    pub(crate) fn skipped(&self) -> usize {
+        self.diagnostics.len()
+    }
+
+    fn from_read_error(error: String) -> Self {
+        Self { events: Vec::new(), diagnostics: Vec::new(), read_error: Some(error) }
+    }
+}
+
 /// Resolve the journal directory with priority:
 ///   1. TASKTREE_HOME env var (explicit override; must contain .tasktree/)
 ///   2. Walk-up from cwd: nearest ancestor containing .tasktree/
@@ -125,42 +150,13 @@ pub(crate) fn with_journal_read_lock<T>(f: impl FnOnce(&mut std::fs::File) -> Re
 }
 
 /// Read all events from the journal under a shared lock (consistent read).
-pub(crate) fn read_events_lossy_locked() -> (Vec<(usize, Event)>, usize) {
+pub(crate) fn read_journal_lossy_locked() -> JournalRead {
     match with_journal_read_lock(|journal| {
         let reader = std::io::BufReader::new(journal);
-        let mut events = Vec::new();
-        let mut skipped = 0usize;
-        for (line_no, line) in reader.lines().enumerate() {
-            let line = match line {
-                Ok(l) => l,
-                Err(e) => {
-                    skipped += 1;
-                    eprintln!("warning: malformed journal line skipped");
-                    eprintln!("path: .tasktree/journal.jsonl");
-                    eprintln!("line: {}", line_no + 1);
-                    eprintln!("error: I/O error: {}", e);
-                    eprintln!("raw:  <unreadable>");
-                    continue;
-                }
-            };
-            if line.trim().is_empty() { continue; }
-            match serde_json::from_str::<Event>(&line) {
-                Ok(event) => events.push((line_no, event)),
-                Err(e) => {
-                    skipped += 1;
-                    let raw: String = line.chars().take(80).collect();
-                    eprintln!("warning: malformed journal line skipped");
-                    eprintln!("path: .tasktree/journal.jsonl");
-                    eprintln!("line: {}", line_no + 1);
-                    eprintln!("error: {}", e);
-                    eprintln!("raw:  {}", raw);
-                }
-            }
-        }
-        Ok((events, skipped))
+        Ok(read_journal_lossy_reader(reader))
     }) {
-        Ok((events, skipped)) => (events, skipped),
-        Err(_) => (Vec::new(), 0),
+        Ok(read) => read,
+        Err(e) => JournalRead::from_read_error(e),
     }
 }
 
@@ -178,27 +174,34 @@ pub(crate) fn append_events_unlocked(journal: &mut std::fs::File, events: &[Even
     Ok(())
 }
 
-pub(crate) fn read_events_lossy(path: &PathBuf) -> (Vec<(usize, Event)>, usize) {
+pub(crate) fn read_journal_lossy(path: &PathBuf) -> JournalRead {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(e) => {
-            eprintln!("error: cannot read journal: {}", e);
-            return (Vec::new(), 0);
-        }
+        Err(e) => return JournalRead::from_read_error(format!("cannot read journal: {}", e)),
     };
     let reader = std::io::BufReader::new(file);
-    let mut events = Vec::new();
-    let mut skipped = 0usize;
+    read_journal_lossy_reader(reader)
+}
+
+/// Compatibility wrapper for older callers that only need events + skipped count.
+pub(crate) fn read_events_lossy(path: &PathBuf) -> (Vec<(usize, Event)>, usize) {
+    let read = read_journal_lossy(path);
+    let skipped = read.skipped();
+    (read.events, skipped)
+}
+
+fn read_journal_lossy_reader<R: BufRead>(reader: R) -> JournalRead {
+    let mut read = JournalRead::default();
     for (line_no, line) in reader.lines().enumerate() {
         let line = match line {
             Ok(l) => l,
             Err(e) => {
-                skipped += 1;
-                eprintln!("warning: malformed journal line skipped");
-                eprintln!("path: .tasktree/journal.jsonl");
-                eprintln!("line: {}", line_no + 1);
-                eprintln!("error: I/O error: {}", e);
-                eprintln!("raw:  <unreadable>");
+                read.diagnostics.push(JournalParseDiagnostic {
+                    line: line_no + 1,
+                    error: format!("I/O error: {}", e),
+                    raw: None,
+                    unreadable: true,
+                });
                 continue;
             }
         };
@@ -206,21 +209,19 @@ pub(crate) fn read_events_lossy(path: &PathBuf) -> (Vec<(usize, Event)>, usize) 
             continue;
         }
         match serde_json::from_str::<Event>(&line) {
-            Ok(event) => events.push((line_no, event)),
+            Ok(event) => read.events.push((line_no, event)),
             Err(e) => {
-                skipped += 1;
-                let raw: String = line.chars().take(80).collect();
-                eprintln!("warning: malformed journal line skipped");
-                eprintln!("path: .tasktree/journal.jsonl");
-                eprintln!("line: {}", line_no + 1);
-                eprintln!("error: {}", e);
-                eprintln!("raw:  {}", raw);
+                read.diagnostics.push(JournalParseDiagnostic {
+                    line: line_no + 1,
+                    error: e.to_string(),
+                    raw: Some(line.chars().take(80).collect()),
+                    unreadable: false,
+                });
             }
         }
     }
-    (events, skipped)
+    read
 }
-
 /// Extract Event values from offset-paired events, discarding offsets.
 pub(crate) fn events_only(offset_events: &[(usize, Event)]) -> Vec<&Event> {
     offset_events.iter().map(|(_, e)| e).collect()
@@ -240,4 +241,29 @@ pub(crate) fn read_events_strict(path: &PathBuf) -> Result<Vec<(usize, Event)>, 
         events.push((line_no, event));
     }
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_journal_lossy_reports_structured_parse_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        let (created, appended) = crate::event::make_strand_created("journal read test", None);
+        writeln!(file, "{}", serde_json::to_string(&created).unwrap()).unwrap();
+        writeln!(file, "not json").unwrap();
+        writeln!(file, "{}", serde_json::to_string(&appended).unwrap()).unwrap();
+
+        let read = read_journal_lossy(&path);
+
+        assert_eq!(read.events.len(), 2);
+        assert_eq!(read.skipped(), 1);
+        assert_eq!(read.diagnostics[0].line, 2);
+        assert_eq!(read.diagnostics[0].raw.as_deref(), Some("not json"));
+        assert!(!read.diagnostics[0].unreadable);
+        assert!(read.read_error.is_none());
+    }
 }

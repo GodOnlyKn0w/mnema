@@ -1,6 +1,7 @@
 mod commands;
 mod diagnostics;
 mod event;
+mod graph;
 mod journal;
 mod projection;
 mod output;

@@ -9,6 +9,7 @@ use crate::event::{self, Event, find_strand, resolve_id};
 use crate::journal::{ensure_journal, read_events_lossy, read_events_strict,
                      with_journal_write_lock, append_event_unlocked};
 use crate::projection;
+use crate::output::OrientStrand;
 use crate::{strand_card_fresh, strand_card_fresh_with_state,
             print_card_with_state, print_handle_line};
 use crate::util::{shorten, read_stdin_content, read_file_content,
@@ -205,6 +206,43 @@ pub(crate) fn cmd_add(
     Ok(())
 }
 
+pub(crate) struct AppendRequest<'a> {
+    pub(crate) content: Option<&'a str>,
+    pub(crate) legacy_id: Option<&'a str>,
+    pub(crate) new: bool,
+    pub(crate) stdin: bool,
+    pub(crate) file: Option<&'a str>,
+    pub(crate) explicit_id: Option<&'a str>,
+    pub(crate) provenance_raw: Option<&'a str>,
+    pub(crate) seen_offset: Option<usize>,
+    pub(crate) why: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AppendOutcomeKind {
+    CreatedNew,
+    AppendedExisting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppendMarkerWarning {
+    pub(crate) marker: String,
+    pub(crate) suggestion: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AppendOutcome {
+    pub(crate) kind: AppendOutcomeKind,
+    pub(crate) strand_id: String,
+    pub(crate) append_id: Option<String>,
+    pub(crate) stored_content: String,
+    pub(crate) provenance: Option<serde_json::Value>,
+    pub(crate) seen_offset: Option<usize>,
+    pub(crate) seen_warning: Option<diagnostics::SeenOffsetWarning>,
+    pub(crate) marker_warning: Option<AppendMarkerWarning>,
+    pub(crate) closing_marker_warning: bool,
+    pub(crate) card_state: Option<(OrientStrand, String)>,
+}
 #[cfg(test)]
 pub(crate) fn cmd_append(
     content: Option<&str>,
@@ -242,17 +280,32 @@ pub(crate) fn cmd_append_with_seen_offset(
     seen_offset: Option<usize>,
     why: Option<&str>,
 ) -> Result<(), String> {
-    // ---- Content Source Resolution ----
-    if (stdin || file.is_some())
-        && legacy_id.is_none()
-        && content.map(looks_like_strand_id).unwrap_or(false)
+    let outcome = execute_append(AppendRequest {
+        content,
+        legacy_id,
+        new,
+        stdin,
+        file,
+        explicit_id,
+        provenance_raw,
+        seen_offset,
+        why,
+    })?;
+    render_append_outcome(&outcome, format);
+    Ok(())
+}
+
+pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, String> {
+    if (req.stdin || req.file.is_some())
+        && req.legacy_id.is_none()
+        && req.content.map(looks_like_strand_id).unwrap_or(false)
     {
         return Err(
             "warn: stdin and --file require --id to specify target; positional strand id is not supported with this content source".to_string()
         );
     }
 
-    let source_kind = match (content.is_some(), stdin, file.is_some()) {
+    let source_kind = match (req.content.is_some(), req.stdin, req.file.is_some()) {
         (false, false, false) => {
             return Err(
                 "choose a content source: positional content, --stdin, or --file <path>"
@@ -264,13 +317,13 @@ pub(crate) fn cmd_append_with_seen_offset(
         (false, false, true) => "file",
         _ => {
             let mut sources = Vec::new();
-            if content.is_some() {
+            if req.content.is_some() {
                 sources.push("positional content");
             }
-            if stdin {
+            if req.stdin {
                 sources.push("--stdin");
             }
-            if file.is_some() {
+            if req.file.is_some() {
                 sources.push("--file");
             }
             return Err(format!(
@@ -280,34 +333,29 @@ pub(crate) fn cmd_append_with_seen_offset(
         }
     };
 
-    // Read raw content
     let raw = match source_kind {
-        "positional" => content.unwrap().to_string(),
+        "positional" => req.content.unwrap().to_string(),
         "stdin" => read_stdin_content()?,
-        "file" => read_file_content(file.unwrap())?,
+        "file" => read_file_content(req.file.unwrap())?,
         _ => unreachable!(),
     };
 
-    // Empty check (trimmed for detection, but we don't trim for storage)
     if raw.trim().is_empty() {
         let hint = match source_kind {
             "stdin" => "stdin content is empty",
-            "file" => return Err(format!("file content is empty: {}", file.unwrap())),
+            "file" => return Err(format!("file content is empty: {}", req.file.unwrap())),
             _ => "content is empty",
         };
         return Err(hint.to_string());
     }
 
-    // Normalize: strip at most one trailing newline/CRLF, preserve leading whitespace
     let stored = normalize_content(&raw);
     validate_lifecycle_marker(&stored)?;
 
-    // Load journal for target resolution
     let path = ensure_journal()?;
     let (events, _) = read_events_lossy(&path);
 
-    // ---- Target Resolution ----
-    if let (Some(first), Some(second)) = (content, legacy_id) {
+    if let (Some(first), Some(second)) = (req.content, req.legacy_id) {
         if find_strand(&events, first).is_some() && find_strand(&events, second).is_none() {
             return Err(format!(
                 "positional append arguments look reversed. Use:\n  tasktree append --id {} \"{}\"",
@@ -317,7 +365,7 @@ pub(crate) fn cmd_append_with_seen_offset(
         }
     }
 
-    let target_count = [new, explicit_id.is_some(), legacy_id.is_some()]
+    let target_count = [req.new, req.explicit_id.is_some(), req.legacy_id.is_some()]
         .iter()
         .filter(|&&x| x)
         .count();
@@ -326,15 +374,13 @@ pub(crate) fn cmd_append_with_seen_offset(
         return Err("choose only one target: --new, --id, or positional strand id".to_string());
     }
 
-    // Legacy positional id only valid with positional content source
-    if legacy_id.is_some() && source_kind != "positional" {
+    if req.legacy_id.is_some() && source_kind != "positional" {
         return Err(
             "warn: stdin and --file require --id to specify target; positional strand id is not supported with this content source".to_string()
         );
     }
 
-    if new {
-        // Create new strand — same as Add but using stored content
+    if req.new {
         let (created, appended) = event::make_strand_created(&stored, Some("session"));
         let new_id = created.strand_id().to_string();
         with_journal_write_lock(|journal| {
@@ -342,15 +388,21 @@ pub(crate) fn cmd_append_with_seen_offset(
             append_event_unlocked(journal, &appended)?;
             Ok(())
         })?;
-        println!("{}", new_id);
-        if let Some((card, state)) = strand_card_fresh_with_state(&new_id) {
-            print_card_with_state(&card, &state);
-        }
-        return Ok(());
+        return Ok(AppendOutcome {
+            kind: AppendOutcomeKind::CreatedNew,
+            strand_id: new_id.clone(),
+            append_id: None,
+            stored_content: stored,
+            provenance: None,
+            seen_offset: req.seen_offset,
+            seen_warning: None,
+            marker_warning: None,
+            closing_marker_warning: false,
+            card_state: strand_card_fresh_with_state(&new_id),
+        });
     }
 
-    // Resolve target strand
-    let target_id = explicit_id.or(legacy_id);
+    let target_id = req.explicit_id.or(req.legacy_id);
     let full_id = if let Some(id) = target_id {
         find_strand(&events, id).ok_or_else(|| {
             let mut msg = format!("strand {} not found", id);
@@ -362,7 +414,6 @@ pub(crate) fn cmd_append_with_seen_offset(
             msg
         })?
     } else {
-        // Append to most recently active strand (last-append ordering)
         let strands = projection::project_strands(&events, false);
         let mut sorted: Vec<_> = strands.iter().collect();
         sorted.sort_by(|a, b| b.last_ts().cmp(&a.last_ts()));
@@ -377,12 +428,9 @@ pub(crate) fn cmd_append_with_seen_offset(
         .find(|s| s.id == full_id)
         .map(|s| s.last_offset())
         .unwrap_or(0);
-    let w076 = diagnostics::check_w076_seen_offset(&full_id, seen_offset, strand_last_offset);
-    let provenance = parse_provenance_arg(provenance_raw)?;
-    // W1/F4-pin: --why pins a rationale to the cited strand at its current
-    // last_offset (`<id>@<offset>`). The pin lets the doctor staleness clerk
-    // later detect that the cited basis advanced since it was referenced.
-    let pinned_ref: Option<String> = match why {
+    let seen_warning = diagnostics::check_w076_seen_offset(&full_id, req.seen_offset, strand_last_offset);
+    let provenance = parse_provenance_arg(req.provenance_raw)?;
+    let pinned_ref: Option<String> = match req.why {
         Some(w) => {
             let tgt = find_strand(&events, w)
                 .ok_or_else(|| format!("--why target strand {} not found", w))?;
@@ -405,42 +453,75 @@ pub(crate) fn cmd_append_with_seen_offset(
         append_event_unlocked(journal, &event)
     })?;
 
-    // W073: after successful write, check for possible marker typo (stderr only).
-    {
-        let trimmed = stored.trim_start();
-        if trimmed.starts_with('[') {
-            if let Some(end) = trimmed.find(']') {
-                let marker = &trimmed[..=end];
-                if !is_known_marker_str(marker) {
-                    if let Some(suggestion) = suggest_marker(marker) {
-                        eprintln!(
-                            "W073: unknown marker {} — did you mean {}? (tasktree explain markers)",
-                            marker, suggestion
-                        );
-                    }
-                }
-            }
+    let marker_warning = possible_marker_warning(&stored);
+    let closing_marker_warning = diagnostics::is_closing_annotation_marker(&stored);
+    let card_state = strand_card_fresh_with_state(&full_id);
+
+    Ok(AppendOutcome {
+        kind: AppendOutcomeKind::AppendedExisting,
+        strand_id: full_id,
+        append_id,
+        stored_content: stored,
+        provenance,
+        seen_offset: req.seen_offset,
+        seen_warning,
+        marker_warning,
+        closing_marker_warning,
+        card_state,
+    })
+}
+
+fn possible_marker_warning(stored: &str) -> Option<AppendMarkerWarning> {
+    let trimmed = stored.trim_start();
+    if !trimmed.starts_with('[') {
+        return None;
+    }
+    let end = trimmed.find(']')?;
+    let marker = &trimmed[..=end];
+    if is_known_marker_str(marker) {
+        return None;
+    }
+    suggest_marker(marker).map(|suggestion| AppendMarkerWarning {
+        marker: marker.to_string(),
+        suggestion,
+    })
+}
+
+fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
+    if outcome.kind == AppendOutcomeKind::CreatedNew {
+        println!("{}", outcome.strand_id);
+        if let Some((card, state)) = &outcome.card_state {
+            print_card_with_state(card, state);
         }
+        return;
     }
 
-    // W074: nudge when a closing marker is appended — markers are now annotations only.
-    // Fires only on exact closing-marker prefix matches (precision-first: no false positives).
-    if diagnostics::is_closing_annotation_marker(&stored) {
+    if let Some(warning) = &outcome.marker_warning {
         eprintln!(
-            "W074: [done]/[failed]/[cancelled]/[merged]/[verified] are annotations — \
-            they no longer close the strand. Use: tasktree close --id {} (tasktree explain W074)",
-            shorten(&full_id)
+            "W073: unknown marker {} — did you mean {}? (tasktree explain markers)",
+            warning.marker, warning.suggestion
         );
     }
 
-    if let Some(w) = &w076 {
+    if outcome.closing_marker_warning {
+        eprintln!(
+            "W074: [done]/[failed]/[cancelled]/[merged]/[verified] are annotations — \
+            they no longer close the strand. Use: tasktree close --id {} (tasktree explain W074)",
+            shorten(&outcome.strand_id)
+        );
+    }
+
+    if let Some(w) = &outcome.seen_warning {
         eprintln!("{}: {} (tasktree explain {})", w.code, w.detail, w.code);
     }
 
     if format == Some("json") {
-        let card = strand_card_fresh(&full_id);
-        let card_val = card.as_ref().map(|c| serde_json::to_value(c).ok()).flatten();
-        let warnings_json: Vec<serde_json::Value> = w076
+        let card_val = outcome
+            .card_state
+            .as_ref()
+            .and_then(|(card, _)| serde_json::to_value(card).ok());
+        let warnings_json: Vec<serde_json::Value> = outcome
+            .seen_warning
             .iter()
             .map(|w| json!({
                 "code": w.code,
@@ -452,30 +533,29 @@ pub(crate) fn cmd_append_with_seen_offset(
             }))
             .collect();
         println!("{}", serde_json::to_string(&serde_json::json!({
-            "strand_id": full_id,
-            "append_id": append_id,
-            "content_preview": stored.chars().take(120).collect::<String>(),
-            "provenance": provenance,
-            "seen_offset": seen_offset,
-            "seen_gap": w076.as_ref().map(|w| w.seen_gap),
+            "strand_id": outcome.strand_id,
+            "append_id": outcome.append_id,
+            "content_preview": outcome.stored_content.chars().take(120).collect::<String>(),
+            "provenance": outcome.provenance,
+            "seen_offset": outcome.seen_offset,
+            "seen_gap": outcome.seen_warning.as_ref().map(|w| w.seen_gap),
             "warnings": warnings_json,
             "result": card_val,
         })).unwrap());
     } else {
-        let prod = provenance
+        let prod = outcome.provenance
             .as_ref()
             .and_then(|p| p.get("producer"))
             .and_then(|v| v.as_str())
             .map(|p| format!(" producer={}", p))
             .unwrap_or_default();
-        if let Some((card, state)) = strand_card_fresh_with_state(&full_id) {
-            println!("appended to {} (offset {}){}", shorten(&full_id), card.last_offset, prod);
-            print_card_with_state(&card, &state);
+        if let Some((card, state)) = &outcome.card_state {
+            println!("appended to {} (offset {}){}", shorten(&outcome.strand_id), card.last_offset, prod);
+            print_card_with_state(card, state);
         } else {
-            println!("appended to {}{}", shorten(&full_id), prod);
+            println!("appended to {}{}", shorten(&outcome.strand_id), prod);
         }
     }
-    Ok(())
 }
 
 /// Close a strand by writing a StrandClosed lifecycle event.
@@ -865,4 +945,18 @@ pub(crate) fn cmd_checkpoint_with_seen_offset(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_warning_classification_is_adapter_independent() {
+        let marker = possible_marker_warning("[freiction] typo marker").expect("typo marker warning");
+        assert_eq!(marker.marker, "[freiction]");
+        assert_eq!(marker.suggestion, "[friction]");
+        assert!(possible_marker_warning("[friction] exact marker").is_none());
+        assert!(diagnostics::is_closing_annotation_marker("[done] annotated close"));
+    }
 }

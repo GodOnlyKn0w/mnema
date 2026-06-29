@@ -924,9 +924,236 @@ pub fn catalog_size() -> usize {
     CATALOG.len()
 }
 
+
+// -- Journal audit ---------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct LintSection {
+    pub name: &'static str,
+    pub summary_label: &'static str,
+    pub findings: Vec<String>,
+}
+
+impl LintSection {
+    pub fn count(&self) -> usize { self.findings.len() }
+}
+
+#[derive(Debug, Clone)]
+pub struct JournalAudit {
+    pub lint_sections: Vec<LintSection>,
+    pub diagnostics: Vec<(String, String)>,
+}
+
+impl JournalAudit {
+    pub fn lint_count(&self) -> usize {
+        self.lint_sections.iter().map(LintSection::count).sum()
+    }
+
+}
+
+pub fn audit_journal(events: &[crate::event::Event], now: chrono::DateTime<chrono::Utc>) -> JournalAudit {
+    use crate::event::Event;
+    use std::collections::{HashMap, HashSet};
+
+    let mut created_ids: HashSet<String> = HashSet::new();
+    let mut strand_summaries: HashMap<String, String> = HashMap::new();
+    let mut strand_entries: HashMap<String, Vec<String>> = HashMap::new();
+    for event in events {
+        match event {
+            Event::StrandCreated { id, .. } => { created_ids.insert(id.clone()); }
+            Event::LogAppended { id, content, .. } => {
+                strand_summaries.entry(id.clone()).or_insert_with(|| content.clone());
+                strand_entries.entry(id.clone()).or_default().push(content.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let mut sections = Vec::new();
+
+    let mut dag_done = Vec::new();
+    for (id, summary) in &strand_summaries {
+        if summary.starts_with("para group ") {
+            if let Some(entries) = strand_entries.get(id) {
+                if entries.iter().any(|e| e.contains("[done]")) {
+                    dag_done.push(format!("DAG strand {} has [done] entry - DAG should only record layer events", id));
+                }
+            }
+        }
+    }
+    sections.push(LintSection { name: "dag-done", summary_label: "dag strands with [done]", findings: dag_done });
+
+    let mut task_created = Vec::new();
+    for (id, summary) in &strand_summaries {
+        if summary.starts_with('[') {
+            if let Some(entries) = strand_entries.get(id) {
+                if entries.iter().any(|e| e.contains("task_created")) {
+                    task_created.push(format!("Task strand {} has task_created JSON event - task strands should not have DAG events", id));
+                }
+            }
+        }
+    }
+    sections.push(LintSection { name: "task-created", summary_label: "task strands with task_created", findings: task_created });
+
+    let mut orphan_links = Vec::new();
+    for event in events {
+        if let Event::EdgeLinked { to, .. } = event {
+            if !created_ids.contains(to) {
+                orphan_links.push(format!("orphan link: target strand {} not found", to));
+            }
+        }
+    }
+    sections.push(LintSection { name: "orphan-links", summary_label: "orphan links", findings: orphan_links });
+
+    let mut touches_format = Vec::new();
+    for entries in strand_entries.values() {
+        for entry in entries {
+            if let Some(tail) = entry.strip_prefix("[touches] ") {
+                for part in tail.split(' ') {
+                    if part.is_empty() { continue; }
+                    let field = part.split(':').next().unwrap_or("");
+                    if field != "write" && field != "read" && field != "creates" && field != "readonly" {
+                        touches_format.push(format!("touches format: unrecognized field '{}' in [touches] entry", field));
+                    }
+                }
+            }
+        }
+    }
+    sections.push(LintSection { name: "touches-format", summary_label: "unrecognized touches fields", findings: touches_format });
+
+    let mut link_direction = Vec::new();
+    for event in events {
+        if let Event::EdgeLinked { id: source, to: target, .. } = event {
+            let src_summary = strand_summaries.get(source).map(|s| s.as_str()).unwrap_or("");
+            let tgt_summary = strand_summaries.get(target).map(|s| s.as_str()).unwrap_or("");
+            let src_is_dag = src_summary.starts_with("para group ");
+            let src_is_task = src_summary.starts_with('[') && src_summary[1..].chars().next().map_or(false, |c| c.is_ascii_digit());
+            let tgt_is_dag = tgt_summary.starts_with("para group ");
+            if src_is_task && tgt_is_dag {
+                link_direction.push(format!("link direction: task {} links to DAG {} - unusual", source, target));
+            }
+            if !src_is_dag && !src_is_task && tgt_is_dag {
+                link_direction.push(format!("link direction: non-task {} links to DAG {} - unusual", source, target));
+            }
+        }
+    }
+    sections.push(LintSection { name: "link-direction", summary_label: "unusual link directions", findings: link_direction });
+
+    let mut strand_identity = Vec::new();
+    for (id, summary) in &strand_summaries {
+        let is_dag = summary.starts_with("para group ");
+        let is_task = summary.starts_with('[') && summary.chars().nth(1).map_or(false, |c| c.is_ascii_digit());
+        if let Some(entries) = strand_entries.get(id) {
+            if is_dag {
+                let has_task_marker = entries.iter().any(|e| {
+                    e.starts_with('[') && e.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+                });
+                if has_task_marker {
+                    strand_identity.push(format!("strand identity: DAG strand {} has task-like entries - identity mismatch", id));
+                }
+            }
+            if is_task {
+                let has_para_prefix = entries.iter().any(|e| e.starts_with("para group "));
+                if has_para_prefix {
+                    strand_identity.push(format!("strand identity: task strand {} has DAG-like entries - identity mismatch", id));
+                }
+            }
+        }
+    }
+    sections.push(LintSection { name: "strand-identity", summary_label: "identity mismatches", findings: strand_identity });
+
+    let indexed: Vec<(usize, Event)> = events.iter().cloned().enumerate().collect();
+    let strands = crate::projection::project_strands(&indexed, true);
+    let graph = crate::graph::StrandGraph::from_strands(&strands);
+    let edge_findings = graph
+        .edge_findings()
+        .into_iter()
+        .map(|f| f.detail)
+        .collect();
+    sections.push(LintSection { name: "edge-validity", summary_label: "edge-validity warnings", findings: edge_findings });
+
+    let mut metric_format = Vec::new();
+    for (id, entries) in &strand_entries {
+        for e in entries {
+            if let Some(rest) = e.strip_prefix("[metric] ") {
+                let ok = rest.split_whitespace().any(|tok| {
+                    if let Some((k, v)) = tok.split_once('=') {
+                        !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_') && !v.is_empty()
+                    } else {
+                        false
+                    }
+                });
+                if !ok {
+                    let preview: String = rest.chars().take(40).collect();
+                    metric_format.push(format!("metric-format: strand {} [metric] entry has no jq-capturable name=value: {:?}", id, preview));
+                }
+            }
+        }
+    }
+    sections.push(LintSection { name: "metric-format", summary_label: "uncapturable [metric] entries", findings: metric_format });
+
+    let mut legacy_why = Vec::new();
+    for event in events {
+        if let Event::EdgeLinked { id, to, edge_type, .. } = event {
+            if edge_type.as_deref() == Some("why") {
+                legacy_why.push(format!("legacy why-edge {} -> {}: why is no longer a link (D2) - record the reason in an entry", id, to));
+            }
+        }
+    }
+    sections.push(LintSection { name: "legacy-why-edges", summary_label: "legacy why-edges", findings: legacy_why });
+
+    let mut cur_offset: HashMap<String, usize> = HashMap::new();
+    for s in &strands { cur_offset.insert(s.id.clone(), s.last_offset()); }
+    let mut stale_why = Vec::new();
+    for s in &strands {
+        for entry in &s.log {
+            if let Some(r) = &entry.ref_ {
+                if let Some((tgt, pin)) = r.rsplit_once('@') {
+                    if let Ok(pin_off) = pin.parse::<usize>() {
+                        if let Some(&cur) = cur_offset.get(tgt) {
+                            if cur > pin_off {
+                                stale_why.push(format!("why-staleness: strand {} cites {} pinned@{} but it advanced to @{} - may warrant review", s.id, tgt, pin_off, cur));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sections.push(LintSection { name: "why-staleness", summary_label: "stale rationale refs", findings: stale_why });
+
+    JournalAudit {
+        lint_sections: sections,
+        diagnostics: run_journal_diagnostics(events, now).into_iter().map(|(code, detail)| (code.to_string(), detail)).collect(),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn audit_journal_reports_edge_validity_from_graph_module() {
+        use crate::event::Event;
+        let ts = "2026-01-01T00:00:00Z".to_string();
+        let events = vec![
+            Event::StrandCreated { id: "task".to_string(), ts: ts.clone(), strand_type: None },
+            Event::LogAppended { id: "task".to_string(), ts: ts.clone(), content: "task summary".to_string(), ref_: None, append_id: None, git: None, provenance: None },
+            Event::StrandCreated { id: "parent_a".to_string(), ts: ts.clone(), strand_type: None },
+            Event::LogAppended { id: "parent_a".to_string(), ts: ts.clone(), content: "parent a".to_string(), ref_: None, append_id: None, git: None, provenance: None },
+            Event::StrandCreated { id: "parent_b".to_string(), ts: ts.clone(), strand_type: None },
+            Event::LogAppended { id: "parent_b".to_string(), ts: ts.clone(), content: "parent b".to_string(), ref_: None, append_id: None, git: None, provenance: None },
+            Event::EdgeLinked { id: "task".to_string(), ts: ts.clone(), to: "parent_a".to_string(), edge_type: Some("belongs-to".to_string()), provenance: None },
+            Event::EdgeLinked { id: "task".to_string(), ts, to: "parent_b".to_string(), edge_type: Some("belongs-to".to_string()), provenance: None },
+        ];
+
+        let audit = audit_journal(&events, chrono::Utc::now());
+        let edge_section = audit.lint_sections.iter()
+            .find(|section| section.name == "edge-validity")
+            .expect("edge-validity section");
+
+        assert_eq!(edge_section.count(), 1);
+        assert!(edge_section.findings[0].contains("belongs-to"));
+        assert!(edge_section.findings[0].contains("task"));
+    }
 
     #[test]
     fn test_lookup_known_code() {
@@ -1307,3 +1534,6 @@ mod tests {
         assert!(check_w076_seen_offset(id, None, 5).is_none());
     }
 }
+
+
+

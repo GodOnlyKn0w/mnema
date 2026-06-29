@@ -8,6 +8,7 @@
 use crate::journal::*;
 use crate::render::*;
 use crate::projection;
+use crate::graph;
 use crate::tree;
 use crate::output;
 use crate::event::{Event, TimelineEventKind, find_strand};
@@ -459,11 +460,16 @@ pub(crate) fn cmd_agent_context(format_json: Option<&str>, include_hidden: bool)
 pub(crate) fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format_json: bool, locked: bool, digest: bool) -> Result<(), String> {
     let started = Instant::now();
     let path = ensure_journal()?;
-    let (events, skipped) = if locked {
-        read_events_lossy_locked()
+    let read = if locked {
+        read_journal_lossy_locked()
     } else {
-        read_events_lossy(&path)
+        read_journal_lossy(&path)
     };
+    if let Some(error) = &read.read_error {
+        return Err(error.clone());
+    }
+    let skipped = read.skipped();
+    let events = read.events;
     let strands = projection::project_strands(&events, true);
 
     let strand = if last {
@@ -639,106 +645,61 @@ fn print_tree_text(node: &tree::TreeNode, depth: usize) {
     }
 }
 
-/// Longest chain of OPEN (not-closed) upstreams reachable via depends-on from
-/// `node`, excluding `node` itself. Closed upstreams terminate a path (they no
-/// longer block). Cycle-guarded via `seen`. Returns the chain as ordered ids.
-fn longest_open_chain(
-    node: &str,
-    dep: &std::collections::HashMap<String, Vec<String>>,
-    closed: &std::collections::HashSet<String>,
-    seen: &mut std::collections::HashSet<String>,
-) -> Vec<String> {
-    let mut best: Vec<String> = Vec::new();
-    if let Some(ups) = dep.get(node) {
-        for up in ups {
-            if closed.contains(up) || seen.contains(up) {
-                continue;
-            }
-            seen.insert(up.clone());
-            let mut chain = longest_open_chain(up, dep, closed, seen);
-            seen.remove(up);
-            chain.insert(0, up.clone());
-            if chain.len() > best.len() {
-                best = chain;
-            }
-        }
-    }
-    best
-}
-
 /// depends-on DAG analysis for one strand (F6 / W2): direct blockers and their
 /// state, readiness (all direct blockers closed), and the critical path — the
 /// longest chain of still-open upstreams. Built on the F3 typed projection.
 pub(crate) fn cmd_depends(id: &str, format_json: Option<&str>) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
-    let full_id = find_strand(&events, id).ok_or_else(|| format!("strand {} not found", id))?;
     let strands = projection::project_strands(&events, true);
-
-    let mut dep: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut summary: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut status: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for s in &strands {
-        dep.insert(s.id.clone(), s.depends_on_edges.clone());
-        let st = s.state().to_string();
-        if st.starts_with("closed") {
-            closed.insert(s.id.clone());
-        }
-        summary.insert(s.id.clone(), s.first_summary().to_string());
-        status.insert(s.id.clone(), st);
-    }
-
-    let blockers: Vec<&String> = dep.get(&full_id).map(|v| v.iter().collect()).unwrap_or_default();
-    let open_blockers: Vec<&String> =
-        blockers.iter().filter(|b| !closed.contains(b.as_str())).copied().collect();
-    let ready = open_blockers.is_empty();
-
-    let mut seen = std::collections::HashSet::new();
-    seen.insert(full_id.clone());
-    let critical = longest_open_chain(&full_id, &dep, &closed, &mut seen);
+    let graph = graph::StrandGraph::from_strands(&strands);
+    let analysis = graph
+        .depends_analysis(id)
+        .ok_or_else(|| format!("strand {} not found", id))?;
 
     if format_json == Some("json") {
-        let blocker_objs: Vec<_> = blockers
+        let blocker_objs: Vec<_> = analysis
+            .blockers
             .iter()
             .map(|b| {
                 json!({
-                    "id": b,
-                    "status": status.get(*b).cloned().unwrap_or_default(),
-                    "closed": closed.contains(b.as_str()),
+                    "id": b.id,
+                    "status": b.status,
+                    "closed": b.closed,
                 })
             })
             .collect();
         println!("{}", json!({
-            "id": full_id,
-            "summary": summary.get(&full_id).cloned().unwrap_or_default(),
-            "ready": ready,
-            "open_blocker_count": open_blockers.len(),
+            "id": analysis.id,
+            "summary": analysis.summary,
+            "ready": analysis.ready,
+            "open_blocker_count": analysis.open_blocker_count,
             "blockers": blocker_objs,
-            "critical_path": critical,
-            "critical_path_len": critical.len(),
+            "critical_path": analysis.critical_path,
+            "critical_path_len": analysis.critical_path.len(),
         }));
     } else {
         println!("depends-on analysis: {}  {}",
-            shorten(&full_id),
-            summary.get(&full_id).cloned().unwrap_or_default().chars().take(50).collect::<String>());
-        println!("  ready: {}  ({} open blocker(s))", if ready { "yes" } else { "no" }, open_blockers.len());
-        if blockers.is_empty() {
+            shorten(&analysis.id),
+            analysis.summary.chars().take(50).collect::<String>());
+        println!("  ready: {}  ({} open blocker(s))", if analysis.ready { "yes" } else { "no" }, analysis.open_blocker_count);
+        if analysis.blockers.is_empty() {
             println!("  direct blockers: (none)");
         } else {
             println!("  direct blockers:");
-            for b in &blockers {
-                let mark = if closed.contains(b.as_str()) { "closed" } else { "OPEN  " };
-                println!("    [{}] {}  {}", mark, shorten(b),
-                    summary.get(*b).cloned().unwrap_or_default().chars().take(45).collect::<String>());
+            for b in &analysis.blockers {
+                let mark = if b.closed { "closed" } else { "OPEN  " };
+                println!("    [{}] {}  {}", mark, shorten(&b.id), b.summary.chars().take(45).collect::<String>());
             }
         }
-        if critical.is_empty() {
-            println!("  critical path: (none — no open upstreams)");
+        if analysis.critical_path.is_empty() {
+            println!("  critical path: (none - no open upstreams)");
         } else {
-            let chain: Vec<String> = critical.iter().map(|c| shorten(c)).collect();
-            println!("  critical path (longest open chain, len {}): {}", critical.len(), chain.join(" -> "));
+            let chain: Vec<String> = analysis.critical_path.iter().map(|c| shorten(c)).collect();
+            println!("  critical path (longest open chain, len {}): {}", analysis.critical_path.len(), chain.join(" -> "));
         }
     }
     Ok(())
 }
+
+
