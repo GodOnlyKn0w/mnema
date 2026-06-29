@@ -76,6 +76,11 @@ pub struct StrandListItem {
     pub hidden: bool,
     pub strand_type: Option<String>,
     pub edges: Vec<String>,
+    /// Typed subsets of `edges` (additive; schema only grows). `belongs_to_edges`
+    /// are this strand's parents; `depends_on_edges` are its blockers (F3 — makes
+    /// depends-on a queryable typed view instead of write-only).
+    pub belongs_to_edges: Vec<String>,
+    pub depends_on_edges: Vec<String>,
     pub status: String,
     pub state_marker: Option<String>,
     pub state_offset: usize,
@@ -100,6 +105,10 @@ pub struct EventOutput {
     /// Per-entry provenance (e.g. {"producer":"codex"}). Always serialised —
     /// `null` when absent — per the show JSON contract (see module header).
     pub provenance: Option<serde_json::Value>,
+    /// Entry rationale pointer (D2/F4): the reserved `ref_` field surfaced so a
+    /// recorded reason-reference is queryable. Always serialised; null when absent.
+    #[serde(rename = "ref")]
+    pub ref_field: Option<String>,
 }
 
 /// External contract for `show --format json`.
@@ -117,6 +126,9 @@ pub struct StrandDetailOutput {
     /// the list contract's field of the same name. Additive (schema only grows).
     pub last_entry_offset: usize,
     pub edges: Vec<String>,
+    /// Typed subsets of `edges` (additive). See StrandListItem for semantics (F3).
+    pub belongs_to_edges: Vec<String>,
+    pub depends_on_edges: Vec<String>,
     /// Deprecated field; always null; consumers must not rely on this value.
     pub strand_branch: Option<String>,
     pub events: Vec<EventOutput>,
@@ -153,6 +165,8 @@ impl From<&ProjectedStrand> for StrandListItem {
             hidden: s.hidden,
             strand_type: s.strand_type.clone(),
             edges: s.edges.clone(),
+            belongs_to_edges: s.belongs_to_edges.clone(),
+            depends_on_edges: s.depends_on_edges.clone(),
             status: s.state().to_string(),
             state_marker: s.state_marker.clone(),
             state_offset: s.state_offset,
@@ -174,12 +188,15 @@ impl From<&ProjectedStrand> for StrandDetailOutput {
             state_offset: s.state_offset,
             last_entry_offset: s.last_offset(),
             edges: s.edges.clone(),
+            belongs_to_edges: s.belongs_to_edges.clone(),
+            depends_on_edges: s.depends_on_edges.clone(),
             strand_branch: None,   // deprecated; always null
             events: s.log.iter().map(|e| EventOutput {
                 ts: e.ts.clone(),
                 append_id: e.append_id.clone(),
                 entry: e.content.clone(),
                 provenance: e.provenance.clone(),
+                ref_field: e.ref_.clone(),
             }).collect(),
         }
     }

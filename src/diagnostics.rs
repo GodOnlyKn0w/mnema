@@ -131,14 +131,14 @@ Marker 语义（一行一条）：
         name: "json",
         title: "JSON 形态索引——各读命令 --format json 的顶层字段",
         body: r#"show（StrandDetailOutput）：
-  id / hidden / summary / entry_count / status / state_marker /
-  state_offset / last_entry_offset / edges / strand_branch / events
-  ※ 日志行在 events[].entry；last_entry_offset = 下次 --seen-offset 的 N
+  id / hidden / summary / entry_count / status / state_marker / state_offset / last_entry_offset /
+  edges / belongs_to_edges / depends_on_edges / strand_branch / events
+  ※ events[].entry=日志行；last_entry_offset=下次 --seen-offset；belongs_to_edges=父 / depends_on_edges=阻塞者(F3)
 
 list（StrandListOutput.strands[]，StrandListItem）：
-  id / entry_count / first_summary / last_summary / hidden /
-  strand_type / edges / status / state_marker / state_offset /
-  last_entry_ts / last_entry_offset
+  id / entry_count / first_summary / last_summary / hidden / strand_type /
+  edges / belongs_to_edges / depends_on_edges / status / state_marker /
+  state_offset / last_entry_ts / last_entry_offset
 
 orient（OrientOutput）：
   max_offset / active / closed_count / hidden_count / remind
@@ -1083,6 +1083,8 @@ mod tests {
             state_offset: 0,
             last_entry_offset: 0,
             edges: vec![],
+            belongs_to_edges: vec![],
+            depends_on_edges: vec![],
             strand_branch: None,
             events: vec![],
         };
@@ -1100,6 +1102,8 @@ mod tests {
             hidden: false,
             strand_type: None,
             edges: vec![],
+            belongs_to_edges: vec![],
+            depends_on_edges: vec![],
             status: "registered".to_string(),
             state_marker: None,
             state_offset: 0,

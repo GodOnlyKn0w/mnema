@@ -10,7 +10,6 @@ use crate::{diagnostics, projection};
 use std::time::Instant;
 
 pub(crate) fn cmd_doctor_journal() -> Result<bool, String> {
-    let started = Instant::now();
     let path = resolve_journal_dir()?.join("journal.jsonl");
 
     let raw = std::fs::read_to_string(&path)
@@ -230,6 +229,150 @@ pub(crate) fn cmd_doctor_journal() -> Result<bool, String> {
     }
     println!("    identity mismatches: {}", identity_count);
     lint_count += identity_count;
+
+    // Lint 7: edge-validity (F7) — semantic predicates over the causal graph.
+    // Advisory only: read-time warnings, never persisted as scars. The system
+    // flags suspicious edges; the cut/keep decision stays with the agent/llm.
+    // Built from the typed projection so it follows EdgeUnlinked folds (F5).
+    {
+        let indexed: Vec<(usize, Event)> = events.iter().cloned().enumerate().collect();
+        let strands = projection::project_strands(&indexed, true);
+        let mut by_id: HashMap<String, &projection::ProjectedStrand> = HashMap::new();
+        for s in &strands { by_id.insert(s.id.clone(), s); }
+
+        let mut ev_count = 0usize;
+        println!("  lint: edge-validity:");
+
+        // 7a. belongs-to cardinality (D1: single-parent basis; >1 = warning, not error).
+        for s in &strands {
+            if s.belongs_to_edges.len() > 1 {
+                eprintln!("[lint] edge-validity: strand {} has {} belongs-to parents — single-parent basis (D1) expects 1", s.id, s.belongs_to_edges.len());
+                ev_count += 1;
+            }
+        }
+
+        // 7b. dead parent / dead upstream: a belongs-to or depends-on target is closed.
+        for s in &strands {
+            for p in &s.belongs_to_edges {
+                if by_id.get(p).map_or(false, |t| t.state().starts_with("closed")) {
+                    eprintln!("[lint] edge-validity: strand {} belongs-to a closed parent {} — may warrant review", s.id, p);
+                    ev_count += 1;
+                }
+            }
+            for u in &s.depends_on_edges {
+                if by_id.get(u).map_or(false, |t| t.state().starts_with("closed")) {
+                    eprintln!("[lint] edge-validity: strand {} depends-on a closed upstream {} — may warrant review", s.id, u);
+                    ev_count += 1;
+                }
+            }
+        }
+
+        // 7c. depends-on cycle (genuine deadlock). Iterative DFS with 3-color
+        // marking: a back-edge to an in-stack (color 1) node closes a cycle.
+        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+        for s in &strands { adj.insert(s.id.clone(), s.depends_on_edges.clone()); }
+        let mut color: HashMap<String, u8> = HashMap::new();
+        for start in adj.keys().cloned().collect::<Vec<_>>() {
+            if color.get(&start).copied().unwrap_or(0) != 0 { continue; }
+            let mut stack: Vec<(String, usize)> = vec![(start.clone(), 0)];
+            color.insert(start.clone(), 1);
+            while let Some((node, idx)) = stack.last().cloned() {
+                let children = adj.get(&node).cloned().unwrap_or_default();
+                if idx < children.len() {
+                    stack.last_mut().unwrap().1 += 1;
+                    let nx = children[idx].clone();
+                    match color.get(&nx).copied().unwrap_or(0) {
+                        1 => { eprintln!("[lint] edge-validity: depends-on cycle edge {} -> {} — deadlock", node, nx); ev_count += 1; }
+                        0 => { color.insert(nx.clone(), 1); stack.push((nx, 0)); }
+                        _ => {}
+                    }
+                } else {
+                    color.insert(node.clone(), 2);
+                    stack.pop();
+                }
+            }
+        }
+
+        println!("    edge-validity warnings: {}", ev_count);
+        lint_count += ev_count;
+    }
+
+    // Lint 8: [metric] capturability (F8) — entries prefixed `[metric] ` should
+    // carry a jq-capturable `name=value` (the explain jq idiom). Flag ones that
+    // don't, so the miss is *told*, not silent. Convention discipline — NOT
+    // regex-widening (the doctrine's minimal core stays minimal).
+    let mut metric_count = 0usize;
+    println!("  lint: metric-format:");
+    for (id, entries) in &strand_entries {
+        for e in entries {
+            if let Some(rest) = e.strip_prefix("[metric] ") {
+                let ok = rest.split_whitespace().any(|tok| {
+                    if let Some((k, v)) = tok.split_once('=') {
+                        !k.is_empty()
+                            && k.chars().all(|c| c.is_alphanumeric() || c == '_')
+                            && !v.is_empty()
+                    } else {
+                        false
+                    }
+                });
+                if !ok {
+                    let preview: String = rest.chars().take(40).collect();
+                    eprintln!("[lint] metric-format: strand {} [metric] entry has no jq-capturable name=value: {:?}", id, preview);
+                    metric_count += 1;
+                }
+            }
+        }
+    }
+    println!("    uncapturable [metric] entries: {}", metric_count);
+    lint_count += metric_count;
+
+    // Lint 9: legacy `why` edges (F4 migration). D2 removed `why` from the edge
+    // system (it is now an entry rationale). Any EdgeLinked with edge_type="why"
+    // predates the decision — flag it so the reason can move into an entry.
+    let mut why_edge_count = 0usize;
+    println!("  lint: legacy-why-edges:");
+    for event in &events {
+        if let Event::EdgeLinked { id, to, edge_type, .. } = event {
+            if edge_type.as_deref() == Some("why") {
+                eprintln!("[lint] legacy why-edge {} -> {}: why is no longer a link (D2) — record the reason in an entry", id, to);
+                why_edge_count += 1;
+            }
+        }
+    }
+    println!("    legacy why-edges: {}", why_edge_count);
+    lint_count += why_edge_count;
+
+    // Lint 10: why-staleness clerk (W1/F4-pin). Entries set by `append --why`
+    // carry a pinned rationale ref `<id>@<offset>`. When the cited strand has
+    // advanced past the pinned offset, the basis evolved — flag "may warrant
+    // review". Clerk, not judge: it reports only that the clue moved; whether the
+    // reason still holds is left to the llm/human (D2 / W076 lineage).
+    {
+        let indexed: Vec<(usize, Event)> = events.iter().cloned().enumerate().collect();
+        let strands = projection::project_strands(&indexed, true);
+        let mut cur_offset: HashMap<String, usize> = HashMap::new();
+        for s in &strands { cur_offset.insert(s.id.clone(), s.last_offset()); }
+        let mut stale_count = 0usize;
+        println!("  lint: why-staleness:");
+        for s in &strands {
+            for entry in &s.log {
+                if let Some(r) = &entry.ref_ {
+                    if let Some((tgt, pin)) = r.rsplit_once('@') {
+                        if let Ok(pin_off) = pin.parse::<usize>() {
+                            if let Some(&cur) = cur_offset.get(tgt) {
+                                if cur > pin_off {
+                                    eprintln!("[lint] why-staleness: strand {} cites {} pinned@{} but it advanced to @{} — may warrant review", s.id, tgt, pin_off, cur);
+                                    stale_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("    stale rationale refs: {}", stale_count);
+        lint_count += stale_count;
+    }
 
     if lint_count > 0 {
         println!();

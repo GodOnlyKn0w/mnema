@@ -84,6 +84,14 @@ pub enum Event {
         id: String,
         ts: String,
         to: String,
+        /// Which typed edge to remove. Matches the EdgeLinked edge_type so an
+        /// unlink can target exactly one of several edges between the same pair
+        /// (F5). New field; no legacy events exist (unlink was never producible),
+        /// so this is a zero-migration addition.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        edge_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        provenance: Option<serde_json::Value>,
     },
     #[serde(rename = "strand_hidden", alias = "node_hidden")]
     StrandHidden {
@@ -226,6 +234,18 @@ pub fn make_log_appended(
     content: &str,
     provenance: Option<serde_json::Value>,
 ) -> Event {
+    make_log_appended_with_ref(id, content, None, provenance)
+}
+
+/// Like `make_log_appended` but sets the entry's `ref_` rationale pointer
+/// (W1/F4-pin). `ref_` is a pinned reference `<target_id>@<offset>` so the
+/// why-staleness clerk can later detect when the cited basis has evolved.
+pub fn make_log_appended_with_ref(
+    id: &str,
+    content: &str,
+    ref_: Option<&str>,
+    provenance: Option<serde_json::Value>,
+) -> Event {
     let ts = now();
     let append_id = compute_append_id(id, &ts, content);
     let git = get_git_context();
@@ -233,7 +253,7 @@ pub fn make_log_appended(
         id: id.to_string(),
         ts,
         content: content.to_string(),
-        ref_: None,
+        ref_: ref_.map(|s| s.to_string()),
         append_id: Some(append_id),
         git,
         provenance,
@@ -268,6 +288,23 @@ pub fn make_edge_linked(
     provenance: Option<serde_json::Value>,
 ) -> Event {
     Event::EdgeLinked {
+        id: source_id.to_string(),
+        ts: now(),
+        to: target_id.to_string(),
+        edge_type: edge_type.map(|s| s.to_string()),
+        provenance,
+    }
+}
+
+/// Build an `EdgeUnlinked` event (F5). Symmetric with `make_edge_linked`:
+/// carries edge_type (which typed edge to remove) and provenance.
+pub fn make_edge_unlinked(
+    source_id: &str,
+    target_id: &str,
+    edge_type: Option<&str>,
+    provenance: Option<serde_json::Value>,
+) -> Event {
+    Event::EdgeUnlinked {
         id: source_id.to_string(),
         ts: now(),
         to: target_id.to_string(),

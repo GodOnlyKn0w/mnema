@@ -226,6 +226,7 @@ pub(crate) fn cmd_append(
         format,
         provenance_raw,
         None,
+        None,
     )
 }
 
@@ -239,6 +240,7 @@ pub(crate) fn cmd_append_with_seen_offset(
     format: Option<&str>,
     provenance_raw: Option<&str>,
     seen_offset: Option<usize>,
+    why: Option<&str>,
 ) -> Result<(), String> {
     // ---- Content Source Resolution ----
     if (stdin || file.is_some())
@@ -377,7 +379,24 @@ pub(crate) fn cmd_append_with_seen_offset(
         .unwrap_or(0);
     let w076 = diagnostics::check_w076_seen_offset(&full_id, seen_offset, strand_last_offset);
     let provenance = parse_provenance_arg(provenance_raw)?;
-    let event = event::make_log_appended(&full_id, &stored, provenance.clone());
+    // W1/F4-pin: --why pins a rationale to the cited strand at its current
+    // last_offset (`<id>@<offset>`). The pin lets the doctor staleness clerk
+    // later detect that the cited basis advanced since it was referenced.
+    let pinned_ref: Option<String> = match why {
+        Some(w) => {
+            let tgt = find_strand(&events, w)
+                .ok_or_else(|| format!("--why target strand {} not found", w))?;
+            let tgt_offset = projection::project_strands(&events, true)
+                .iter()
+                .find(|s| s.id == tgt)
+                .map(|s| s.last_offset())
+                .unwrap_or(0);
+            Some(format!("{}@{}", tgt, tgt_offset))
+        }
+        None => None,
+    };
+    let event =
+        event::make_log_appended_with_ref(&full_id, &stored, pinned_ref.as_deref(), provenance.clone());
     let append_id = match &event {
         Event::LogAppended { append_id, .. } => append_id.clone(),
         _ => None,

@@ -36,11 +36,32 @@ pub(crate) fn cmd_link(
     provenance_raw: Option<&str>,
 ) -> Result<(), String> {
     // Default edge type: depends-on
-    let resolved_type = edge_type.or(Some("depends-on"));
+    let etype = edge_type.unwrap_or("depends-on");
+    // F2: validate edge_type at the write entrance. Only the two real edges
+    // survive (D2: `why` left the edge system → it is now an entry rationale
+    // field, not a link). A free-string edge_type silently became an
+    // un-projected, un-queryable label sitting in the journal — seal it here so
+    // every edge entering the typed projections is clean. ("why" gets a pointed
+    // message because it used to be accepted.)
+    match etype {
+        "belongs-to" | "depends-on" => {}
+        "why" => {
+            return Err(
+                "edge_type 'why' is no longer a link (D2): why is an entry rationale, \
+                 not a strand->strand edge. Record the reason in the entry itself."
+                    .to_string(),
+            );
+        }
+        other => {
+            return Err(format!(
+                "unknown edge_type '{}'. Valid edge types: belongs-to, depends-on",
+                other
+            ));
+        }
+    }
     let events = read_events_strict(&ensure_journal()?)?;
     let src_id = resolve_id(&events, source)?;
     let tgt_id = resolve_id(&events, target)?;
-    let etype = resolved_type.unwrap();
     let provenance = parse_provenance_arg(provenance_raw)?;
     let event = event::make_edge_linked(&src_id, &tgt_id, Some(etype), provenance);
     with_journal_write_lock(|journal| append_event_unlocked(journal, &event))?;
@@ -71,6 +92,55 @@ pub(crate) fn cmd_link(
             print_handle_line(&card, &state);
         }
         println!("{} --{}--> {}", shorten(&src_id), etype, shorten(&tgt_id));
+    }
+    Ok(())
+}
+
+/// Remove a typed edge (F5). Symmetric with `cmd_link`: validates edge_type,
+/// resolves both ids, appends an `EdgeUnlinked` carrying edge_type so the
+/// projection's last-write-wins fold drops exactly that edge. Append-only — the
+/// original EdgeLinked stays in the journal; only the read projection changes.
+pub(crate) fn cmd_unlink(
+    source: &str,
+    target: &str,
+    edge_type: Option<&str>,
+    format_json: bool,
+    provenance_raw: Option<&str>,
+) -> Result<(), String> {
+    let etype = edge_type.unwrap_or("depends-on");
+    match etype {
+        "belongs-to" | "depends-on" => {}
+        "why" => {
+            return Err(
+                "edge_type 'why' is not a link (D2) — there is nothing to unlink.".to_string(),
+            );
+        }
+        other => {
+            return Err(format!(
+                "unknown edge_type '{}'. Valid edge types: belongs-to, depends-on",
+                other
+            ));
+        }
+    }
+    let events = read_events_strict(&ensure_journal()?)?;
+    let src_id = resolve_id(&events, source)?;
+    let tgt_id = resolve_id(&events, target)?;
+    let provenance = parse_provenance_arg(provenance_raw)?;
+    let event = event::make_edge_unlinked(&src_id, &tgt_id, Some(etype), provenance);
+    with_journal_write_lock(|journal| append_event_unlocked(journal, &event))?;
+    if format_json {
+        println!(
+            "{}",
+            json!({
+                "source_id": src_id,
+                "target_id": tgt_id,
+                "edge_type": etype,
+                "status": "ok",
+                "unlinked": true,
+            })
+        );
+    } else {
+        println!("unlinked {} -x-> {} ({})", shorten(&src_id), shorten(&tgt_id), etype);
     }
     Ok(())
 }

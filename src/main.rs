@@ -47,6 +47,7 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   search        Full-text search across entries
   find          Resolve a strand id
   tree          Strand forest (belongs-to nesting)
+  depends       depends-on analysis: blockers / readiness / critical path
   current       Latest effective subject binding
   agent-context Machine-readable active-strand context
   context       Project a typed context slice
@@ -57,7 +58,8 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   close         Close a strand (StrandClosed event)
   reopen        Reopen a closed strand (StrandReopened event)
   checkpoint    Record context before an irreversible action
-  link          Link strands (depends-on / belongs-to / why)
+  link          Link strands (belongs-to / depends-on)
+  unlink        Remove a link (EdgeUnlinked; read projection drops the edge)
   bind          Record a subject binding
 
 管 / manage:
@@ -210,6 +212,11 @@ Provenance:
         /// If behind the target's current last_offset, emits W076 but still writes.
         #[arg(long = "seen-offset", value_name = "N")]
         seen_offset: Option<usize>,
+        /// Pin a rationale: the strand whose entry this one's reason rests on
+        /// (prefix match). Stored as ref=<id>@<offset> (W1/F4-pin); the doctor
+        /// why-staleness clerk flags it when that strand later advances.
+        #[arg(long = "why", value_name = "REF")]
+        why: Option<String>,
     },
     /// Record context before an irreversible or state-closing action
     #[command(after_help = "\
@@ -355,7 +362,9 @@ Direction (read SOURCE first): the edge always points from SOURCE to TARGET.
   belongs-to   SOURCE belongs to TARGET — source is the child, target is the
                parent. tree and orient --tree nest SOURCE under TARGET.
   depends-on   SOURCE depends on TARGET (TARGET must advance first). [default]
-  why          SOURCE's reason is TARGET (TARGET explains SOURCE).
+
+  (why is no longer a link (D2): a reason is an entry rationale, not a
+   strand edge. Record the reason in the entry text itself.)
 
 Examples:
   tasktree link <CHILD> <PARENT> --edge-type belongs-to
@@ -370,7 +379,7 @@ JSON shape: tasktree explain json")]
         source: String,
         /// Target strand ID (prefix match). For belongs-to, this is the parent.
         target: String,
-        /// Edge type: depends-on, belongs-to, why (default: depends-on).
+        /// Edge type: belongs-to, depends-on (default: depends-on).
         /// Direction: SOURCE <edge-type> TARGET (e.g. SOURCE belongs-to TARGET
         /// = source is child of target). [alias: --type (deprecated)]
         #[arg(long = "edge-type", visible_alias = "type", value_name = "TYPE")]
@@ -380,6 +389,28 @@ JSON shape: tasktree explain json")]
         format: Option<String>,
         /// Optional provenance JSON object. Same shape as `append --provenance`.
         /// Stored on the EdgeLinked event.
+        #[arg(long = "provenance", value_name = "JSON")]
+        provenance: Option<String>,
+    },
+    /// Remove a directed link between two strands (writes an EdgeUnlinked event)
+    #[command(after_help = "\
+Append-only: the original link stays in the journal; the read projection drops
+the edge. edge_type must match the link being removed (belongs-to / depends-on).
+
+Example:
+  tasktree unlink <TASK> <BLOCKER> --edge-type depends-on")]
+    Unlink {
+        /// Source strand ID (prefix match) — same SOURCE as the link being removed.
+        source: String,
+        /// Target strand ID (prefix match) — same TARGET as the link being removed.
+        target: String,
+        /// Edge type to remove: belongs-to, depends-on (default: depends-on).
+        #[arg(long = "edge-type", visible_alias = "type", value_name = "TYPE")]
+        edge_type: Option<String>,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+        /// Optional provenance JSON object. Stored on the EdgeUnlinked event.
         #[arg(long = "provenance", value_name = "JSON")]
         provenance: Option<String>,
     },
@@ -639,6 +670,22 @@ JSON shape: tasktree explain json")]
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
     },
+    /// Analyse a strand's depends-on graph: blockers, readiness, critical path
+    #[command(after_help = "\
+ready = every direct blocker is closed. critical path = the longest chain of
+still-open upstreams reachable via depends-on (closed upstreams terminate a
+path; cycles are guarded). Built on the typed depends-on projection (F3).
+
+Examples:
+  tasktree depends <TASK>
+  tasktree depends <TASK> --format json")]
+    Depends {
+        #[command(flatten)]
+        target: IdTarget,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+    },
     /// Render strand context for system prompt injection.
     /// Projects prompt-strands into text or JSON suitable for APPEND_SYSTEM.md.
     Context {
@@ -787,6 +834,7 @@ fn run(command: &Commands) -> Result<(), String> {
             format,
             provenance,
             seen_offset,
+            why,
         } => cmd_append_with_seen_offset(
             content.as_deref(),
             id.as_deref(),
@@ -797,6 +845,7 @@ fn run(command: &Commands) -> Result<(), String> {
             format.as_deref(),
             provenance.as_deref(),
             *seen_offset,
+            why.as_deref(),
         ),
         Commands::List { all, links, backlinks, state, list_type, stale, stale_offset, since_offset, format } => {
             let fmt = format.as_deref() == Some("json");
@@ -817,6 +866,10 @@ fn run(command: &Commands) -> Result<(), String> {
         Commands::Link { source, target, edge_type, format, provenance } => {
             let fmt = format.as_deref() == Some("json");
             cmd_link(source, target, edge_type.as_deref(), fmt, provenance.as_deref())
+        },
+        Commands::Unlink { source, target, edge_type, format, provenance } => {
+            let fmt = format.as_deref() == Some("json");
+            cmd_unlink(source, target, edge_type.as_deref(), fmt, provenance.as_deref())
         },
         Commands::Hide { target, reason, format, provenance } => match target.get() {
             Some(id) => cmd_hide(id, reason.as_deref(), format.as_deref() == Some("json"), provenance.as_deref()),
@@ -867,6 +920,11 @@ fn run(command: &Commands) -> Result<(), String> {
 
         Commands::Tree { target, format } => match target.get() {
             Some(id) => cmd_tree(id, format.as_deref()),
+            None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
+        },
+
+        Commands::Depends { target, format } => match target.get() {
+            Some(id) => cmd_depends(id, format.as_deref()),
             None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
         },
 
@@ -3311,6 +3369,7 @@ fn create_strand(content: &str) -> String {
             Some("json"),
             None,
             Some(seen),
+            None,
         );
         assert!(result.is_ok(), "stale --seen-offset is a warning, not a gate: {:?}", result);
 

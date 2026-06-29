@@ -110,6 +110,10 @@ pub struct ProjectedStrand {
     /// Target IDs of edges whose edge_type is "belongs-to". Subset of `edges`.
     /// Used by orient --tree to build the belongs-to forest.
     pub belongs_to_edges: Vec<String>,
+    /// Target IDs of edges whose edge_type is "depends-on" (F3). Subset of
+    /// `edges`. Makes depends-on a typed, queryable view instead of write-only:
+    /// the targets are this strand's blockers (SOURCE depends-on TARGET).
+    pub depends_on_edges: Vec<String>,
     pub hidden: bool,
     pub strand_type: Option<String>,
     pub cached_state: Option<String>,
@@ -212,30 +216,42 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
                 }
             })
             .collect();
-        // Collect edges (all) and belongs-to edges (subset typed "belongs-to").
-        // Read-side fold: a repeated link to the same target is collapsed to one
-        // entry, first occurrence wins (order preserved). The journal keeps every
-        // EdgeLinked event (append-only); folding only shapes the projection, so a
-        // duplicate link does not double-project into the edges field or the tree.
-        let edges: Vec<String> = dedup_preserve_order(node_events.iter().filter_map(|(_, e)| {
-            if let Event::EdgeLinked { to, .. } = e {
-                Some(to.clone())
-            } else {
-                None
+        // Fold link/unlink into the live edge set (F5). Key is (to, edge_type);
+        // last write wins (EdgeLinked=true, EdgeUnlinked=false). First-occurrence
+        // order is preserved, so for a journal with no unlinks this reduces to the
+        // old first-wins dedup — belongs-to ordering (tree/orient) is unchanged.
+        // The journal keeps every event (append-only); folding only shapes reads.
+        let mut edge_live: std::collections::HashMap<(String, Option<String>), bool> =
+            std::collections::HashMap::new();
+        let mut edge_order: Vec<(String, Option<String>)> = Vec::new();
+        for (_, e) in &node_events {
+            let (to, etype, linked) = match e {
+                Event::EdgeLinked { to, edge_type, .. } => (to, edge_type, true),
+                Event::EdgeUnlinked { to, edge_type, .. } => (to, edge_type, false),
+                _ => continue,
+            };
+            let key = (to.clone(), etype.clone());
+            if !edge_live.contains_key(&key) {
+                edge_order.push(key.clone());
             }
-        }));
-        let belongs_to_edges: Vec<String> =
-            dedup_preserve_order(node_events.iter().filter_map(|(_, e)| {
-                if let Event::EdgeLinked { to, edge_type, .. } = e {
-                    if edge_type.as_deref() == Some("belongs-to") {
-                        Some(to.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }));
+            edge_live.insert(key, linked);
+        }
+        let live: Vec<&(String, Option<String>)> =
+            edge_order.iter().filter(|k| edge_live[*k]).collect();
+        // edges = all live targets, deduped by target id (a target reachable via
+        // two edge types lists once).
+        let edges: Vec<String> = dedup_preserve_order(live.iter().map(|(to, _)| to.clone()));
+        let belongs_to_edges: Vec<String> = live
+            .iter()
+            .filter(|(_, et)| et.as_deref() == Some("belongs-to"))
+            .map(|(to, _)| to.clone())
+            .collect();
+        // depends-on subset (F3): typed view of blockers.
+        let depends_on_edges: Vec<String> = live
+            .iter()
+            .filter(|(_, et)| et.as_deref() == Some("depends-on"))
+            .map(|(to, _)| to.clone())
+            .collect();
         // Extract strand_type from StrandCreated event
         let strand_type: Option<String> = node_events.iter().find_map(|(_, e)| {
             if let Event::StrandCreated { strand_type, .. } = e {
@@ -254,6 +270,7 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
             log: logs,
             edges,
             belongs_to_edges,
+            depends_on_edges,
             hidden,
             strand_type,
             cached_state: Some(state),
