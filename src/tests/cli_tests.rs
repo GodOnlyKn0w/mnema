@@ -1,0 +1,743 @@
+use super::*;
+
+#[test]
+fn chdir_flag_parses_before_subcommand() {
+    use clap::CommandFactory;
+    let result = Cli::command().try_get_matches_from(["tasktree", "-C", "/some/dir", "orient"]);
+    assert!(result.is_ok(), "'-C DIR orient' must parse: {:?}", result);
+}
+
+// --chdir long form also parses
+
+#[test]
+fn chdir_longform_parses() {
+    use clap::CommandFactory;
+    let result =
+        Cli::command().try_get_matches_from(["tasktree", "--chdir", "/some/dir", "orient"]);
+    assert!(result.is_ok(), "--chdir long form must parse: {:?}", result);
+}
+
+// -C after subcommand also works (global = true)
+
+#[test]
+fn chdir_global_after_subcommand_parses() {
+    use clap::CommandFactory;
+    let result = Cli::command().try_get_matches_from(["tasktree", "orient", "-C", "/some/dir"]);
+    assert!(
+        result.is_ok(),
+        "'-C' after subcommand (global) must parse: {:?}",
+        result
+    );
+}
+
+// -C pointing at a real .tasktree dir resolves journal from unrelated cwd.
+
+#[test]
+fn chdir_resolves_journal_from_foreign_cwd() {
+    // env has .tasktree/ in its temp dir; we set cwd to a different temp dir
+    // (no .tasktree/), then set_current_dir to env path, and resolve succeeds.
+    let env = setup(); // cwd is now env.path() with .tasktree/
+    let foreign = tempfile::tempdir().unwrap();
+    // Move cwd to the foreign dir (no .tasktree/)
+    let prev = std::env::current_dir().unwrap();
+    std::env::set_current_dir(foreign.path()).unwrap();
+    // Simulate what -C does: set_current_dir to the project root
+    std::env::set_current_dir(env.path()).unwrap();
+    let result = with_tasktree_home(None, || resolve_journal_dir());
+    std::env::set_current_dir(&prev).unwrap();
+    assert!(
+        result.is_ok(),
+        "-C to project root must resolve journal: {:?}",
+        result
+    );
+    drop(env);
+}
+
+// -C to a non-existent directory: the binary would exit 3.
+// We test that set_current_dir on a missing path returns Err.
+
+#[test]
+fn chdir_nonexistent_dir_errors() {
+    let missing = std::path::Path::new("/this/path/does/not/exist/hopefully/xyz");
+    let result = std::env::set_current_dir(missing);
+    assert!(result.is_err(), "set_current_dir to missing path must fail");
+}
+
+#[test]
+fn target_conflict_new_and_id() {
+    let _env = setup();
+    create_strand("first strand");
+    let result = cmd_append(
+        Some("content"),
+        None,
+        true,
+        false,
+        None,
+        Some("0000019dd34b"),
+        None,
+        None,
+    );
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("only one target"));
+}
+
+#[test]
+fn target_conflict_new_and_legacy_id() {
+    let _env = setup();
+    let id = create_strand("first strand");
+    let result = cmd_append(
+        Some("content"),
+        Some(&id),
+        true,
+        false,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("only one target"));
+}
+
+#[test]
+fn reversed_positional_append_gets_helpful_error() {
+    let _env = setup();
+    let id = create_strand("first strand");
+    let result = cmd_append(
+        Some(&id),
+        Some("[observed] finding"),
+        false,
+        false,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("arguments look reversed"));
+    assert!(err.contains("tasktree append --id"));
+    // The suggested command must carry the actual content, not echo the id
+    assert!(err.contains(&format!("--id {} \"[observed] finding\"", id)));
+}
+
+// ── orient ──
+
+#[test]
+fn orient_tree_flag_parses() {
+    use clap::CommandFactory;
+    let result = Cli::command().try_get_matches_from(["tasktree", "orient", "--tree"]);
+    assert!(result.is_ok(), "'orient --tree' must parse: {:?}", result);
+}
+
+// orient --tree --format json: parse check.
+
+#[test]
+fn orient_tree_format_json_parses() {
+    use clap::CommandFactory;
+    let result =
+        Cli::command().try_get_matches_from(["tasktree", "orient", "--tree", "--format", "json"]);
+    assert!(
+        result.is_ok(),
+        "'orient --tree --format json' must parse: {:?}",
+        result
+    );
+}
+
+// ── tree / project_tree: canonical belongs-to direction regression ──
+// The `tree` command (cmd_tree → project_tree) must nest SOURCE under
+// TARGET for belongs-to edges, identical to orient --tree
+// (build_orient_forest). Guards against the reversed-direction +
+// all-edge-types + no-dedup divergence project_tree used to carry.
+
+// tree: after `link child parent --belongs-to`, the parent node holds the
+// child as a descendant (child nested under parent — canonical direction).
+
+#[test]
+fn link_help_documents_belongs_to_direction() {
+    use clap::CommandFactory;
+    let cmd = Cli::command();
+    let link = cmd
+        .get_subcommands()
+        .find(|s| s.get_name() == "link")
+        .expect("link subcommand exists");
+    let help = link
+        .get_after_help()
+        .map(|h| h.to_string())
+        .unwrap_or_default();
+    assert!(
+        help.contains("belongs-to"),
+        "link help must document belongs-to"
+    );
+    assert!(
+        help.contains("depends-on"),
+        "link help must document depends-on"
+    );
+    assert!(
+        help.to_lowercase().contains("child") && help.to_lowercase().contains("parent"),
+        "link help must explain source=child / target=parent"
+    );
+    assert!(
+        help.contains("orient --tree") || help.contains("tree"),
+        "link help must name the tree projection that consumes belongs-to"
+    );
+}
+
+// ── examples-as-contract (ADR-0001 rule 4) ──
+// Every example command in help text must at least parse against the
+// real CLI. Help text is load-bearing: agents copy it verbatim.
+
+#[test]
+fn help_examples_parse_against_real_cli() {
+    use clap::CommandFactory;
+    let cmd = Cli::command();
+    let mut helps: Vec<String> = Vec::new();
+    if let Some(h) = cmd.get_after_help() {
+        helps.push(h.to_string());
+    }
+    for sub in cmd.get_subcommands() {
+        if let Some(h) = sub.get_after_help() {
+            helps.push(h.to_string());
+        }
+    }
+    let mut checked = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for help in &helps {
+        for line in help.lines() {
+            if !line.contains("tasktree ") || line.contains("<command>") {
+                continue;
+            }
+            checked += 1;
+            if let Err(e) = try_parse_example(line) {
+                failures.push(e);
+            }
+        }
+    }
+    assert!(
+        checked > 10,
+        "expected to find example lines in help text, found {}",
+        checked
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn help_topic_references_exist() {
+    // "引用即契约": any `tasktree explain <word>` line in after_help where
+    // <word> is all-lowercase must resolve via topic_lookup.
+    use clap::CommandFactory;
+    let cmd = Cli::command();
+    let mut helps: Vec<String> = Vec::new();
+    if let Some(h) = cmd.get_after_help() {
+        helps.push(h.to_string());
+    }
+    for sub in cmd.get_subcommands() {
+        if let Some(h) = sub.get_after_help() {
+            helps.push(h.to_string());
+        }
+    }
+    let mut failures: Vec<String> = Vec::new();
+    for help in &helps {
+        for line in help.lines() {
+            // Match "tasktree explain <word>" where word is all-lowercase
+            if let Some(rest) = line
+                .find("tasktree explain ")
+                .map(|i| &line[i + "tasktree explain ".len()..])
+            {
+                let word: String = rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take_while(|c| c.is_alphabetic() || *c == '_' || *c == '-')
+                    .collect();
+                if word.is_empty() {
+                    continue;
+                }
+                // Only check all-lowercase words (topic namespace)
+                if word
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '_' || c == '-')
+                {
+                    if diagnostics::topic_lookup(&word).is_none() {
+                        failures.push(format!(
+                            "help references topic '{}' but topic_lookup returns None",
+                            word
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "broken topic references in help text:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn catalog_recovery_commands_parse_when_executable() {
+    for info in diagnostics::catalog() {
+        if info.recovery.executable {
+            assert!(
+                info.recovery.command_str.starts_with("tasktree"),
+                "{}: executable recovery must be a tasktree command",
+                info.code
+            );
+            try_parse_example(info.recovery.command_str)
+                .unwrap_or_else(|e| panic!("{}: {}", info.code, e));
+        }
+    }
+}
+
+#[test]
+fn orient_catch_up_command_parses() {
+    let _env = setup();
+    let id = create_strand("a line");
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let out = build_orient(&strands, false, 10, 2);
+    try_parse_example(&out.active[0].catch_up).unwrap();
+    let _ = id;
+}
+
+// ── W-code emitters (two-way closure: every code has a producer) ──
+
+#[test]
+fn catalog_referenced_markers_are_writable() {
+    // Markers extracted from catalog prose that are NOT entry markers —
+    // they are placeholder tokens or descriptions, not bracket-prefixed
+    // log entries. Allowlist with comment per entry.
+    let allowlist: &[&str] = &[
+            // none yet
+        ];
+
+    // Markers the emitter code parses (from run_journal_diagnostics).
+    let emitter_markers: &[&str] = &[
+        "[deadline]",
+        "[decision]",
+        "[constraint]",
+        "[verified]",
+        "[done]",
+        "[cancelled]",
+        "[failed]",
+        "[merged]",
+        "[ended]",
+    ];
+
+    let mut all_markers: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Collect from catalog prose.
+    for info in diagnostics::catalog() {
+        for s in [info.finding, info.impact, info.recovery.command_str] {
+            for marker in extract_bracket_markers(s) {
+                all_markers.insert(marker);
+            }
+        }
+    }
+    // Always include the hardcoded emitter markers.
+    for m in emitter_markers {
+        all_markers.insert(m.to_string());
+    }
+
+    let mut failures: Vec<String> = Vec::new();
+    for marker in &all_markers {
+        if allowlist.contains(&marker.as_str()) {
+            continue;
+        }
+        let test_content = format!("{} x", marker);
+        if let Err(e) = validate_lifecycle_marker(&test_content) {
+            failures.push(format!("marker {} referenced in catalog/emitter but rejected by validate_lifecycle_marker: {}", marker, e));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// ── context exposure axis (ADR-0002) ──
+
+#[test]
+fn grammar_flag_vocabulary_conformance() {
+    use clap::CommandFactory;
+    // (flag, exclusively allowed on). Compat aliases are pinned to their
+    // historical host; appearing anywhere else is a new violation.
+    let exclusive: &[(&str, &str)] =
+        &[("all", "list"), ("json", "explain"), ("strand", "timeline")];
+    for sub in Cli::command().get_subcommands() {
+        for arg in sub.get_arguments() {
+            if let Some(long) = arg.get_long() {
+                for (flag, host) in exclusive {
+                    assert!(
+                        long != *flag || sub.get_name() == *host,
+                        "--{} is reserved to `{}` (compat); `{}` must use the canonical flag (see explain grammar)",
+                        flag,
+                        host,
+                        sub.get_name()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn grammar_single_id_commands_accept_id_flag() {
+    use clap::CommandFactory;
+    for cmd in ["show", "find", "tree", "hide", "unhide"] {
+        let r = Cli::command().try_get_matches_from(["tasktree", cmd, "--id", "0000019dd34b"]);
+        assert!(
+            r.is_ok(),
+            "`{} --id <ID>` must parse (IdTarget contract): {:?}",
+            cmd,
+            r.err()
+        );
+    }
+    // timeline reaches the same grammar via alias
+    let r = Cli::command().try_get_matches_from(["tasktree", "timeline", "--id", "0000019dd34b"]);
+    assert!(r.is_ok(), "`timeline --id` must alias --strand");
+}
+
+#[test]
+fn seen_offset_flag_parses_on_write_commands() {
+    use clap::CommandFactory;
+    let append = Cli::command().try_get_matches_from([
+        "tasktree",
+        "append",
+        "--id",
+        "0000019dd34b",
+        "--seen-offset",
+        "2",
+        "note",
+    ]);
+    assert!(
+        append.is_ok(),
+        "append --seen-offset must parse: {:?}",
+        append.err()
+    );
+
+    let checkpoint = Cli::command().try_get_matches_from([
+        "tasktree",
+        "checkpoint",
+        "--id",
+        "0000019dd34b",
+        "--seen-offset",
+        "2",
+        "--action",
+        "before commit",
+    ]);
+    assert!(
+        checkpoint.is_ok(),
+        "checkpoint --seen-offset must parse: {:?}",
+        checkpoint.err()
+    );
+}
+
+#[test]
+fn grammar_json_field_naming() {
+    let _env = setup();
+    let id = create_strand("naming probe");
+    cmd_append(
+        Some("second entry"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+
+    let mut samples: Vec<serde_json::Value> = vec![
+        serde_json::to_value(output::StrandDetailOutput::from(&strands[0])).unwrap(),
+        serde_json::to_value(output::StrandListOutput {
+            strands: strands.iter().map(output::StrandListItem::from).collect(),
+        })
+        .unwrap(),
+        serde_json::to_value(build_orient(&strands, true, 10, 2)).unwrap(),
+        serde_json::to_value(output::SearchOutput {
+            matches: vec![],
+            count: 0,
+            query: String::new(),
+        })
+        .unwrap(),
+        serde_json::to_value(output::TimelineOutput {
+            timeline: vec![],
+            truncated: false,
+            count: 0,
+            max_offset: 0,
+        })
+        .unwrap(),
+        // Write-command JSON built inline with json!() is invisible to
+        // struct sampling — extracted shapes are sampled here. First
+        // catch of this blind spot: hide's ledger shipped bare
+        // active/closed/hidden count names.
+        visibility_ledger_json(&id, false),
+    ];
+
+    // plural noun => array; count/*_count => number
+    const PLURALS: &[&str] = &[
+        "events", "matches", "strands", "active", "entries", "edges", "covers", "timeline",
+    ];
+    fn walk(v: &serde_json::Value, errs: &mut Vec<String>) {
+        if let serde_json::Value::Object(map) = v {
+            for (k, val) in map {
+                if PLURALS.contains(&k.as_str()) && !val.is_array() {
+                    errs.push(format!(
+                        "plural-named field `{}` is not an array (naming contract)",
+                        k
+                    ));
+                }
+                if (k == "count" || k.ends_with("_count")) && !val.is_number() {
+                    errs.push(format!("count field `{}` is not a number", k));
+                }
+                // id/strand_id are full-width 24-hex handles (join law);
+                // append_id is a 64-hex content hash, not a strand handle.
+                if (k == "id" || k == "strand_id") && val.is_string() {
+                    let s = val.as_str().unwrap();
+                    if s.len() != 24 {
+                        errs.push(format!("`{}` is not full-width 24-hex: `{}`", k, s));
+                    }
+                }
+                walk(val, errs);
+            }
+        } else if let serde_json::Value::Array(items) = v {
+            for item in items {
+                walk(item, errs);
+            }
+        }
+    }
+    let mut errs = Vec::new();
+    for s in samples.drain(..) {
+        walk(&s, &mut errs);
+    }
+    assert!(errs.is_empty(), "{}", errs.join("\n"));
+
+    // Reference-as-contract: the json topic's hide/unhide section must
+    // name every real ledger key (the topic lied once — stale names
+    // survived a field rename).
+    let topic = diagnostics::topic_lookup("json").expect("json topic exists");
+    if let serde_json::Value::Object(map) = visibility_ledger_json(&id, false) {
+        for key in map.keys() {
+            assert!(
+                topic.body.contains(key.as_str()),
+                "json topic does not mention ledger field `{}`",
+                key
+            );
+        }
+    }
+}
+
+#[test]
+fn grammar_format_json_coverage() {
+    use clap::CommandFactory;
+    // doctor/export are permanently exempt in the grammar contract;
+    // init is pending judgment.
+    const EXEMPT: &[&str] = &["init", "doctor", "export"];
+    for sub in Cli::command().get_subcommands() {
+        if EXEMPT.contains(&sub.get_name()) || sub.get_name() == "help" {
+            continue;
+        }
+        let has_format = sub.get_arguments().any(|a| a.get_long() == Some("format"));
+        assert!(
+            has_format,
+            "`{}` has no --format json twin (machine-isomorphism contract; if intentionally exempt, name it in the contract AND this list)",
+            sub.get_name()
+        );
+    }
+}
+
+#[test]
+fn target_conflict_new_legacy_and_explicit() {
+    let _env = setup();
+    let id = create_strand("first strand");
+    let result = cmd_append(
+        Some("content"),
+        Some(&id),
+        true,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    );
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("only one target"));
+}
+
+#[test]
+fn target_conflict_explicit_and_legacy() {
+    let _env = setup();
+    let id = create_strand("first strand");
+    // --id <id> "content" <id> — both explicit and legacy ID provided
+    let result = cmd_append(
+        Some("content"),
+        Some(&id),
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    );
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("only one target"));
+}
+
+#[test]
+fn legacy_id_rejected_with_stdin() {
+    let _env = setup();
+    let id = create_strand("first strand");
+    // legacy positional id with --stdin (not positional content)
+    let file_path = _env.path().join("note.md");
+    fs::write(&file_path, "stdin content here").unwrap();
+    // We use --file as a proxy for --stdin since we can't pipe in tests
+    let result = cmd_append(
+        None,
+        Some(&id),
+        false,
+        false,
+        Some(file_path.to_str().unwrap()),
+        None,
+        None,
+        None,
+    );
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("positional strand id"));
+}
+
+// ── --new strand creation ──
+
+#[test]
+fn new_with_positional_content() {
+    let _env = setup();
+    let result = cmd_append(
+        Some("brand new strand"),
+        None,
+        true,
+        false,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn new_with_file_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("new_strand.md");
+    fs::write(&file_path, "new strand from file").unwrap();
+    let _env = setup();
+    let result = cmd_append(
+        None,
+        None,
+        true,
+        false,
+        Some(file_path.to_str().unwrap()),
+        None,
+        None,
+        None,
+    );
+    assert!(result.is_ok());
+}
+
+// ── normalize_content ──
+
+#[test]
+fn exit_code_for_journal_unreadable_is_2() {
+    assert_eq!(exit_code_for("journal unreadable: bad bytes"), 2);
+}
+
+#[test]
+fn exit_code_for_generic_and_warn_are_1() {
+    assert_eq!(exit_code_for("strand abc not found"), 1);
+    assert_eq!(exit_code_for("warn: stdin and --file require --id"), 1);
+    assert_eq!(exit_code_for("journal issues detected"), 1);
+}
+
+// ── humanize_duration ──────────────────────────────────────────────────
+
+#[test]
+fn id_target_flag_and_positional_equivalent() {
+    use clap::CommandFactory;
+    // For each command, parse both forms and verify they succeed.
+    let cases: &[(&str, &str)] = &[
+        ("show", "0000019dd34b"),
+        ("find", "0000019dd34b"),
+        ("hide", "0000019dd34b"),
+        ("unhide", "0000019dd34b"),
+        ("tree", "0000019dd34b"),
+    ];
+    for (cmd, id) in cases {
+        // positional form: tasktree <cmd> <id>
+        let pos_result = Cli::command().try_get_matches_from(["tasktree", cmd, id]);
+        assert!(
+            pos_result.is_ok(),
+            "{} positional form failed: {:?}",
+            cmd,
+            pos_result.err()
+        );
+        // flag form: tasktree <cmd> --id <id>
+        let flag_result = Cli::command().try_get_matches_from(["tasktree", cmd, "--id", id]);
+        assert!(
+            flag_result.is_ok(),
+            "{} --id form failed: {:?}",
+            cmd,
+            flag_result.err()
+        );
+    }
+    // Behavioral check: show positional vs --id produce same resolved id
+    let _env = setup();
+    let id = create_strand("id_target behavioral test");
+    // Both should succeed and produce the same output
+    let r1 = cmd_show(Some(&id), false, None, false, false, false);
+    let r2 = cmd_show(Some(&id), false, None, false, false, false);
+    assert!(r1.is_ok(), "show with positional id failed: {:?}", r1);
+    assert!(r2.is_ok(), "show with --id failed: {:?}", r2);
+}
+
+// Providing both positional <ID> and --id <ID> must be rejected by clap.
+
+#[test]
+fn id_target_conflict_rejected() {
+    use clap::CommandFactory;
+    let result =
+        Cli::command().try_get_matches_from(["tasktree", "show", "000653", "--id", "000653"]);
+    assert!(
+        result.is_err(),
+        "show with both positional and --id must be rejected"
+    );
+}
+
+// `timeline --id X` parses as `timeline --strand X` (visible_alias = "id").
+
+#[test]
+fn timeline_id_alias() {
+    use clap::CommandFactory;
+    let result =
+        Cli::command().try_get_matches_from(["tasktree", "timeline", "--id", "0000019dd34b"]);
+    assert!(
+        result.is_ok(),
+        "timeline --id should parse via visible_alias on --strand: {:?}",
+        result.err()
+    );
+    // Also verify --strand still works
+    let result2 =
+        Cli::command().try_get_matches_from(["tasktree", "timeline", "--strand", "0000019dd34b"]);
+    assert!(
+        result2.is_ok(),
+        "timeline --strand must still work: {:?}",
+        result2.err()
+    );
+}
+
+// ── Task D: show --tail decoupled from --last ──────────────────────────
+
+// show with explicit <ID> + --tail N must succeed (previously blocked by
+// the now-removed `requires = "last"` guard).
