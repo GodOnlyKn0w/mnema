@@ -123,6 +123,238 @@ pub struct OrientTreeOutput {
     pub remind: String,
 }
 
+// ── command result JSON DTOs ───────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AddOutput<'a> {
+    pub(crate) id: String,
+    pub(crate) status: &'static str,
+    pub(crate) provenance: Option<&'a serde_json::Value>,
+    pub(crate) result: Option<OrientStrand>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SeenOffsetWarningOutput<'a> {
+    pub(crate) code: &'a str,
+    pub(crate) detail: &'a str,
+    pub(crate) seen_offset: usize,
+    pub(crate) strand_last_offset: usize,
+    pub(crate) seen_gap: usize,
+    pub(crate) catch_up: &'a str,
+}
+
+impl<'a> From<&'a crate::diagnostics::SeenOffsetWarning> for SeenOffsetWarningOutput<'a> {
+    fn from(warning: &'a crate::diagnostics::SeenOffsetWarning) -> Self {
+        SeenOffsetWarningOutput {
+            code: warning.code,
+            detail: &warning.detail,
+            seen_offset: warning.seen_offset,
+            strand_last_offset: warning.strand_last_offset,
+            seen_gap: warning.seen_gap,
+            catch_up: &warning.catch_up,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AppendOutput<'a> {
+    pub(crate) strand_id: &'a str,
+    pub(crate) append_id: &'a Option<String>,
+    pub(crate) content_preview: String,
+    pub(crate) provenance: &'a Option<serde_json::Value>,
+    pub(crate) seen_offset: Option<usize>,
+    pub(crate) seen_gap: Option<usize>,
+    pub(crate) warnings: Vec<SeenOffsetWarningOutput<'a>>,
+    pub(crate) result: Option<OrientStrand>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct LifecycleOutput {
+    pub(crate) strand_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) disposition: Option<String>,
+    pub(crate) lifecycle: String,
+    pub(crate) status: &'static str,
+    pub(crate) result: Option<OrientStrand>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CheckpointErrorOutput<'a> {
+    pub(crate) ok: bool,
+    pub(crate) error: &'a str,
+    pub(crate) requested_strand: &'a Option<String>,
+    pub(crate) resolved_strand: &'a Option<String>,
+    pub(crate) journal_appended: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct CheckpointWarningOutput {
+    pub(crate) code: String,
+    pub(crate) detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) seen_offset: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) strand_last_offset: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) seen_gap: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) catch_up: Option<String>,
+}
+#[derive(Debug, Serialize)]
+pub(crate) struct CheckpointOutput<'a> {
+    pub(crate) ok: bool,
+    pub(crate) strand: String,
+    pub(crate) resolved_strand: &'a str,
+    pub(crate) resolved_by: &'a str,
+    pub(crate) observed_entries_before_append: usize,
+    pub(crate) shown_entries: usize,
+    pub(crate) action: &'a str,
+    pub(crate) append_id: &'a Option<String>,
+    pub(crate) journal_appended: bool,
+    pub(crate) diagnostics_count: usize,
+    pub(crate) result: Option<OrientStrand>,
+    pub(crate) staleness_seconds: Option<i64>,
+    pub(crate) journal_delta: usize,
+    pub(crate) seen_offset: Option<usize>,
+    pub(crate) seen_gap: Option<usize>,
+    pub(crate) catch_up: Option<&'a str>,
+    pub(crate) warnings: &'a [CheckpointWarningOutput],
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FindOutput {
+    pub(crate) id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct LinkOutput {
+    pub(crate) source_id: String,
+    pub(crate) target_id: String,
+    pub(crate) edge_type: String,
+    pub(crate) status: &'static str,
+    pub(crate) result: LinkResultOutput,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct LinkResultOutput {
+    pub(crate) source: Option<OrientStrand>,
+    pub(crate) target: Option<OrientStrand>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct UnlinkOutput {
+    pub(crate) source_id: String,
+    pub(crate) target_id: String,
+    pub(crate) edge_type: String,
+    pub(crate) status: &'static str,
+    pub(crate) unlinked: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct VisibilityLedgerOutput {
+    pub(crate) strand_id: String,
+    pub(crate) status: &'static str,
+    pub(crate) noop: bool,
+    pub(crate) active_count: usize,
+    pub(crate) closed_count: usize,
+    pub(crate) hidden_count: usize,
+    pub(crate) result: Option<OrientStrand>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct BindOutput {
+    pub(crate) binding_id: String,
+    pub(crate) subject_type: String,
+    pub(crate) subject_id: String,
+    pub(crate) strand_id: String,
+    pub(crate) result: Option<OrientStrand>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CurrentOutput {
+    pub(crate) binding_id: String,
+    pub(crate) subject_type: String,
+    pub(crate) subject_id: String,
+    pub(crate) strand_id: String,
+    pub(crate) ts: String,
+}
+// ── context --format json ──────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ContextOutput {
+    pub(crate) strands: Vec<ContextStrandOutput>,
+}
+
+impl From<&crate::projection::ContextView> for ContextOutput {
+    fn from(view: &crate::projection::ContextView) -> Self {
+        ContextOutput {
+            strands: view.strands.iter().map(ContextStrandOutput::from).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FoldedCountsOutput {
+    pub(crate) progress: usize,
+    pub(crate) observed: usize,
+    pub(crate) check: usize,
+}
+
+impl From<&crate::projection::FoldedCounts> for FoldedCountsOutput {
+    fn from(counts: &crate::projection::FoldedCounts) -> Self {
+        FoldedCountsOutput {
+            progress: counts.progress,
+            observed: counts.observed,
+            check: counts.check,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ContextStrandOutput {
+    pub(crate) id: String,
+    pub(crate) covers: Vec<String>,
+    pub(crate) entries: Vec<ContextEntryOutput>,
+    pub(crate) friction_folded: usize,
+    pub(crate) friction_paired: usize,
+    pub(crate) folded_counts: FoldedCountsOutput,
+}
+
+impl From<&crate::projection::ContextStrand> for ContextStrandOutput {
+    fn from(strand: &crate::projection::ContextStrand) -> Self {
+        ContextStrandOutput {
+            id: strand.id.clone(),
+            covers: strand.covers.clone(),
+            entries: strand
+                .entries
+                .iter()
+                .map(ContextEntryOutput::from)
+                .collect(),
+            friction_folded: strand.friction_folded,
+            friction_paired: strand.friction_paired,
+            folded_counts: FoldedCountsOutput::from(&strand.folded_counts),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ContextEntryOutput {
+    pub(crate) marker: String,
+    pub(crate) content: String,
+    pub(crate) offset: usize,
+    pub(crate) ts: String,
+}
+
+impl From<&crate::projection::ContextEntry> for ContextEntryOutput {
+    fn from(entry: &crate::projection::ContextEntry) -> Self {
+        ContextEntryOutput {
+            marker: entry.marker.clone(),
+            content: entry.content.clone(),
+            offset: entry.offset,
+            ts: entry.ts.clone(),
+        }
+    }
+}
 // ── list --format json ─────────────────────────────────────
 
 /// External contract for `list --format json`. One element in the `strands` array.

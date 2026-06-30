@@ -3,10 +3,11 @@
 /// Moved from main.rs (Layer 4d-manage refactor).
 use crate::event::{self, Event, find_strand, resolve_id};
 use crate::journal::*;
+use crate::output;
 use crate::util::{parse_provenance_arg, shorten};
 use crate::{
-    print_handle_line, print_visibility_ledger,
-    strand_card_fresh, strand_card_fresh_with_state, visibility_ledger_json,
+    print_handle_line, print_visibility_ledger, strand_card_fresh, strand_card_fresh_with_state,
+    visibility_ledger_json,
 };
 use serde_json::json;
 use std::io::{Read, Write};
@@ -18,7 +19,10 @@ pub(crate) fn cmd_find(id: &str, format_json: bool) -> Result<(), String> {
     match find_strand(&events, id) {
         Some(full_id) => {
             if format_json {
-                println!("{}", json!({"id": full_id}));
+                println!(
+                    "{}",
+                    serde_json::to_string(&output::FindOutput { id: full_id }).unwrap()
+                );
             } else {
                 println!("{}", full_id);
             }
@@ -66,25 +70,24 @@ pub(crate) fn cmd_link(
     let event = event::make_edge_linked(&src_id, &tgt_id, Some(etype), provenance);
     with_journal_write_lock(|journal| append_event_unlocked(journal, &event))?;
     if format_json {
-        let src_card = strand_card_fresh(&src_id);
-        let src_val = src_card.as_ref().and_then(|c| serde_json::to_value(c).ok());
-        let tgt_card = strand_card_fresh(&tgt_id);
-        let tgt_val = tgt_card.as_ref().and_then(|c| serde_json::to_value(c).ok());
-        println!(
-            "{}",
-            json!({
-                "source_id": src_id,
-                "target_id": tgt_id,
-                "edge_type": etype,
-                "status": "ok",
-                "result": {
-                    "source": src_val,
-                    "target": tgt_val,
-                },
-            })
-        );
+        let output = output::LinkOutput {
+            source_id: src_id.clone(),
+            target_id: tgt_id.clone(),
+            edge_type: etype.to_string(),
+            status: "ok",
+            result: output::LinkResultOutput {
+                source: strand_card_fresh(&src_id),
+                target: strand_card_fresh(&tgt_id),
+            },
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
     } else {
-        println!("linked {} -> {} ({})", shorten(&src_id), shorten(&tgt_id), etype);
+        println!(
+            "linked {} -> {} ({})",
+            shorten(&src_id),
+            shorten(&tgt_id),
+            etype
+        );
         if let Some((card, state)) = strand_card_fresh_with_state(&src_id) {
             print_handle_line(&card, &state);
         }
@@ -129,18 +132,21 @@ pub(crate) fn cmd_unlink(
     let event = event::make_edge_unlinked(&src_id, &tgt_id, Some(etype), provenance);
     with_journal_write_lock(|journal| append_event_unlocked(journal, &event))?;
     if format_json {
-        println!(
-            "{}",
-            json!({
-                "source_id": src_id,
-                "target_id": tgt_id,
-                "edge_type": etype,
-                "status": "ok",
-                "unlinked": true,
-            })
-        );
+        let output = output::UnlinkOutput {
+            source_id: src_id.clone(),
+            target_id: tgt_id.clone(),
+            edge_type: etype.to_string(),
+            status: "ok",
+            unlinked: true,
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
     } else {
-        println!("unlinked {} -x-> {} ({})", shorten(&src_id), shorten(&tgt_id), etype);
+        println!(
+            "unlinked {} -x-> {} ({})",
+            shorten(&src_id),
+            shorten(&tgt_id),
+            etype
+        );
     }
     Ok(())
 }
@@ -265,8 +271,8 @@ pub(crate) fn read_stdin_binding() -> Result<(String, String, String), String> {
     if trimmed.is_empty() {
         return Err("stdin is empty".to_string());
     }
-    let v: serde_json::Value = serde_json::from_str(trimmed)
-        .map_err(|e| format!("stdin is not valid JSON: {}", e))?;
+    let v: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|e| format!("stdin is not valid JSON: {}", e))?;
     let obj = v
         .as_object()
         .ok_or_else(|| "stdin JSON must be an object".to_string())?;
@@ -334,18 +340,14 @@ pub(crate) fn cmd_bind(
     with_journal_write_lock(|journal| append_event_unlocked(journal, &event))?;
 
     if format_json {
-        let card = strand_card_fresh(&full_strand);
-        let card_val = card.as_ref().and_then(|c| serde_json::to_value(c).ok());
-        println!(
-            "{}",
-            json!({
-                "binding_id": binding_id,
-                "subject_type": st,
-                "subject_id": sid,
-                "strand_id": full_strand,
-                "result": card_val,
-            })
-        );
+        let output = output::BindOutput {
+            binding_id: binding_id.clone(),
+            subject_type: st.clone(),
+            subject_id: sid.clone(),
+            strand_id: full_strand.clone(),
+            result: strand_card_fresh(&full_strand),
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
     } else {
         println!("{}", binding_id);
         if let Some((card, state)) = strand_card_fresh_with_state(&full_strand) {
@@ -397,25 +399,20 @@ pub(crate) fn cmd_current(
     let (binding_id, ts, strand_id) = match latest {
         Some(v) => v,
         None => {
-            eprintln!(
-                "no binding for subject_type={} subject_id={}",
-                st, sid
-            );
+            eprintln!("no binding for subject_type={} subject_id={}", st, sid);
             return Err("no current binding".to_string());
         }
     };
 
     if format_json {
-        println!(
-            "{}",
-            json!({
-                "binding_id": binding_id,
-                "subject_type": st,
-                "subject_id": sid,
-                "strand_id": strand_id,
-                "ts": ts,
-            })
-        );
+        let output = output::CurrentOutput {
+            binding_id,
+            subject_type: st.to_string(),
+            subject_id: sid.to_string(),
+            strand_id: strand_id.clone(),
+            ts,
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
     } else {
         println!("{}", strand_id);
     }
@@ -433,8 +430,8 @@ pub(crate) fn cmd_export(out: &str) -> Result<(), String> {
         }
     }
 
-    let journal_bytes = std::fs::read(&journal_path)
-        .map_err(|e| format!("cannot read journal: {}", e))?;
+    let journal_bytes =
+        std::fs::read(&journal_path).map_err(|e| format!("cannot read journal: {}", e))?;
     let journal_text = String::from_utf8_lossy(&journal_bytes);
     let line_count = journal_text.lines().count();
 
@@ -456,6 +453,9 @@ pub(crate) fn cmd_export(out: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot write journal to output: {}", e))?;
 
     let export_lines = line_count + 1;
-    println!("Exported {} lines (1 metadata + {} journal) to {}", export_lines, line_count, out);
+    println!(
+        "Exported {} lines (1 metadata + {} journal) to {}",
+        export_lines, line_count, out
+    );
     Ok(())
 }

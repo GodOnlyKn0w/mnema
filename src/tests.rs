@@ -14,6 +14,7 @@ use crate::markers::{
 use crate::output;
 use crate::output::ORIENT_REMIND;
 use crate::projection;
+use crate::projection::{build_context_strands, pair_frictions};
 use crate::tree;
 use crate::util::*;
 use std::fs;

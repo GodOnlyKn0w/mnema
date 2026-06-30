@@ -200,6 +200,352 @@ pub fn build_orient_view(
         hidden_count,
     }
 }
+// ── Context view ───────────────────────────────────────────
+
+#[derive(Debug)]
+pub(crate) struct FrictionPairing {
+    pub(crate) paired_friction: std::collections::HashSet<usize>,
+    pub(crate) paired_fixed: std::collections::HashSet<usize>,
+    pub(crate) scar_content: std::collections::HashMap<usize, String>,
+    pub(crate) dangling_fixes: Vec<(usize, String)>,
+}
+
+pub(crate) fn pair_frictions(log: &[LogEntry]) -> FrictionPairing {
+    use std::collections::{HashMap, HashSet};
+
+    let mut friction_by_append_id: Vec<(String, usize)> = Vec::new();
+
+    let mut paired_friction: HashSet<usize> = HashSet::new();
+    let mut paired_fixed: HashSet<usize> = HashSet::new();
+    let mut scar_content: HashMap<usize, String> = HashMap::new();
+    let mut dangling_fixes: Vec<(usize, String)> = Vec::new();
+
+    for (idx, entry) in log.iter().enumerate() {
+        if entry.content.starts_with("[friction]") {
+            if let Some(ref aid) = entry.append_id {
+                if !aid.is_empty() {
+                    friction_by_append_id.push((aid.clone(), idx));
+                }
+            }
+        }
+    }
+
+    for (idx, entry) in log.iter().enumerate() {
+        if !entry.content.starts_with("[fixed]") {
+            continue;
+        }
+
+        let fixes_prefix: Option<String> = {
+            let body = entry.content.trim_start_matches("[fixed]").trim();
+            let mut found = None;
+            for token in body.split_whitespace() {
+                if let Some(prefix) = token.strip_prefix("fixes=") {
+                    if prefix.len() >= 8 {
+                        found = Some(prefix.to_string());
+                    }
+                    break;
+                }
+            }
+            found
+        };
+
+        let prefix = match fixes_prefix {
+            None => continue,
+            Some(p) => p,
+        };
+
+        let matched: Option<usize> = friction_by_append_id.iter().find_map(|(aid, fidx)| {
+            if aid.starts_with(prefix.as_str()) && !paired_friction.contains(fidx) {
+                Some(*fidx)
+            } else {
+                None
+            }
+        });
+
+        match matched {
+            Some(fidx) => {
+                let friction_body = log[fidx].content.trim_start_matches("[friction]").trim();
+                let truncated: String = friction_body.chars().take(50).collect();
+                let scar = format!("{} → fixed", truncated);
+
+                paired_friction.insert(fidx);
+                paired_fixed.insert(idx);
+                scar_content.insert(fidx, scar);
+            }
+            None => {
+                dangling_fixes.push((idx, prefix));
+            }
+        }
+    }
+
+    FrictionPairing {
+        paired_friction,
+        paired_fixed,
+        scar_content,
+        dangling_fixes,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContextView {
+    pub(crate) strands: Vec<ContextStrand>,
+    pub(crate) warnings: Vec<ContextWarning>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContextWarning {
+    pub(crate) code: &'static str,
+    pub(crate) strand_id: String,
+    pub(crate) fixes_prefix: String,
+    pub(crate) entry_offset: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FoldedCounts {
+    pub(crate) progress: usize,
+    pub(crate) observed: usize,
+    pub(crate) check: usize,
+}
+
+impl FoldedCounts {
+    pub(crate) fn zero() -> Self {
+        FoldedCounts {
+            progress: 0,
+            observed: 0,
+            check: 0,
+        }
+    }
+    pub(crate) fn any_folded(&self) -> bool {
+        self.progress > 0 || self.observed > 0 || self.check > 0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContextStrand {
+    pub(crate) id: String,
+    pub(crate) covers: Vec<String>,
+    pub(crate) entries: Vec<ContextEntry>,
+    pub(crate) friction_folded: usize,
+    pub(crate) friction_paired: usize,
+    pub(crate) folded_counts: FoldedCounts,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContextEntry {
+    pub(crate) marker: String,
+    pub(crate) content: String,
+    pub(crate) offset: usize,
+    pub(crate) ts: String,
+}
+
+pub(crate) fn build_context_view(
+    strands: &[ProjectedStrand],
+    target_type: &str,
+    covers: &[String],
+    since_offset: Option<usize>,
+    exclude_friction: bool,
+    include_observations: bool,
+) -> ContextView {
+    let mut matching: Vec<&ProjectedStrand> = strands
+        .iter()
+        .filter(|s| s.strand_type.as_deref() == Some(target_type))
+        .collect();
+
+    if let Some(so) = since_offset {
+        matching.retain(|s| s.last_offset() > so);
+    }
+
+    let mut output_strands: Vec<ContextStrand> = Vec::new();
+    let mut warnings: Vec<ContextWarning> = Vec::new();
+    const OBS_MARKERS: [&str; 3] = ["[progress]", "[observed]", "[check]"];
+
+    for strand in &matching {
+        let covers_list: Vec<String> = strand
+            .log
+            .iter()
+            .filter(|e| e.content.starts_with("[covers]"))
+            .map(|e| e.content.trim_start_matches("[covers]").trim().to_string())
+            .collect();
+
+        if !covers.is_empty() {
+            let has_match = covers_list
+                .iter()
+                .any(|c| covers.iter().any(|p| c.contains(p.as_str())));
+            if !has_match {
+                continue;
+            }
+        }
+
+        let strand_is_live = strand.state() == "registered";
+        let mut friction_folded = 0usize;
+
+        let pairing = if strand_is_live && !exclude_friction {
+            pair_frictions(&strand.log)
+        } else {
+            FrictionPairing {
+                paired_friction: std::collections::HashSet::new(),
+                paired_fixed: std::collections::HashSet::new(),
+                scar_content: std::collections::HashMap::new(),
+                dangling_fixes: Vec::new(),
+            }
+        };
+        for (fix_idx, prefix) in &pairing.dangling_fixes {
+            let fix_entry = &strand.log[*fix_idx];
+            warnings.push(ContextWarning {
+                code: "W075",
+                strand_id: strand.id.clone(),
+                fixes_prefix: prefix.clone(),
+                entry_offset: fix_entry.offset,
+            });
+        }
+        let friction_paired = pairing.paired_friction.len();
+
+        let mut last_obs_idx: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        if !include_observations {
+            for (idx, entry) in strand.log.iter().enumerate() {
+                for &om in &OBS_MARKERS {
+                    if entry.content.starts_with(om) {
+                        last_obs_idx.insert(om, idx);
+                    }
+                }
+            }
+        }
+
+        let mut folded_counts = FoldedCounts::zero();
+
+        let entries: Vec<ContextEntry> = strand
+            .log
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, e)| {
+                if e.content.starts_with("[friction]") {
+                    if exclude_friction {
+                        return None;
+                    }
+                    if !strand_is_live {
+                        friction_folded += 1;
+                        return None;
+                    }
+                    if pairing.paired_friction.contains(&idx) {
+                        let scar = pairing
+                            .scar_content
+                            .get(&idx)
+                            .cloned()
+                            .unwrap_or_else(|| "→ fixed".to_string());
+                        return Some(ContextEntry {
+                            marker: "[friction]".to_string(),
+                            content: scar,
+                            offset: e.offset,
+                            ts: e.ts.clone(),
+                        });
+                    }
+                    let (marker, content) = crate::markers::split_marker(&e.content);
+                    return Some(ContextEntry {
+                        marker: marker.to_string(),
+                        content: content.to_string(),
+                        offset: e.offset,
+                        ts: e.ts.clone(),
+                    });
+                }
+
+                if e.content.starts_with("[fixed]") {
+                    if pairing.paired_fixed.contains(&idx) {
+                        return None;
+                    }
+                    let (marker, content) = crate::markers::split_marker(&e.content);
+                    return Some(ContextEntry {
+                        marker: marker.to_string(),
+                        content: content.to_string(),
+                        offset: e.offset,
+                        ts: e.ts.clone(),
+                    });
+                }
+
+                if e.content.starts_with("[covers]") {
+                    return None;
+                }
+
+                if !include_observations {
+                    for &om in &OBS_MARKERS {
+                        if e.content.starts_with(om) {
+                            let tail_idx = last_obs_idx.get(om).copied().unwrap_or(idx);
+                            if idx != tail_idx {
+                                match om {
+                                    "[progress]" => folded_counts.progress += 1,
+                                    "[observed]" => folded_counts.observed += 1,
+                                    "[check]" => folded_counts.check += 1,
+                                    _ => {}
+                                }
+                                return None;
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                let (marker, content) = crate::markers::split_marker(&e.content);
+                Some(ContextEntry {
+                    marker: marker.to_string(),
+                    content: content.to_string(),
+                    offset: e.offset,
+                    ts: e.ts.clone(),
+                })
+            })
+            .collect();
+
+        if entries.is_empty() {
+            continue;
+        }
+
+        let mut unique_covers: Vec<String> = Vec::new();
+        for c in &covers_list {
+            if !unique_covers.contains(c) {
+                unique_covers.push(c.clone());
+            }
+        }
+
+        output_strands.push(ContextStrand {
+            id: strand.id.clone(),
+            covers: unique_covers,
+            entries,
+            friction_folded,
+            friction_paired,
+            folded_counts,
+        });
+    }
+
+    output_strands.sort_by(|a, b| {
+        let ts_a = a.entries.last().map(|e| e.ts.as_str()).unwrap_or("");
+        let ts_b = b.entries.last().map(|e| e.ts.as_str()).unwrap_or("");
+        ts_b.cmp(ts_a)
+    });
+
+    ContextView {
+        strands: output_strands,
+        warnings,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn build_context_strands(
+    strands: &[ProjectedStrand],
+    target_type: &str,
+    covers: &[String],
+    since_offset: Option<usize>,
+    exclude_friction: bool,
+    include_observations: bool,
+) -> Vec<ContextStrand> {
+    build_context_view(
+        strands,
+        target_type,
+        covers,
+        since_offset,
+        exclude_friction,
+        include_observations,
+    )
+    .strands
+}
 // ── Entry point: project_raw → structured ──────────────────
 
 /// Project raw event stream into a Vec<ProjectedStrand>.

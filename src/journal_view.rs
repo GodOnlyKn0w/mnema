@@ -1,12 +1,12 @@
-//! Journal-backed view adapter.
+//! CLI adapter helper for fresh post-write views.
 //!
-//! This module is the seam between append-only journal state and pure render
-//! functions. `output` builds contract values; this module reads
-//! the journal when callers need a fresh post-write view.
+//! This module reads the journal after write/manage commands and maps the fresh
+//! projection to contract values or human text helpers. It is intentionally an
+//! outer adapter: durable facts stay in `journal`, derived meaning in
+//! `projection`, and public DTO shape in `output`.
 
 use crate::journal::{ensure_journal, read_events_lossy};
 use crate::{output, projection};
-use serde_json::json;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct VisibilityLedger {
@@ -61,21 +61,19 @@ pub(crate) fn print_visibility_ledger() {
 }
 
 pub(crate) fn visibility_ledger_json(strand_id: &str, noop: bool) -> serde_json::Value {
-    let card_val = strand_card_fresh(strand_id)
-        .as_ref()
-        .and_then(|c| serde_json::to_value(c).ok());
     let ledger = visibility_ledger().unwrap_or(VisibilityLedger {
         active_count: 0,
         closed_count: 0,
         hidden_count: 0,
     });
-    json!({
-        "strand_id": strand_id,
-        "status": "ok",
-        "noop": noop,
-        "active_count": ledger.active_count,
-        "closed_count": ledger.closed_count,
-        "hidden_count": ledger.hidden_count,
-        "result": card_val,
-    })
+    let output = output::VisibilityLedgerOutput {
+        strand_id: strand_id.to_string(),
+        status: "ok",
+        noop,
+        active_count: ledger.active_count,
+        closed_count: ledger.closed_count,
+        hidden_count: ledger.hidden_count,
+        result: strand_card_fresh(strand_id),
+    };
+    serde_json::to_value(output).unwrap_or(serde_json::Value::Null)
 }

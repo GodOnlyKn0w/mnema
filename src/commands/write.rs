@@ -13,7 +13,7 @@ use crate::journal::{
 use crate::markers::{
     is_closing_annotation_marker, is_known_marker_str, suggest_marker, validate_lifecycle_marker,
 };
-use crate::output::OrientStrand;
+use crate::output::{self, OrientStrand};
 use crate::projection;
 use crate::util::{
     humanize_duration, looks_like_strand_id, parse_event_ts, parse_provenance_arg,
@@ -22,7 +22,6 @@ use crate::util::{
 use crate::{
     print_card_with_state, print_handle_line, strand_card_fresh, strand_card_fresh_with_state,
 };
-use serde_json::json;
 
 /// Strip at most one trailing newline (\n or \r\n).
 /// Preserves leading whitespace, interior newlines, code blocks.
@@ -132,15 +131,13 @@ pub(crate) fn cmd_add(
         Err(e) => return Err(e),
     };
     if format_json {
-        let card = strand_card_fresh(&id);
-        let card_val = card
-            .as_ref()
-            .map(|c| serde_json::to_value(c).ok())
-            .flatten();
-        println!(
-            "{}",
-            json!({"id": id, "status": "ok", "provenance": provenance, "result": card_val})
-        );
+        let output = output::AddOutput {
+            id: id.clone(),
+            status: "ok",
+            provenance: provenance.as_ref(),
+            result: strand_card_fresh(&id),
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
     } else {
         println!("{}", id);
         if let Some((card, state)) = strand_card_fresh_with_state(&id) {
@@ -463,38 +460,22 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
     }
 
     if format == Some("json") {
-        let card_val = outcome
-            .card_state
-            .as_ref()
-            .and_then(|(card, _)| serde_json::to_value(card).ok());
-        let warnings_json: Vec<serde_json::Value> = outcome
+        let warnings: Vec<output::SeenOffsetWarningOutput<'_>> = outcome
             .seen_warning
             .iter()
-            .map(|w| {
-                json!({
-                    "code": w.code,
-                    "detail": w.detail,
-                    "seen_offset": w.seen_offset,
-                    "strand_last_offset": w.strand_last_offset,
-                    "seen_gap": w.seen_gap,
-                    "catch_up": w.catch_up,
-                })
-            })
+            .map(output::SeenOffsetWarningOutput::from)
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "strand_id": outcome.strand_id,
-                "append_id": outcome.append_id,
-                "content_preview": outcome.stored_content.chars().take(120).collect::<String>(),
-                "provenance": outcome.provenance,
-                "seen_offset": outcome.seen_offset,
-                "seen_gap": outcome.seen_warning.as_ref().map(|w| w.seen_gap),
-                "warnings": warnings_json,
-                "result": card_val,
-            }))
-            .unwrap()
-        );
+        let output = output::AppendOutput {
+            strand_id: &outcome.strand_id,
+            append_id: &outcome.append_id,
+            content_preview: outcome.stored_content.chars().take(120).collect::<String>(),
+            provenance: &outcome.provenance,
+            seen_offset: outcome.seen_offset,
+            seen_gap: outcome.seen_warning.as_ref().map(|w| w.seen_gap),
+            warnings,
+            result: outcome.card_state.as_ref().map(|(card, _)| card.clone()),
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
     } else {
         let prod = outcome
             .provenance
@@ -547,21 +528,14 @@ pub(crate) fn cmd_close(
     let close_event = event::make_strand_closed(&strand_id, disp, None);
     with_journal_write_lock(|journal| append_event_unlocked(journal, &close_event))?;
     if format_json {
-        let card_val = strand_card_fresh(&strand_id)
-            .as_ref()
-            .map(|c| serde_json::to_value(c).ok())
-            .flatten();
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "strand_id": strand_id,
-                "disposition": disp,
-                "lifecycle": format!("closed:{}", disp),
-                "status": "ok",
-                "result": card_val,
-            }))
-            .unwrap()
-        );
+        let output = output::LifecycleOutput {
+            strand_id: strand_id.clone(),
+            disposition: Some(disp.to_string()),
+            lifecycle: format!("closed:{}", disp),
+            status: "ok",
+            result: strand_card_fresh(&strand_id),
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
     } else {
         let lifecycle = format!("closed:{}", disp);
         if let Some((card, _)) = strand_card_fresh_with_state(&strand_id) {
@@ -589,20 +563,14 @@ pub(crate) fn cmd_reopen(id: &str, format_json: bool) -> Result<(), String> {
     let reopen_event = event::make_strand_reopened(&strand_id, None);
     with_journal_write_lock(|journal| append_event_unlocked(journal, &reopen_event))?;
     if format_json {
-        let card_val = strand_card_fresh(&strand_id)
-            .as_ref()
-            .map(|c| serde_json::to_value(c).ok())
-            .flatten();
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "strand_id": strand_id,
-                "lifecycle": "registered",
-                "status": "ok",
-                "result": card_val,
-            }))
-            .unwrap()
-        );
+        let output = output::LifecycleOutput {
+            strand_id: strand_id.clone(),
+            disposition: None,
+            lifecycle: "registered".to_string(),
+            status: "ok",
+            result: strand_card_fresh(&strand_id),
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
     } else {
         if let Some((card, state)) = strand_card_fresh_with_state(&strand_id) {
             print_handle_line(&card, &state);
@@ -624,16 +592,14 @@ pub(crate) struct CheckpointFailure {
 }
 
 pub(crate) fn checkpoint_error_json(failure: &CheckpointFailure) {
-    println!(
-        "{}",
-        json!({
-            "ok": false,
-            "error": failure.message,
-            "requested_strand": failure.requested_strand,
-            "resolved_strand": failure.resolved_strand,
-            "journal_appended": failure.journal_appended,
-        })
-    );
+    let output = output::CheckpointErrorOutput {
+        ok: false,
+        error: &failure.message,
+        requested_strand: &failure.requested_strand,
+        resolved_strand: &failure.resolved_strand,
+        journal_appended: failure.journal_appended,
+    };
+    println!("{}", serde_json::to_string(&output).unwrap());
 }
 
 pub(crate) fn resolve_most_recent_strand(
@@ -682,7 +648,7 @@ pub(crate) struct CheckpointPlan {
     pub(crate) seen_offset: Option<usize>,
     pub(crate) seen_gap: Option<usize>,
     pub(crate) catch_up: Option<String>,
-    pub(crate) warnings: Vec<serde_json::Value>,
+    pub(crate) warnings: Vec<output::CheckpointWarningOutput>,
     pub(crate) warning_lines: Vec<(&'static str, String)>,
     pub(crate) diagnostics_count: usize,
 }
@@ -817,22 +783,36 @@ pub(crate) fn plan_checkpoint(
     let mut warnings = Vec::new();
     let mut warning_lines = Vec::new();
     if let Some((code, detail)) = w070 {
-        warnings.push(json!({"code": code, "detail": detail}));
+        warnings.push(output::CheckpointWarningOutput {
+            code: code.to_string(),
+            detail: detail.clone(),
+            seen_offset: None,
+            strand_last_offset: None,
+            seen_gap: None,
+            catch_up: None,
+        });
         warning_lines.push((code, detail));
     }
     if let Some((code, detail)) = w071 {
-        warnings.push(json!({"code": code, "detail": detail}));
+        warnings.push(output::CheckpointWarningOutput {
+            code: code.to_string(),
+            detail: detail.clone(),
+            seen_offset: None,
+            strand_last_offset: None,
+            seen_gap: None,
+            catch_up: None,
+        });
         warning_lines.push((code, detail));
     }
     if let Some(w) = &w076 {
-        warnings.push(json!({
-            "code": w.code,
-            "detail": w.detail,
-            "seen_offset": w.seen_offset,
-            "strand_last_offset": w.strand_last_offset,
-            "seen_gap": w.seen_gap,
-            "catch_up": w.catch_up,
-        }));
+        warnings.push(output::CheckpointWarningOutput {
+            code: w.code.to_string(),
+            detail: w.detail.clone(),
+            seen_offset: Some(w.seen_offset),
+            strand_last_offset: Some(w.strand_last_offset),
+            seen_gap: Some(w.seen_gap),
+            catch_up: Some(w.catch_up.clone()),
+        });
         warning_lines.push((w.code, w.detail.clone()));
     }
 
@@ -889,37 +869,26 @@ pub(crate) fn checkpoint_outcome(plan: CheckpointPlan) -> CheckpointOutcome {
 pub(crate) fn render_checkpoint_outcome(outcome: &CheckpointOutcome, format_json: bool) {
     let plan = &outcome.plan;
     if format_json {
-        let card_val = outcome
-            .card
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok());
-        let catch_up_val = plan
-            .catch_up
-            .as_ref()
-            .map(|s| json!(s))
-            .unwrap_or(serde_json::Value::Null);
-        println!(
-            "{}",
-            json!({
-                "ok": true,
-                "strand": shorten(&plan.strand_id),
-                "resolved_strand": plan.strand_id,
-                "resolved_by": plan.resolved_by,
-                "observed_entries_before_append": plan.observed_entries_before_append,
-                "shown_entries": plan.shown_entries.len(),
-                "action": plan.action,
-                "append_id": plan.append_id,
-                "journal_appended": true,
-                "diagnostics_count": plan.diagnostics_count,
-                "result": card_val,
-                "staleness_seconds": plan.staleness_seconds,
-                "journal_delta": plan.journal_delta,
-                "seen_offset": plan.seen_offset,
-                "seen_gap": plan.seen_gap,
-                "catch_up": catch_up_val,
-                "warnings": plan.warnings,
-            })
-        );
+        let output = output::CheckpointOutput {
+            ok: true,
+            strand: shorten(&plan.strand_id),
+            resolved_strand: &plan.strand_id,
+            resolved_by: plan.resolved_by,
+            observed_entries_before_append: plan.observed_entries_before_append,
+            shown_entries: plan.shown_entries.len(),
+            action: &plan.action,
+            append_id: &plan.append_id,
+            journal_appended: true,
+            diagnostics_count: plan.diagnostics_count,
+            result: outcome.card.clone(),
+            staleness_seconds: plan.staleness_seconds,
+            journal_delta: plan.journal_delta,
+            seen_offset: plan.seen_offset,
+            seen_gap: plan.seen_gap,
+            catch_up: plan.catch_up.as_deref(),
+            warnings: &plan.warnings,
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
         return;
     }
 
