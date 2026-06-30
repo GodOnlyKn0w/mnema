@@ -303,3 +303,105 @@ pub fn audit_journal(
             .collect(),
     }
 }
+
+#[derive(Debug, Clone)]
+pub enum DoctorPreviousState {
+    FirstRun,
+    Unreadable,
+    Invalid,
+    LineCount(usize),
+}
+
+#[derive(Debug, Clone)]
+pub struct DoctorJournalReport {
+    pub total_lines: usize,
+    pub corrupted: usize,
+    pub orphans: Vec<String>,
+    pub total_strands: usize,
+    pub strands_with_events_count: usize,
+    pub noise_strands_count: usize,
+    pub git_head_count: usize,
+    pub timeline_status: String,
+    pub timeline_warning: bool,
+    pub audit: JournalAudit,
+}
+
+impl DoctorJournalReport {
+    pub fn has_issues(&self) -> bool {
+        self.corrupted > 0
+            || !self.orphans.is_empty()
+            || self.timeline_warning
+            || self.audit.lint_count() > 0
+            || !self.audit.diagnostics.is_empty()
+    }
+}
+
+pub fn build_doctor_journal_report(
+    events: &[crate::event::Event],
+    total_lines: usize,
+    corrupted: usize,
+    git_head_count: usize,
+    previous_state: DoctorPreviousState,
+    now: chrono::DateTime<chrono::Utc>,
+) -> DoctorJournalReport {
+    use crate::event::Event;
+    use std::collections::{HashMap, HashSet};
+
+    let mut created_ids: HashSet<String> = HashSet::new();
+    let mut appended_ids: HashSet<String> = HashSet::new();
+    let mut strand_event_counts: HashMap<String, usize> = HashMap::new();
+    for event in events {
+        match event {
+            Event::StrandCreated { id, .. } => {
+                created_ids.insert(id.clone());
+            }
+            Event::LogAppended { id, .. } => {
+                appended_ids.insert(id.clone());
+                *strand_event_counts.entry(id.clone()).or_insert(0) += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let mut orphans: Vec<String> = appended_ids
+        .iter()
+        .filter(|id| !created_ids.contains(*id))
+        .cloned()
+        .collect();
+    orphans.sort();
+
+    let timeline_status = match previous_state {
+        DoctorPreviousState::FirstRun => "monotonic: yes (first run, no previous state)".to_string(),
+        DoctorPreviousState::Unreadable => "monotonic: yes (cannot read previous state)".to_string(),
+        DoctorPreviousState::Invalid => "monotonic: yes (no previous state)".to_string(),
+        DoctorPreviousState::LineCount(previous) => {
+            if total_lines < previous {
+                format!("warning: {}->{} jump detected (lines decreased)", previous, total_lines)
+            } else if total_lines > previous {
+                format!("monotonic: yes ({}->{})", previous, total_lines)
+            } else {
+                "monotonic: yes (unchanged)".to_string()
+            }
+        }
+    };
+    let timeline_warning = timeline_status.contains("warning");
+
+    DoctorJournalReport {
+        total_lines,
+        corrupted,
+        orphans,
+        total_strands: created_ids.len(),
+        strands_with_events_count: created_ids
+            .iter()
+            .filter(|id| strand_event_counts.contains_key(*id))
+            .count(),
+        noise_strands_count: created_ids
+            .iter()
+            .filter(|id| !strand_event_counts.contains_key(*id))
+            .count(),
+        git_head_count,
+        timeline_status,
+        timeline_warning,
+        audit: audit_journal(events, now),
+    }
+}
