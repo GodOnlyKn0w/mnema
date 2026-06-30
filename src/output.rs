@@ -16,6 +16,111 @@ use serde::Serialize;
 use crate::projection::{OrientView, ProjectedStrand};
 use crate::util::truncate;
 
+// ── explain --format json ─────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ExplainTopicOutput {
+    pub(crate) ok: bool,
+    pub(crate) topic: String,
+    pub(crate) title: String,
+    pub(crate) body: String,
+}
+
+impl From<&crate::diagnostics::TopicInfo> for ExplainTopicOutput {
+    fn from(topic: &crate::diagnostics::TopicInfo) -> Self {
+        ExplainTopicOutput {
+            ok: true,
+            topic: topic.name.to_string(),
+            title: topic.title.to_string(),
+            body: topic.body.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RecoveryInfoOutput {
+    pub(crate) kind: &'static str,
+    pub(crate) command: String,
+    pub(crate) executable: bool,
+    pub(crate) requires_human: bool,
+}
+
+impl From<&crate::diagnostics::RecoveryInfo> for RecoveryInfoOutput {
+    fn from(recovery: &crate::diagnostics::RecoveryInfo) -> Self {
+        RecoveryInfoOutput {
+            kind: recovery_kind_name(&recovery.kind),
+            command: recovery.command_str.to_string(),
+            executable: recovery.executable,
+            requires_human: recovery.requires_human,
+        }
+    }
+}
+
+fn recovery_kind_name(kind: &crate::diagnostics::RecoveryKind) -> &'static str {
+    match kind {
+        crate::diagnostics::RecoveryKind::Verify => "verify",
+        crate::diagnostics::RecoveryKind::Edit => "edit",
+        crate::diagnostics::RecoveryKind::MoveOrRename => "move_or_rename",
+        crate::diagnostics::RecoveryKind::CreateCoverStrand => "create_cover_strand",
+        crate::diagnostics::RecoveryKind::AppendMarker => "append_marker",
+        crate::diagnostics::RecoveryKind::Dispatch => "dispatch",
+        crate::diagnostics::RecoveryKind::Cancel => "cancel",
+        crate::diagnostics::RecoveryKind::Manual => "manual",
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ExplainSuccessOutput {
+    pub(crate) ok: bool,
+    pub(crate) code: String,
+    pub(crate) severity: &'static str,
+    pub(crate) category: String,
+    pub(crate) title: String,
+    pub(crate) finding: String,
+    pub(crate) impact: String,
+    pub(crate) recovery: RecoveryInfoOutput,
+    pub(crate) producer: String,
+}
+
+impl From<&crate::diagnostics::DiagnosticInfo> for ExplainSuccessOutput {
+    fn from(diagnostic: &crate::diagnostics::DiagnosticInfo) -> Self {
+        ExplainSuccessOutput {
+            ok: true,
+            code: diagnostic.code.to_string(),
+            severity: match diagnostic.severity {
+                crate::diagnostics::Severity::Error => "error",
+                crate::diagnostics::Severity::Warning => "warning",
+            },
+            category: diagnostic.category.to_string(),
+            title: diagnostic.title.to_string(),
+            finding: diagnostic.finding.to_string(),
+            impact: diagnostic.impact.to_string(),
+            recovery: RecoveryInfoOutput::from(&diagnostic.recovery),
+            producer: diagnostic.producer.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ExplainUnknownOutput<'a> {
+    pub(crate) ok: bool,
+    pub(crate) input: &'a str,
+    pub(crate) error: String,
+    pub(crate) available_topics: Vec<&'static str>,
+    pub(crate) hint: &'static str,
+}
+
+impl<'a> ExplainUnknownOutput<'a> {
+    pub(crate) fn new(input: &'a str, available_topics: Vec<&'static str>) -> Self {
+        ExplainUnknownOutput {
+            ok: false,
+            input,
+            error: format!("unknown code or topic: {}", input),
+            available_topics,
+            hint: "diagnostic codes: tasktree explain W062 etc",
+        }
+    }
+}
 // ── orient --format json ───────────────────────────────────
 
 /// Orient remind line: the operating loop surfaced by orient outputs.

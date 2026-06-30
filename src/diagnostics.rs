@@ -20,8 +20,6 @@
 //! (gate/shuttle/covers/DAG/story — producers outside this repo) were
 //! removed; see git history and `test_removed_workflow_codes_stay_removed`.
 
-use serde::Serialize;
-
 // ── Topic catalog (L3 encyclopaedia layer) ──────────────────
 
 /// One encyclopaedia topic reachable via `tasktree explain <name>`.
@@ -237,20 +235,10 @@ pub fn topics() -> &'static [TopicInfo] {
     TOPICS
 }
 
-/// Serialisable output for a topic explain hit.
-#[derive(Debug, Serialize)]
-pub struct ExplainTopicOutput {
-    pub ok: bool,
-    pub topic: String,
-    pub title: String,
-    pub body: String,
-}
-
 // ── Data model ──────────────────────────────────────────────
 
 /// Fixed recovery kinds. Each diagnostic must use one of these.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum RecoveryKind {
     /// Verify a task's completion.
     Verify,
@@ -279,26 +267,6 @@ pub struct RecoveryInfo {
     pub requires_human: bool,
 }
 
-/// Serializable recovery info for JSON output.
-#[derive(Debug, Serialize)]
-pub struct RecoveryInfoOutput {
-    pub kind: RecoveryKind,
-    pub command: String,
-    pub executable: bool,
-    pub requires_human: bool,
-}
-
-impl RecoveryInfo {
-    fn to_output(&self) -> RecoveryInfoOutput {
-        RecoveryInfoOutput {
-            kind: self.kind.clone(),
-            command: self.command_str.to_string(),
-            executable: self.executable,
-            requires_human: self.requires_human,
-        }
-    }
-}
-
 /// One diagnostic code in the catalog.
 #[derive(Debug, Clone)]
 pub struct DiagnosticInfo {
@@ -312,52 +280,10 @@ pub struct DiagnosticInfo {
     pub producer: &'static str,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone)]
 pub enum Severity {
     Error,
     Warning,
-}
-
-// ── Explain output DTOs ─────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct ExplainSuccessOutput {
-    pub ok: bool,
-    pub code: String,
-    pub severity: String,
-    pub category: String,
-    pub title: String,
-    pub finding: String,
-    pub impact: String,
-    pub recovery: RecoveryInfoOutput,
-    pub producer: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ExplainErrorOutput {
-    pub ok: bool,
-    pub code: String,
-    pub error: String,
-}
-
-impl From<&DiagnosticInfo> for ExplainSuccessOutput {
-    fn from(d: &DiagnosticInfo) -> Self {
-        ExplainSuccessOutput {
-            ok: true,
-            code: d.code.to_string(),
-            severity: match d.severity {
-                Severity::Error => "error".to_string(),
-                Severity::Warning => "warning".to_string(),
-            },
-            category: d.category.to_string(),
-            title: d.title.to_string(),
-            finding: d.finding.to_string(),
-            impact: d.impact.to_string(),
-            recovery: d.recovery.to_output(),
-            producer: d.producer.to_string(),
-        }
-    }
 }
 
 // ── Catalog ─────────────────────────────────────────────────
@@ -536,7 +462,7 @@ pub fn catalog() -> &'static [DiagnosticInfo] {
 pub fn cmd_explain(input: &str, format_json: bool) -> String {
     // ── 1. Diagnostic code (case-insensitive) ──────────────
     if let Some(info) = lookup(input) {
-        let output = ExplainSuccessOutput::from(info);
+        let output = crate::output::ExplainSuccessOutput::from(info);
         return if format_json {
             serde_json::to_string_pretty(&output).unwrap_or_else(|e| {
                 format!(
@@ -568,12 +494,7 @@ pub fn cmd_explain(input: &str, format_json: bool) -> String {
     // ── 2. Topic (exact lowercase match) ───────────────────
     let lowered = input.to_lowercase();
     if let Some(topic) = topic_lookup(&lowered) {
-        let output = ExplainTopicOutput {
-            ok: true,
-            topic: topic.name.to_string(),
-            title: topic.title.to_string(),
-            body: topic.body.to_string(),
-        };
+        let output = crate::output::ExplainTopicOutput::from(topic);
         return if format_json {
             serde_json::to_string_pretty(&output).unwrap_or_else(|e| {
                 format!(
@@ -589,13 +510,7 @@ pub fn cmd_explain(input: &str, format_json: bool) -> String {
     // ── 3. Unknown ─────────────────────────────────────────
     let available_topics: Vec<&str> = TOPICS.iter().map(|t| t.name).collect();
     if format_json {
-        let error_output = serde_json::json!({
-            "ok": false,
-            "input": input,
-            "error": format!("unknown code or topic: {}", input),
-            "available_topics": available_topics,
-            "hint": "diagnostic codes: tasktree explain W062 etc",
-        });
+        let error_output = crate::output::ExplainUnknownOutput::new(input, available_topics);
         serde_json::to_string_pretty(&error_output).unwrap_or_else(|_| {
             format!(
                 r#"{{"ok":false,"input":"{}","error":"unknown code or topic"}}"#,
