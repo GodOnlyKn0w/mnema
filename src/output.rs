@@ -6,10 +6,10 @@
 //!
 //! # Design rule
 //!
-//! Every field is always serialised — even when `null` or empty — to match the
-//! existing contract. The current `json!({...})` code paths always emit every
-//! field. Adding `#[serde(skip_serializing_if)]` would change the output shape
-//! and break consumers that expect a field (even if its value is `null`).
+//! DTO structs always serialise every field — even when `null` or empty — to
+//! match the existing contract. Adding `#[serde(skip_serializing_if)]` would
+//! change the output shape and break consumers that expect a field (even if its
+//! value is `null`).
 
 use serde::Serialize;
 

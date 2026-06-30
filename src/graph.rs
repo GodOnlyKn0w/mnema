@@ -1,5 +1,4 @@
 use crate::projection::ProjectedStrand;
-use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
@@ -22,7 +21,7 @@ pub(crate) struct StrandGraph {
     depends: HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct TreeNode {
     pub id: String,
     pub summary: String,
@@ -34,7 +33,7 @@ pub struct TreeNode {
     pub children: Vec<TreeNode>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct OrientForestNode {
     pub id: String,
     pub strand_type: Option<String>,

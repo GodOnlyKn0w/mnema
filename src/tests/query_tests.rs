@@ -277,6 +277,8 @@ fn orient_tree_no_contention_markers() {
         .filter_map(|card| strands.iter().find(|s| s.id == card.id))
         .collect();
     let roots = tree::build_orient_forest(&active_strands);
+    let roots: Vec<output::OrientForestNode> =
+        roots.iter().map(output::OrientForestNode::from).collect();
 
     // Serialize to JSON and assert no "contention" word appears
     let json_str = serde_json::to_string(&roots).unwrap();
