@@ -16,6 +16,10 @@ use crate::tree;
 use crate::util::{parse_duration, shorten, truncate};
 use std::time::Instant;
 
+fn corrupted_lines_error(skipped: usize) -> String {
+    format!("corrupt: [tasktree] WARNING: {} corrupted lines skipped", skipped)
+}
+
 pub(crate) struct ListRequest<'a> {
     pub(crate) include_hidden: bool,
     pub(crate) links: Option<&'a str>,
@@ -113,8 +117,7 @@ pub(crate) fn cmd_list(
         };
         println!("{}", serde_json::to_string(&output).expect("serialize"));
         if skipped > 0 {
-            eprintln!("[tasktree] WARNING: {} corrupted lines skipped", skipped);
-            std::process::exit(2);
+            return Err(corrupted_lines_error(skipped));
         }
         eprintln!("[tasktree] list: {:.0?}", started.elapsed());
         return Ok(());
@@ -143,8 +146,7 @@ pub(crate) fn cmd_list(
         println!("(no strands)");
     }
     if skipped > 0 {
-        eprintln!("[tasktree] WARNING: {} corrupted lines skipped", skipped);
-        std::process::exit(2);
+        return Err(corrupted_lines_error(skipped));
     }
     eprintln!("[tasktree] list: {:.0?}", started.elapsed());
     Ok(())
@@ -226,8 +228,7 @@ pub(crate) fn cmd_search(
     }
 
     if skipped > 0 {
-        eprintln!("[tasktree] WARNING: {} corrupted lines skipped", skipped);
-        std::process::exit(2);
+        return Err(corrupted_lines_error(skipped));
     }
     eprintln!(
         "[tasktree] search: {:.0?}  ({} matches)",
@@ -508,8 +509,7 @@ pub(crate) fn cmd_orient(
     }
 
     if skipped > 0 {
-        eprintln!("[tasktree] WARNING: {} corrupted lines skipped", skipped);
-        std::process::exit(2);
+        return Err(corrupted_lines_error(skipped));
     }
     eprintln!("[tasktree] orient: {:.0?}", started.elapsed());
     Ok(())
@@ -615,8 +615,7 @@ pub(crate) fn cmd_show(
         let output = output::StrandDetailOutput::from(strand);
         println!("{}", serde_json::to_string(&output).expect("serialize"));
         if skipped > 0 {
-            eprintln!("[tasktree] WARNING: {} corrupted lines skipped", skipped);
-            std::process::exit(2);
+            return Err(corrupted_lines_error(skipped));
         }
         return Ok(());
     }
@@ -665,8 +664,7 @@ pub(crate) fn cmd_show(
             entry_count
         );
         if skipped > 0 {
-            eprintln!("[tasktree] WARNING: {} corrupted lines skipped", skipped);
-            std::process::exit(2);
+            return Err(corrupted_lines_error(skipped));
         }
         return Ok(());
     }
@@ -708,8 +706,7 @@ pub(crate) fn cmd_show(
         shown
     );
     if skipped > 0 {
-        eprintln!("[tasktree] WARNING: {} corrupted lines skipped", skipped);
-        std::process::exit(2);
+        return Err(corrupted_lines_error(skipped));
     }
     Ok(())
 }

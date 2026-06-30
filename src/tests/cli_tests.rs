@@ -652,6 +652,10 @@ fn new_with_file_content() {
 #[test]
 fn exit_code_for_journal_unreadable_is_2() {
     assert_eq!(exit_code_for("journal unreadable: bad bytes"), 2);
+    assert_eq!(
+        exit_code_for("corrupt: [tasktree] WARNING: 1 corrupted lines skipped"),
+        2
+    );
 }
 
 #[test]

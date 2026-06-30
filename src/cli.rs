@@ -730,11 +730,8 @@ fn cmd_init() -> Result<(), String> {
 }
 
 // ── exit strategy ──
-// cmd_list, cmd_show, cmd_search use process::exit(2) directly when
-// corrupted journal lines are detected. This is intentional CLI style,
-// not library style — exit(2) allows gate scripts to detect corruption
-// without parsing stderr. Do not refactor to return Result without
-// updating all call sites and preserving the exit code.
+// Commands return typed-by-prefix error strings; this adapter is the single
+// place that turns them into process output and exit codes.
 pub(crate) fn main() {
     let cli = parse_cli_or_exit();
     apply_chdir(cli.chdir.as_deref());
@@ -947,7 +944,9 @@ fn run(command: &Commands) -> Result<(), String> {
 /// place exit-code classification lives. A `warn:`-prefixed message is printed
 /// as-is (no `error:` prefix); everything else gets the `error:` prefix.
 fn exit_with_error(e: &str) -> ! {
-    if e.starts_with("warn:") {
+    if let Some(message) = e.strip_prefix("corrupt: ") {
+        eprintln!("{}", message);
+    } else if e.starts_with("warn:") {
         eprintln!("{}", e);
     } else {
         eprintln!("error: {}", e);
@@ -958,7 +957,7 @@ fn exit_with_error(e: &str) -> ! {
 /// Map a command error message to its process exit code: a `journal
 /// unreadable:` failure is 2 (read error), everything else is 1.
 pub(crate) fn exit_code_for(e: &str) -> i32 {
-    if e.starts_with("journal unreadable:") {
+    if e.starts_with("journal unreadable:") || e.starts_with("corrupt: ") {
         2
     } else {
         1
