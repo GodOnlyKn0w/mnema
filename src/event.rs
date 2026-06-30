@@ -369,59 +369,6 @@ pub fn make_subject_bound(
     }
 }
 
-// ── Timeline Projection types ────────────────────────────
-
-/// A single event in timeline projection.
-///
-/// Data model only — serialization lives in `output.rs` DTOs.
-#[derive(Debug, Clone, Serialize)]
-pub struct TimelineEntry {
-    pub journal_offset: usize,
-    pub ts: String,
-    pub strand_id: String,
-    pub strand_type: Option<String>,
-    pub kind: TimelineEventKind,
-    pub ts_skew: bool,
-}
-
-/// Event kind in timeline projection.
-///
-/// Data model only — serialization (tagged union) lives in `output.rs` DTOs.
-/// Pattern matching on this enum is the intended consumer interface.
-#[derive(Debug, Clone, Serialize)]
-pub enum TimelineEventKind {
-    StrandCreated {
-        summary: Option<String>,
-    },
-    LogAppended {
-        content: String,
-        append_id: Option<String>,
-    },
-    EdgeLinked {
-        target_id: String,
-        edge_type: Option<String>,
-    },
-    EdgeUnlinked {
-        target_id: String,
-    },
-    StrandHidden,
-    StrandUnhidden,
-    CheckpointCreated {
-        observed: String,
-        action: String,
-        append_id: Option<String>,
-    },
-    SubjectBound {
-        subject_type: String,
-        subject_id: String,
-        strand_id: String,
-    },
-    StrandClosed {
-        disposition: String,
-    },
-    StrandReopened,
-}
-
 /// Resolve a strand-id prefix to the first matching full strand id, scanning
 /// `StrandCreated` events in order. Lives here (not util.rs) because it is the
 /// one resolver that depends on the `Event` type. Moved from main.rs in the

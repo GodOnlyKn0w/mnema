@@ -1,7 +1,7 @@
 //! Tasktree journal projection layer.
 //! Projects raw event streams into structured strand and timeline views.
 
-use crate::event::{Event, TimelineEntry, TimelineEventKind};
+use crate::event::Event;
 use std::collections::HashSet;
 
 /// Collapse repeated values, keeping the first occurrence of each (order
@@ -29,6 +29,58 @@ pub struct LogEntry {
     pub provenance: Option<serde_json::Value>,
 }
 
+// ── Timeline Projection types ────────────────────────────
+
+/// A single event in timeline projection.
+///
+/// Data model only — serialization lives in `output.rs` DTOs.
+#[derive(Debug, Clone)]
+pub struct TimelineEntry {
+    pub journal_offset: usize,
+    pub ts: String,
+    pub strand_id: String,
+    pub strand_type: Option<String>,
+    pub kind: TimelineEventKind,
+    pub ts_skew: bool,
+}
+
+/// Event kind in timeline projection.
+///
+/// Data model only — serialization (tagged union) lives in `output.rs` DTOs.
+/// Pattern matching on this enum is the intended consumer interface.
+#[derive(Debug, Clone)]
+pub enum TimelineEventKind {
+    StrandCreated {
+        summary: Option<String>,
+    },
+    LogAppended {
+        content: String,
+        append_id: Option<String>,
+    },
+    EdgeLinked {
+        target_id: String,
+        edge_type: Option<String>,
+    },
+    EdgeUnlinked {
+        target_id: String,
+    },
+    StrandHidden,
+    StrandUnhidden,
+    CheckpointCreated {
+        observed: String,
+        action: String,
+        append_id: Option<String>,
+    },
+    SubjectBound {
+        subject_type: String,
+        subject_id: String,
+        strand_id: String,
+    },
+    StrandClosed {
+        disposition: String,
+    },
+    StrandReopened,
+}
 // ── State Markers ──────────────────────────────────────────
 
 /// Legacy content-based state markers — kept for display/annotation purposes

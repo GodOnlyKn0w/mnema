@@ -692,44 +692,44 @@ pub struct TimelineOutput {
     pub max_offset: usize,
 }
 
-impl From<&crate::event::TimelineEntry> for TimelineEntryOutput {
-    fn from(e: &crate::event::TimelineEntry) -> Self {
+impl From<&crate::projection::TimelineEntry> for TimelineEntryOutput {
+    fn from(e: &crate::projection::TimelineEntry) -> Self {
         TimelineEntryOutput {
             journal_offset: e.journal_offset,
             ts: e.ts.clone(),
             strand_id: e.strand_id.clone(),
             strand_type: e.strand_type.clone(),
             kind: match &e.kind {
-                crate::event::TimelineEventKind::StrandCreated { summary } => {
+                crate::projection::TimelineEventKind::StrandCreated { summary } => {
                     TimelineEventKindOutput::StrandCreated {
                         summary: summary.clone(),
                     }
                 }
-                crate::event::TimelineEventKind::LogAppended { content, append_id } => {
+                crate::projection::TimelineEventKind::LogAppended { content, append_id } => {
                     TimelineEventKindOutput::LogAppended {
                         content: content.clone(),
                         append_id: append_id.clone(),
                     }
                 }
-                crate::event::TimelineEventKind::EdgeLinked {
+                crate::projection::TimelineEventKind::EdgeLinked {
                     target_id,
                     edge_type,
                 } => TimelineEventKindOutput::EdgeLinked {
                     target_id: target_id.clone(),
                     edge_type: edge_type.clone(),
                 },
-                crate::event::TimelineEventKind::EdgeUnlinked { target_id } => {
+                crate::projection::TimelineEventKind::EdgeUnlinked { target_id } => {
                     TimelineEventKindOutput::EdgeUnlinked {
                         target_id: target_id.clone(),
                     }
                 }
-                crate::event::TimelineEventKind::StrandHidden => {
+                crate::projection::TimelineEventKind::StrandHidden => {
                     TimelineEventKindOutput::StrandHidden
                 }
-                crate::event::TimelineEventKind::StrandUnhidden => {
+                crate::projection::TimelineEventKind::StrandUnhidden => {
                     TimelineEventKindOutput::StrandUnhidden
                 }
-                crate::event::TimelineEventKind::CheckpointCreated {
+                crate::projection::TimelineEventKind::CheckpointCreated {
                     observed,
                     action,
                     append_id,
@@ -738,7 +738,7 @@ impl From<&crate::event::TimelineEntry> for TimelineEntryOutput {
                     action: action.clone(),
                     append_id: append_id.clone(),
                 },
-                crate::event::TimelineEventKind::SubjectBound {
+                crate::projection::TimelineEventKind::SubjectBound {
                     subject_type,
                     subject_id,
                     strand_id,
@@ -747,12 +747,12 @@ impl From<&crate::event::TimelineEntry> for TimelineEntryOutput {
                     subject_id: subject_id.clone(),
                     strand_id: strand_id.clone(),
                 },
-                crate::event::TimelineEventKind::StrandClosed { disposition } => {
+                crate::projection::TimelineEventKind::StrandClosed { disposition } => {
                     TimelineEventKindOutput::StrandClosed {
                         disposition: disposition.clone(),
                     }
                 }
-                crate::event::TimelineEventKind::StrandReopened => {
+                crate::projection::TimelineEventKind::StrandReopened => {
                     TimelineEventKindOutput::StrandReopened
                 }
             },

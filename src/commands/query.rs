@@ -1,4 +1,4 @@
-use crate::event::{find_strand, Event, TimelineEventKind};
+use crate::event::{find_strand, Event};
 use crate::graph;
 /// Query-command family: cmd_list, cmd_show, cmd_search, cmd_timeline,
 /// cmd_orient, cmd_agent_context, cmd_tree (+ print_tree_text helper).
@@ -10,7 +10,7 @@ use crate::graph;
 use crate::journal::*;
 use crate::markers::leading_marker;
 use crate::output;
-use crate::projection;
+use crate::projection::{self, TimelineEventKind};
 use crate::render::*;
 use crate::tree;
 use crate::util::{parse_duration, shorten, truncate};
