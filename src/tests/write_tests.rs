@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn append_explicit_empty_id_errors() {
+    let _env = setup();
+    create_strand("existing strand");
+    let result = cmd_append(
+        Some("must not fallback"),
+        None,
+        false,
+        false,
+        None,
+        Some("  "),
+        None,
+        None,
+    );
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .contains("explicit --id cannot be empty")
+    );
+}
+#[test]
 fn positional_append_most_recent() {
     let _env = setup();
     let _id1 = create_strand("first strand");
@@ -666,6 +687,44 @@ fn checkpoint_explicit_id_finds_hidden_strand() {
 // hygiene review of 66f668e.
 
 #[test]
+fn append_new_stores_provenance_on_initial_entry() {
+    let _env = setup();
+    cmd_append(
+        Some("new with provenance"),
+        None,
+        true,
+        false,
+        None,
+        None,
+        None,
+        Some(r#"{"producer":"tester"}"#),
+    )
+    .unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let found = events.iter().any(|(_, e)| {
+        if let Event::LogAppended {
+            content,
+            provenance,
+            ..
+        } = e
+        {
+            content == "new with provenance"
+                && provenance
+                    .as_ref()
+                    .and_then(|p| p.get("producer"))
+                    .and_then(|p| p.as_str())
+                    == Some("tester")
+        } else {
+            false
+        }
+    });
+    assert!(
+        found,
+        "append --new must carry explicit provenance on the initial entry"
+    );
+}
+#[test]
 fn add_provenance_stored_on_first_log_entry() {
     let _env = setup();
     cmd_add(
@@ -721,6 +780,60 @@ fn add_without_provenance_has_none() {
     );
 }
 
+#[test]
+fn add_parent_creates_child_and_belongs_to_edge() {
+    let _env = setup();
+    let parent = create_strand("parent line");
+    cmd_add_with_parent(
+        Some("child line"),
+        false,
+        None,
+        false,
+        Some(&parent),
+        None,
+        None,
+    )
+    .unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let child = strands
+        .iter()
+        .find(|s| s.first_summary() == "child line")
+        .expect("child strand must exist");
+    assert_eq!(child.belongs_to_edges, vec![parent]);
+}
+
+#[test]
+fn add_parent_missing_errors_without_creating_child() {
+    let _env = setup();
+    let result = cmd_add_with_parent(
+        Some("orphan child"),
+        false,
+        None,
+        false,
+        Some("0000019dd34b"),
+        None,
+        None,
+    );
+    assert!(result.is_err(), "missing parent must error");
+    assert!(result.unwrap_err().contains("parent strand"));
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    assert!(
+        strands.iter().all(|s| s.first_summary() != "orphan child"),
+        "child must not be created when parent resolution fails"
+    );
+}
+
+#[test]
+fn add_empty_parent_errors() {
+    let _env = setup();
+    let result = cmd_add_with_parent(Some("child"), false, None, false, Some("  "), None, None);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("--parent cannot be empty"));
+}
 // ── ③ --edge-type: renamed flag still resolves correctly ─────────────
 
 #[test]

@@ -355,8 +355,206 @@ fn catalog_referenced_markers_are_writable() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+#[test]
+fn add_parent_and_belongs_to_alias_parse() {
+    use clap::CommandFactory;
+    let parent = "0000019dd34b";
+    let by_parent =
+        Cli::command().try_get_matches_from(["tasktree", "add", "--parent", parent, "child"]);
+    assert!(
+        by_parent.is_ok(),
+        "add --parent must parse: {:?}",
+        by_parent
+    );
+    let by_alias =
+        Cli::command().try_get_matches_from(["tasktree", "add", "--belongs-to", parent, "child"]);
+    assert!(
+        by_alias.is_ok(),
+        "add --belongs-to alias must parse: {:?}",
+        by_alias
+    );
+}
+#[test]
+fn doctor_journal_strict_flag_parses() {
+    use clap::CommandFactory;
+    let result = Cli::command().try_get_matches_from(["tasktree", "doctor", "journal", "--strict"]);
+    assert!(
+        result.is_ok(),
+        "doctor journal --strict must parse: {:?}",
+        result
+    );
+}
+
+#[test]
+fn timeline_help_names_append_order_not_causal_order() {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    let sub = cmd
+        .find_subcommand_mut("timeline")
+        .expect("timeline command");
+    let help = sub.render_long_help().to_string();
+    assert!(
+        help.contains("append order"),
+        "timeline help must name append order: {}",
+        help
+    );
+    assert!(
+        !help.contains("causal order"),
+        "timeline help must not claim causal order: {}",
+        help
+    );
+}
+
+#[test]
+fn depends_help_frames_upstreams_as_review_context() {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    let sub = cmd.find_subcommand_mut("depends").expect("depends command");
+    let help = sub.render_long_help().to_string();
+    assert!(
+        help.contains("attention edge"),
+        "depends help must name attention-edge semantics: {}",
+        help
+    );
+    assert!(
+        !help.contains("blockers, readiness, critical path"),
+        "depends help must not advertise gate semantics: {}",
+        help
+    );
+}
 // ── context exposure axis (ADR-0002) ──
 
+#[test]
+fn grammar_content_position_write_commands_accept_id_flag() {
+    use clap::CommandFactory;
+    let id = "0000019dd34b";
+    let append = Cli::command().try_get_matches_from(["tasktree", "append", "--id", id, "note"]);
+    assert!(append.is_ok(), "append --id must parse: {:?}", append);
+    let checkpoint = Cli::command().try_get_matches_from([
+        "tasktree",
+        "checkpoint",
+        "--id",
+        id,
+        "--action",
+        "before change",
+    ]);
+    assert!(
+        checkpoint.is_ok(),
+        "checkpoint --id must parse: {:?}",
+        checkpoint
+    );
+    let bind = Cli::command().try_get_matches_from([
+        "tasktree",
+        "bind",
+        "--subject-type",
+        "pi-session",
+        "--subject-id",
+        "abc",
+        "--id",
+        id,
+    ]);
+    assert!(bind.is_ok(), "bind --id must parse: {:?}", bind);
+}
+
+#[test]
+fn grammar_tail_commands_do_not_require_target() {
+    use clap::CommandFactory;
+    let show = Cli::command().try_get_matches_from(["tasktree", "show", "--tail", "5"]);
+    assert!(
+        show.is_ok(),
+        "show --tail without target must parse: {:?}",
+        show
+    );
+    let checkpoint = Cli::command().try_get_matches_from([
+        "tasktree",
+        "checkpoint",
+        "--tail",
+        "5",
+        "--action",
+        "before change",
+    ]);
+    assert!(
+        checkpoint.is_ok(),
+        "checkpoint --tail without --id must parse: {:?}",
+        checkpoint
+    );
+}
+
+#[test]
+fn grammar_write_commands_accept_provenance() {
+    use clap::CommandFactory;
+    let id = "0000019dd34b";
+    let provenance = r#"{"producer":"tester"}"#;
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["tasktree", "add", "--provenance", provenance, "note"],
+        vec![
+            "tasktree",
+            "append",
+            "--id",
+            id,
+            "--provenance",
+            provenance,
+            "note",
+        ],
+        vec![
+            "tasktree",
+            "checkpoint",
+            "--id",
+            id,
+            "--action",
+            "before",
+            "--provenance",
+            provenance,
+        ],
+        vec![
+            "tasktree",
+            "bind",
+            "--subject-type",
+            "pi-session",
+            "--subject-id",
+            "abc",
+            "--id",
+            id,
+            "--provenance",
+            provenance,
+        ],
+        vec![
+            "tasktree",
+            "hide",
+            "--id",
+            id,
+            "--reason",
+            "noise",
+            "--provenance",
+            provenance,
+        ],
+        vec![
+            "tasktree",
+            "link",
+            id,
+            "0000019dd34c",
+            "--provenance",
+            provenance,
+        ],
+        vec![
+            "tasktree",
+            "unlink",
+            id,
+            "0000019dd34c",
+            "--provenance",
+            provenance,
+        ],
+    ];
+    for case in cases {
+        let result = Cli::command().try_get_matches_from(case.clone());
+        assert!(
+            result.is_ok(),
+            "write command with provenance must parse: {:?}: {:?}",
+            case,
+            result
+        );
+    }
+}
 #[test]
 fn grammar_flag_vocabulary_conformance() {
     use clap::CommandFactory;

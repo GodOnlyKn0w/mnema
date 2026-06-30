@@ -7,17 +7,16 @@ use crate::journal::*;
 use crate::{diagnostics, projection};
 use std::time::Instant;
 
-pub(crate) fn cmd_doctor_journal() -> Result<bool, String> {
+pub(crate) fn cmd_doctor_journal(strict: bool) -> Result<bool, String> {
     let journal_dir = resolve_journal_dir()?;
     let path = journal_dir.join("journal.jsonl");
 
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read journal: {}", e))?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("cannot read journal: {}", e))?;
 
     let lines: Vec<&str> = raw.lines().collect();
     let total_lines = lines.len();
     let (events, corrupted) = parse_journal_lines(&lines);
-    let git_head_count = count_git_head_lines(&lines);
+    let (git_head_count, git_context_event_count) = count_git_context_events(&events);
 
     let state_path = journal_dir.join("doctor-state.json");
     let previous_state = read_previous_state(&state_path);
@@ -28,6 +27,7 @@ pub(crate) fn cmd_doctor_journal() -> Result<bool, String> {
         total_lines,
         corrupted,
         git_head_count,
+        git_context_event_count,
         previous_state,
         chrono::Utc::now(),
     );
@@ -44,7 +44,7 @@ pub(crate) fn cmd_doctor_journal() -> Result<bool, String> {
     println!("  total_lines: {}", total_lines);
     println!("  total_events: {}", journal_events.len());
 
-    Ok(report.has_issues())
+    Ok(report.has_errors() || (strict && report.has_advisories()))
 }
 
 fn parse_journal_lines(lines: &[&str]) -> (Vec<Event>, usize) {
@@ -62,14 +62,18 @@ fn parse_journal_lines(lines: &[&str]) -> (Vec<Event>, usize) {
     (events, corrupted)
 }
 
-fn count_git_head_lines(lines: &[&str]) -> usize {
-    lines
-        .iter()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.is_empty() && (trimmed.contains("git_head") || trimmed.contains("git.head"))
-        })
-        .count()
+fn count_git_context_events(events: &[Event]) -> (usize, usize) {
+    let mut capable = 0usize;
+    let mut with_head = 0usize;
+    for event in events {
+        if let Event::LogAppended { git, .. } = event {
+            capable += 1;
+            if git.as_ref().map_or(false, |g| !g.head.trim().is_empty()) {
+                with_head += 1;
+            }
+        }
+    }
+    (with_head, capable)
 }
 
 fn read_previous_state(path: &std::path::Path) -> diagnostics::DoctorPreviousState {
@@ -118,17 +122,20 @@ fn render_doctor_report(path: &std::path::Path, report: &diagnostics::DoctorJour
     println!("  strand coverage:");
     println!("    total strands: {}", report.total_strands);
     println!("    with events: {}", report.strands_with_events_count);
-    println!("    noise strands (no events): {}", report.noise_strands_count);
+    println!(
+        "    noise strands (no events): {}",
+        report.noise_strands_count
+    );
     println!();
     println!("  git context:");
-    let pct = if report.total_lines > 0 {
-        (report.git_head_count as f64 / report.total_lines as f64) * 100.0
+    let pct = if report.git_context_event_count > 0 {
+        (report.git_head_count as f64 / report.git_context_event_count as f64) * 100.0
     } else {
         0.0
     };
     println!(
         "    entries with git.head: {}/{} ({:.0}%)",
-        report.git_head_count, report.total_lines, pct
+        report.git_head_count, report.git_context_event_count, pct
     );
     println!();
     println!("  timeline:");
@@ -152,7 +159,10 @@ fn render_doctor_report(path: &std::path::Path, report: &diagnostics::DoctorJour
     let lint_count = report.audit.lint_count();
     if lint_count > 0 {
         println!();
-        println!("  lint summary: {} issue(s) found (warnings only, not blocking)", lint_count);
+        println!(
+            "  lint summary: {} issue(s) found (warnings only, not blocking)",
+            lint_count
+        );
     }
 
     println!();

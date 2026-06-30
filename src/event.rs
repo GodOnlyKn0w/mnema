@@ -1,6 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::process::Command;
 use std::sync::atomic::{AtomicU16, Ordering};
 
@@ -16,12 +16,23 @@ pub struct GitContext {
 
 pub fn get_git_context() -> Option<GitContext> {
     let head = run_cmd(&["git", "rev-parse", "--short", "HEAD"]);
-    let branch = run_cmd(&["git", "branch", "--show-current"])
-        .unwrap_or_else(|_| "detached".to_string());
+    let branch =
+        run_cmd(&["git", "branch", "--show-current"]).unwrap_or_else(|_| "detached".to_string());
     let status = run_cmd(&["git", "status", "--porcelain"])
-        .map(|s| if s.trim().is_empty() { "clean".to_string() } else { "dirty".to_string() })
+        .map(|s| {
+            if s.trim().is_empty() {
+                "clean".to_string()
+            } else {
+                "dirty".to_string()
+            }
+        })
         .unwrap_or_else(|_| "unknown".to_string());
-    head.map(|h| GitContext { head: h, branch, status }).ok()
+    head.map(|h| GitContext {
+        head: h,
+        branch,
+        status,
+    })
+    .ok()
 }
 
 fn run_cmd(args: &[&str]) -> Result<String, String> {
@@ -94,15 +105,9 @@ pub enum Event {
         provenance: Option<serde_json::Value>,
     },
     #[serde(rename = "strand_hidden", alias = "node_hidden")]
-    StrandHidden {
-        id: String,
-        ts: String,
-    },
+    StrandHidden { id: String, ts: String },
     #[serde(rename = "strand_unhidden", alias = "node_unhidden")]
-    StrandUnhidden {
-        id: String,
-        ts: String,
-    },
+    StrandUnhidden { id: String, ts: String },
     #[serde(rename = "checkpoint")]
     CheckpointCreated {
         id: String,
@@ -146,6 +151,8 @@ pub enum Event {
         subject_type: String,
         subject_id: String,
         strand_id: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        provenance: Option<serde_json::Value>,
     },
 }
 
@@ -229,11 +236,7 @@ pub fn make_strand_created(content: &str, strand_type: Option<&str>) -> (Event, 
 /// metadata blob attached to the entry. `None` produces an event identical
 /// to the pre-provenance schema; older consumers see the same JSON shape
 /// thanks to `skip_serializing_if`.
-pub fn make_log_appended(
-    id: &str,
-    content: &str,
-    provenance: Option<serde_json::Value>,
-) -> Event {
+pub fn make_log_appended(id: &str, content: &str, provenance: Option<serde_json::Value>) -> Event {
     make_log_appended_with_ref(id, content, None, provenance)
 }
 
@@ -359,6 +362,7 @@ pub fn make_subject_bound(
     subject_type: &str,
     subject_id: &str,
     strand_id: &str,
+    provenance: Option<serde_json::Value>,
 ) -> Event {
     Event::SubjectBound {
         id: generate_id(),
@@ -366,6 +370,7 @@ pub fn make_subject_bound(
         subject_type: subject_type.to_string(),
         subject_id: subject_id.to_string(),
         strand_id: strand_id.to_string(),
+        provenance,
     }
 }
 

@@ -321,18 +321,19 @@ pub struct DoctorJournalReport {
     pub strands_with_events_count: usize,
     pub noise_strands_count: usize,
     pub git_head_count: usize,
+    pub git_context_event_count: usize,
     pub timeline_status: String,
     pub timeline_warning: bool,
     pub audit: JournalAudit,
 }
 
 impl DoctorJournalReport {
-    pub fn has_issues(&self) -> bool {
-        self.corrupted > 0
-            || !self.orphans.is_empty()
-            || self.timeline_warning
-            || self.audit.lint_count() > 0
-            || !self.audit.diagnostics.is_empty()
+    pub fn has_errors(&self) -> bool {
+        self.corrupted > 0 || !self.orphans.is_empty()
+    }
+
+    pub fn has_advisories(&self) -> bool {
+        self.timeline_warning || self.audit.lint_count() > 0 || !self.audit.diagnostics.is_empty()
     }
 }
 
@@ -341,6 +342,7 @@ pub fn build_doctor_journal_report(
     total_lines: usize,
     corrupted: usize,
     git_head_count: usize,
+    git_context_event_count: usize,
     previous_state: DoctorPreviousState,
     now: chrono::DateTime<chrono::Utc>,
 ) -> DoctorJournalReport {
@@ -371,12 +373,19 @@ pub fn build_doctor_journal_report(
     orphans.sort();
 
     let timeline_status = match previous_state {
-        DoctorPreviousState::FirstRun => "monotonic: yes (first run, no previous state)".to_string(),
-        DoctorPreviousState::Unreadable => "monotonic: yes (cannot read previous state)".to_string(),
+        DoctorPreviousState::FirstRun => {
+            "monotonic: yes (first run, no previous state)".to_string()
+        }
+        DoctorPreviousState::Unreadable => {
+            "monotonic: yes (cannot read previous state)".to_string()
+        }
         DoctorPreviousState::Invalid => "monotonic: yes (no previous state)".to_string(),
         DoctorPreviousState::LineCount(previous) => {
             if total_lines < previous {
-                format!("warning: {}->{} jump detected (lines decreased)", previous, total_lines)
+                format!(
+                    "warning: {}->{} jump detected (lines decreased)",
+                    previous, total_lines
+                )
             } else if total_lines > previous {
                 format!("monotonic: yes ({}->{})", previous, total_lines)
             } else {
@@ -400,6 +409,7 @@ pub fn build_doctor_journal_report(
             .filter(|id| !strand_event_counts.contains_key(*id))
             .count(),
         git_head_count,
+        git_context_event_count,
         timeline_status,
         timeline_warning,
         audit: audit_journal(events, now),

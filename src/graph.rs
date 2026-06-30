@@ -67,7 +67,6 @@ pub(crate) struct DependsAnalysis {
 pub(crate) enum EdgeFindingKind {
     MultipleBelongsToParents,
     ClosedBelongsToParent,
-    ClosedDependsOnUpstream,
     DependsOnCycle,
 }
 
@@ -110,15 +109,27 @@ impl StrandGraph {
             nodes.insert(info.id.clone(), info);
         }
 
-        Self { nodes, belongs_children, depends }
+        Self {
+            nodes,
+            belongs_children,
+            depends,
+        }
     }
 
     pub(crate) fn resolve_id(&self, prefix: &str) -> Option<String> {
         if self.nodes.contains_key(prefix) {
             return Some(prefix.to_string());
         }
-        let matches: Vec<&String> = self.nodes.keys().filter(|k| k.starts_with(prefix)).collect();
-        if matches.len() == 1 { Some(matches[0].clone()) } else { None }
+        let matches: Vec<&String> = self
+            .nodes
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .collect();
+        if matches.len() == 1 {
+            Some(matches[0].clone())
+        } else {
+            None
+        }
     }
 
     pub(crate) fn subtree_ids(&self, root_id: &str) -> Option<HashSet<String>> {
@@ -182,16 +193,23 @@ impl StrandGraph {
     pub(crate) fn depends_analysis(&self, id: &str) -> Option<DependsAnalysis> {
         let full_id = self.resolve_id(id)?;
         let node = self.nodes.get(&full_id)?;
-        let blockers: Vec<DependsBlocker> = self.depends.get(&full_id)
-            .map(|v| v.iter().filter_map(|b| self.nodes.get(b)).map(|b| {
-                let closed = b.status.starts_with("closed");
-                DependsBlocker {
-                    id: b.id.clone(),
-                    status: b.status.clone(),
-                    closed,
-                    summary: b.summary.clone(),
-                }
-            }).collect())
+        let blockers: Vec<DependsBlocker> = self
+            .depends
+            .get(&full_id)
+            .map(|v| {
+                v.iter()
+                    .filter_map(|b| self.nodes.get(b))
+                    .map(|b| {
+                        let closed = b.status.starts_with("closed");
+                        DependsBlocker {
+                            id: b.id.clone(),
+                            status: b.status.clone(),
+                            closed,
+                            summary: b.summary.clone(),
+                        }
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         let open_blocker_count = blockers.iter().filter(|b| !b.closed).count();
         let mut seen = HashSet::new();
@@ -211,7 +229,9 @@ impl StrandGraph {
         let mut best = Vec::new();
         if let Some(ups) = self.depends.get(node) {
             for up in ups {
-                let Some(info) = self.nodes.get(up) else { continue; };
+                let Some(info) = self.nodes.get(up) else {
+                    continue;
+                };
                 if info.status.starts_with("closed") || seen.contains(up) {
                     continue;
                 }
@@ -243,7 +263,11 @@ impl StrandGraph {
                 });
             }
             for parent in &info.belongs_to_edges {
-                if self.nodes.get(parent).map_or(false, |p| p.status.starts_with("closed")) {
+                if self
+                    .nodes
+                    .get(parent)
+                    .map_or(false, |p| p.status.starts_with("closed"))
+                {
                     findings.push(EdgeFinding {
                         kind: EdgeFindingKind::ClosedBelongsToParent,
                         source_id: info.id.clone(),
@@ -255,24 +279,13 @@ impl StrandGraph {
                     });
                 }
             }
-            for upstream in &info.depends_on_edges {
-                if self.nodes.get(upstream).map_or(false, |u| u.status.starts_with("closed")) {
-                    findings.push(EdgeFinding {
-                        kind: EdgeFindingKind::ClosedDependsOnUpstream,
-                        source_id: info.id.clone(),
-                        target_id: Some(upstream.clone()),
-                        detail: format!(
-                            "strand {} depends-on a closed upstream {} - may warrant review",
-                            info.id, upstream
-                        ),
-                    });
-                }
-            }
         }
 
         let mut color: HashMap<String, u8> = HashMap::new();
         for start in self.depends.keys().cloned().collect::<Vec<_>>() {
-            if color.get(&start).copied().unwrap_or(0) != 0 { continue; }
+            if color.get(&start).copied().unwrap_or(0) != 0 {
+                continue;
+            }
             let mut stack: Vec<(String, usize)> = vec![(start.clone(), 0)];
             color.insert(start, 1);
             while let Some((node, idx)) = stack.last().cloned() {
@@ -301,38 +314,43 @@ impl StrandGraph {
         }
         findings
     }
-
-
 }
 
-fn orient_forest_from_strands(
-    strands: &[&ProjectedStrand],
-) -> Vec<OrientForestNode> {
+fn orient_forest_from_strands(strands: &[&ProjectedStrand]) -> Vec<OrientForestNode> {
     let id_set: HashSet<&str> = strands.iter().map(|s| s.id.as_str()).collect();
     let mut parent_of: HashMap<String, String> = HashMap::new();
     for s in strands {
         for target in &s.belongs_to_edges {
             if id_set.contains(target.as_str()) {
-                parent_of.entry(s.id.clone()).or_insert_with(|| target.clone());
+                parent_of
+                    .entry(s.id.clone())
+                    .or_insert_with(|| target.clone());
                 break;
             }
         }
     }
 
-    let mut node_map: HashMap<String, OrientForestNode> = strands.iter().map(|s| {
-        (s.id.clone(), OrientForestNode {
-            id: s.id.clone(),
-            strand_type: s.strand_type.clone(),
-            entry_count: s.log_count(),
-            summary: s.first_summary().to_string(),
-            last_entry: s.last_summary().to_string(),
-            last_offset: s.last_offset(),
-            lifecycle: s.state().to_string(),
-            children: Vec::new(),
+    let mut node_map: HashMap<String, OrientForestNode> = strands
+        .iter()
+        .map(|s| {
+            (
+                s.id.clone(),
+                OrientForestNode {
+                    id: s.id.clone(),
+                    strand_type: s.strand_type.clone(),
+                    entry_count: s.log_count(),
+                    summary: s.first_summary().to_string(),
+                    last_entry: s.last_summary().to_string(),
+                    last_offset: s.last_offset(),
+                    lifecycle: s.state().to_string(),
+                    children: Vec::new(),
+                },
+            )
         })
-    }).collect();
+        .collect();
     let child_ids: HashSet<String> = parent_of.keys().cloned().collect();
-    let mut root_ids: Vec<String> = strands.iter()
+    let mut root_ids: Vec<String> = strands
+        .iter()
         .filter(|s| !child_ids.contains(&s.id))
         .map(|s| s.id.clone())
         .collect();
@@ -340,12 +358,16 @@ fn orient_forest_from_strands(
     let mut children_of: HashMap<String, Vec<(String, usize)>> = HashMap::new();
     for (child_id, parent_id) in &parent_of {
         if let Some(node) = node_map.get(child_id) {
-            children_of.entry(parent_id.clone()).or_default().push((child_id.clone(), node.last_offset));
+            children_of
+                .entry(parent_id.clone())
+                .or_default()
+                .push((child_id.clone(), node.last_offset));
         }
     }
     for (parent_id, mut kids) in children_of {
         kids.sort_by(|a, b| b.1.cmp(&a.1));
-        let child_nodes: Vec<OrientForestNode> = kids.iter()
+        let child_nodes: Vec<OrientForestNode> = kids
+            .iter()
             .filter_map(|(cid, _)| node_map.remove(cid))
             .collect();
         if let Some(parent_node) = node_map.get_mut(&parent_id) {
@@ -357,12 +379,13 @@ fn orient_forest_from_strands(
         let ob = node_map.get(b).map(|n| n.last_offset).unwrap_or(0);
         ob.cmp(&oa)
     });
-    root_ids.into_iter().filter_map(|id| node_map.remove(&id)).collect()
+    root_ids
+        .into_iter()
+        .filter_map(|id| node_map.remove(&id))
+        .collect()
 }
 
-pub(crate) fn build_orient_forest(
-    strands: &[&ProjectedStrand],
-) -> Vec<OrientForestNode> {
+pub(crate) fn build_orient_forest(strands: &[&ProjectedStrand]) -> Vec<OrientForestNode> {
     orient_forest_from_strands(strands)
 }
 #[cfg(test)]
@@ -370,7 +393,13 @@ mod tests {
     use super::*;
     use crate::projection::{LogEntry, ProjectedStrand};
 
-    fn strand(id: &str, belongs: Vec<&str>, depends: Vec<&str>, status: &str, offset: usize) -> ProjectedStrand {
+    fn strand(
+        id: &str,
+        belongs: Vec<&str>,
+        depends: Vec<&str>,
+        status: &str,
+        offset: usize,
+    ) -> ProjectedStrand {
         ProjectedStrand {
             id: id.to_string(),
             log: vec![LogEntry {
@@ -381,7 +410,11 @@ mod tests {
                 append_id: None,
                 provenance: None,
             }],
-            edges: belongs.iter().chain(depends.iter()).map(|s| s.to_string()).collect(),
+            edges: belongs
+                .iter()
+                .chain(depends.iter())
+                .map(|s| s.to_string())
+                .collect(),
             belongs_to_edges: belongs.into_iter().map(str::to_string).collect(),
             depends_on_edges: depends.into_iter().map(str::to_string).collect(),
             hidden: false,
@@ -394,7 +427,10 @@ mod tests {
 
     #[test]
     fn belongs_to_subtree_descends_from_parent_to_child() {
-        let strands = vec![strand("parent", vec![], vec![], "registered", 1), strand("child", vec!["parent"], vec![], "registered", 2)];
+        let strands = vec![
+            strand("parent", vec![], vec![], "registered", 1),
+            strand("child", vec!["parent"], vec![], "registered", 2),
+        ];
         let graph = StrandGraph::from_strands(&strands);
         let ids = graph.subtree_ids("parent").unwrap();
         assert!(ids.contains("parent"));
@@ -417,6 +453,19 @@ mod tests {
     }
 
     #[test]
+    fn edge_findings_do_not_warn_on_closed_depends_upstream() {
+        let strands = vec![
+            strand("task", vec![], vec!["closed"], "registered", 1),
+            strand("closed", vec![], vec![], "closed:done", 2),
+        ];
+        let graph = StrandGraph::from_strands(&strands);
+        let findings = graph.edge_findings();
+        assert!(
+            findings.is_empty(),
+            "closed depends-on upstream is review context, not lint"
+        );
+    }
+    #[test]
     fn edge_findings_reports_cycle_and_multi_parent() {
         let strands = vec![
             strand("a", vec!["p1", "p2"], vec!["b"], "registered", 1),
@@ -426,10 +475,15 @@ mod tests {
         ];
         let graph = StrandGraph::from_strands(&strands);
         let findings = graph.edge_findings();
-        assert!(findings.iter().any(|f| f.kind == EdgeFindingKind::MultipleBelongsToParents));
-        assert!(findings.iter().any(|f| f.kind == EdgeFindingKind::DependsOnCycle));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == EdgeFindingKind::MultipleBelongsToParents)
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == EdgeFindingKind::DependsOnCycle)
+        );
     }
 }
-
-
-

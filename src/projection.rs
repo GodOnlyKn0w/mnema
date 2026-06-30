@@ -658,6 +658,7 @@ pub(crate) fn current_binding(
             subject_type: event_subject_type,
             subject_id: event_subject_id,
             strand_id,
+            ..
         } = event
         {
             if event_subject_type == subject_type && event_subject_id == subject_id {

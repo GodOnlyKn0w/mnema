@@ -283,12 +283,31 @@ pub(crate) fn read_stdin_binding() -> Result<(String, String, String), String> {
 /// Record a subject binding. Append-only. Resolves `--id` against the
 /// existing journal so the caller can use prefix matches; never creates
 /// a strand. Returns the binding's own event id.
+#[cfg(test)]
 pub(crate) fn cmd_bind(
     subject_type: Option<&str>,
     subject_id: Option<&str>,
     explicit_id: Option<&str>,
     stdin: bool,
     format_json: bool,
+) -> Result<(), String> {
+    cmd_bind_with_provenance(
+        subject_type,
+        subject_id,
+        explicit_id,
+        stdin,
+        format_json,
+        None,
+    )
+}
+
+pub(crate) fn cmd_bind_with_provenance(
+    subject_type: Option<&str>,
+    subject_id: Option<&str>,
+    explicit_id: Option<&str>,
+    stdin: bool,
+    format_json: bool,
+    provenance_raw: Option<&str>,
 ) -> Result<(), String> {
     let (st, sid, raw_strand) = if stdin {
         read_stdin_binding()?
@@ -315,7 +334,8 @@ pub(crate) fn cmd_bind(
     let full_strand = find_strand(&events, &raw_strand)
         .ok_or_else(|| format!("strand {} not found", raw_strand))?;
 
-    let event = event::make_subject_bound(&st, &sid, &full_strand);
+    let provenance = parse_provenance_arg(provenance_raw)?;
+    let event = event::make_subject_bound(&st, &sid, &full_strand, provenance);
     let binding_id = match &event {
         Event::SubjectBound { id, .. } => id.clone(),
         _ => unreachable!(),

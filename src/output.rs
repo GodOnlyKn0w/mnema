@@ -356,6 +356,10 @@ pub(crate) struct AddOutput<'a> {
     pub(crate) id: String,
     pub(crate) status: &'static str,
     pub(crate) provenance: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) edge_type: Option<&'static str>,
     pub(crate) result: Option<OrientStrand>,
 }
 

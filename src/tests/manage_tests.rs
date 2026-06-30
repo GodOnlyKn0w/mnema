@@ -59,6 +59,43 @@ fn bind_creates_subject_bound_event() {
 }
 
 #[test]
+fn bind_provenance_stored_on_subject_bound_event() {
+    let _env = setup();
+    let id = create_strand("bind provenance target");
+    cmd_bind_with_provenance(
+        Some("pi-session"),
+        Some("prov"),
+        Some(&id),
+        false,
+        false,
+        Some(r#"{"producer":"tester"}"#),
+    )
+    .unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let found = events.iter().any(|(_, e)| {
+        if let Event::SubjectBound {
+            subject_type,
+            subject_id,
+            provenance,
+            ..
+        } = e
+        {
+            subject_type == "pi-session"
+                && subject_id == "prov"
+                && provenance
+                    .as_ref()
+                    .and_then(|p| p.get("producer"))
+                    .and_then(|p| p.as_str())
+                    == Some("tester")
+        } else {
+            false
+        }
+    });
+    assert!(found, "bind --provenance must persist on SubjectBound");
+}
+
+#[test]
 fn bind_resolves_prefix_id() {
     let _env = setup();
     let id = create_strand("target strand");

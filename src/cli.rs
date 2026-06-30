@@ -1,11 +1,11 @@
-use clap::{error::ErrorKind, Parser, Subcommand};
 use crate::commands::context::*;
 use crate::commands::doctor::*;
 use crate::commands::manage::*;
 use crate::commands::query::*;
 use crate::commands::write::*;
-use crate::journal::{JOURNAL_DIR, JOURNAL_FILE};
 use crate::diagnostics;
+use crate::journal::{JOURNAL_DIR, JOURNAL_FILE};
+use clap::{Parser, Subcommand, error::ErrorKind};
 use std::path::PathBuf;
 
 fn version_info() -> &'static str {
@@ -82,7 +82,12 @@ struct IdTarget {
     id_flag: Option<String>,
 }
 impl IdTarget {
-    fn get(&self) -> Option<&str> { self.id_pos.as_deref().or(self.id_flag.as_deref()).filter(|s| !s.trim().is_empty()) }
+    fn get(&self) -> Option<&str> {
+        self.id_pos
+            .as_deref()
+            .or(self.id_flag.as_deref())
+            .filter(|s| !s.trim().is_empty())
+    }
 }
 
 #[derive(Subcommand)]
@@ -102,6 +107,7 @@ Rules:
 
 Examples:
   tasktree add \"start a new line of work\"
+  tasktree add --parent <PARENT> \"child line of work\"
   echo \"start a new line\" | tasktree add --stdin
   tasktree add --file brief.md")]
     Add {
@@ -116,6 +122,9 @@ Examples:
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
+        /// Parent strand id. Creates a belongs-to edge from the new child to this parent.
+        #[arg(long = "parent", visible_alias = "belongs-to", value_name = "PARENT")]
+        parent: Option<String>,
         /// Strand type: task, dag, why, session (default: auto-detect)
         #[arg(long = "type", value_name = "TYPE")]
         strand_type: Option<String>,
@@ -497,6 +506,9 @@ Rules:
         /// Schema: { "subject_type": "...", "subject_id": "...", "strand_id": "..." }
         #[arg(long)]
         stdin: bool,
+        /// Optional provenance JSON object. Stored on the SubjectBound event.
+        #[arg(long = "provenance", value_name = "JSON")]
+        provenance: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -567,7 +579,7 @@ Examples:
         #[arg(long, value_name = "PATH")]
         out: String,
     },
-    /// Show events in journal causal order (timeline projection)
+    /// Show entry events in journal append order (timeline projection)
     Timeline {
         /// Return events with journal_offset > N
         #[arg(long, value_name = "N", conflicts_with = "since_ts")]
@@ -582,7 +594,12 @@ Examples:
         #[arg(long, value_name = "RFC3339", conflicts_with = "until_offset")]
         until_ts: Option<String>,
         /// Filter to events from a single strand
-        #[arg(long, visible_alias = "id", value_name = "ID", conflicts_with = "links")]
+        #[arg(
+            long,
+            visible_alias = "id",
+            value_name = "ID",
+            conflicts_with = "links"
+        )]
         strand: Option<String>,
         /// Include DAG strand + directly linked strands
         #[arg(long, value_name = "ID", conflicts_with = "strand")]
@@ -658,11 +675,12 @@ JSON shape: tasktree explain json")]
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
     },
-    /// Analyse a strand's depends-on graph: blockers, readiness, critical path
+    /// Inspect depends-on upstreams as review context
     #[command(after_help = "\
-ready = every direct blocker is closed. critical path = the longest chain of
-still-open upstreams reachable via depends-on (closed upstreams terminate a
-path; cycles are guarded). Built on the typed depends-on projection (F3).
+depends-on is an attention edge for review and handoff context, not an
+execution gate. The legacy ready/open-blocker fields remain for compatibility;
+prefer upstream lifecycle facts when making decisions. Built on the typed
+depends-on projection (F3).
 
 Examples:
   tasktree depends <TASK>
@@ -705,11 +723,14 @@ Examples:
     },
 }
 
-
 #[derive(Subcommand)]
 enum DoctorTarget {
     /// Check journal integrity
-    Journal,
+    Journal {
+        /// Treat advisory warnings as blocking issues
+        #[arg(long)]
+        strict: bool,
+    },
 }
 
 /// NOTE: Strand sort key is `max(log_appended.ts)` per strand.
@@ -779,7 +800,16 @@ fn run(command: &Commands) -> Result<(), String> {
     // Checkpoint has its own error handling (exit codes 1/2/3, JSON output).
     // On failure it prints and exits directly; on success it returns Ok(()) so
     // stdout is flushed by the normal main() return path.
-    if let Commands::Checkpoint { id, action, tail, format, include_hidden, provenance, seen_offset } = command {
+    if let Commands::Checkpoint {
+        id,
+        action,
+        tail,
+        format,
+        include_hidden,
+        provenance,
+        seen_offset,
+    } = command
+    {
         let fmt = format.as_deref() == Some("json");
         match cmd_checkpoint_with_seen_offset(
             id.as_deref(),
@@ -805,10 +835,26 @@ fn run(command: &Commands) -> Result<(), String> {
 
     match command {
         Commands::Init => cmd_init(),
-        Commands::Add { content, stdin, file, format, strand_type, provenance } => {
+        Commands::Add {
+            content,
+            stdin,
+            file,
+            format,
+            parent,
+            strand_type,
+            provenance,
+        } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_add(content.as_deref(), *stdin, file.as_deref(), fmt, strand_type.as_deref(), provenance.as_deref())
-        },
+            cmd_add_with_parent(
+                content.as_deref(),
+                *stdin,
+                file.as_deref(),
+                fmt,
+                parent.as_deref(),
+                strand_type.as_deref(),
+                provenance.as_deref(),
+            )
+        }
         Commands::Append {
             content,
             id,
@@ -832,32 +878,97 @@ fn run(command: &Commands) -> Result<(), String> {
             *seen_offset,
             why.as_deref(),
         ),
-        Commands::List { all, links, backlinks, state, list_type, stale, stale_offset, since_offset, format } => {
+        Commands::List {
+            all,
+            links,
+            backlinks,
+            state,
+            list_type,
+            stale,
+            stale_offset,
+            since_offset,
+            format,
+        } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_list(*all, links.as_deref(), backlinks.as_deref(), state.as_deref(), list_type.as_deref(), stale.as_deref(), *stale_offset, *since_offset, fmt)
-        },
-        Commands::Show { target, last, tail, digest, format, locked } => {
+            cmd_list(
+                *all,
+                links.as_deref(),
+                backlinks.as_deref(),
+                state.as_deref(),
+                list_type.as_deref(),
+                stale.as_deref(),
+                *stale_offset,
+                *since_offset,
+                fmt,
+            )
+        }
+        Commands::Show {
+            target,
+            last,
+            tail,
+            digest,
+            format,
+            locked,
+        } => {
             let fmt = format.as_deref() == Some("json");
             cmd_show(target.get(), *last, *tail, fmt, *locked, *digest)
-        },
-        Commands::Search { query, format, include_hidden } => {
+        }
+        Commands::Search {
+            query,
+            format,
+            include_hidden,
+        } => {
             let fmt = format.as_deref() == Some("json");
             cmd_search(query, fmt, *include_hidden)
-        },
+        }
         Commands::Find { target, format } => match target.get() {
             Some(id) => cmd_find(id, format.as_deref() == Some("json")),
             None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
         },
-        Commands::Link { source, target, edge_type, format, provenance } => {
+        Commands::Link {
+            source,
+            target,
+            edge_type,
+            format,
+            provenance,
+        } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_link(source, target, edge_type.as_deref(), fmt, provenance.as_deref())
-        },
-        Commands::Unlink { source, target, edge_type, format, provenance } => {
+            cmd_link(
+                source,
+                target,
+                edge_type.as_deref(),
+                fmt,
+                provenance.as_deref(),
+            )
+        }
+        Commands::Unlink {
+            source,
+            target,
+            edge_type,
+            format,
+            provenance,
+        } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_unlink(source, target, edge_type.as_deref(), fmt, provenance.as_deref())
-        },
-        Commands::Hide { target, reason, format, provenance } => match target.get() {
-            Some(id) => cmd_hide(id, reason.as_deref(), format.as_deref() == Some("json"), provenance.as_deref()),
+            cmd_unlink(
+                source,
+                target,
+                edge_type.as_deref(),
+                fmt,
+                provenance.as_deref(),
+            )
+        }
+        Commands::Hide {
+            target,
+            reason,
+            format,
+            provenance,
+        } => match target.get() {
+            Some(id) => cmd_hide(
+                id,
+                reason.as_deref(),
+                format.as_deref() == Some("json"),
+                provenance.as_deref(),
+            ),
             None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
         },
         Commands::Unhide { target, format } => match target.get() {
@@ -865,26 +976,49 @@ fn run(command: &Commands) -> Result<(), String> {
             None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
         },
 
-        Commands::Close { id, disposition, format } => {
+        Commands::Close {
+            id,
+            disposition,
+            format,
+        } => {
             let fmt = format.as_deref() == Some("json");
             cmd_close(id, disposition.as_deref(), fmt)
-        },
+        }
 
         Commands::Reopen { id, format } => {
             let fmt = format.as_deref() == Some("json");
             cmd_reopen(id, fmt)
-        },
-
-        Commands::Timeline { since_offset, since_ts, until_offset, until_ts, strand, links, format, limit, tree } => {
-            cmd_timeline(*since_offset, since_ts.as_deref(), *until_offset, until_ts.as_deref(), strand.as_deref(), links.as_deref(), format.as_deref(), *limit, tree.as_deref())
         }
+
+        Commands::Timeline {
+            since_offset,
+            since_ts,
+            until_offset,
+            until_ts,
+            strand,
+            links,
+            format,
+            limit,
+            tree,
+        } => cmd_timeline(
+            *since_offset,
+            since_ts.as_deref(),
+            *until_offset,
+            until_ts.as_deref(),
+            strand.as_deref(),
+            links.as_deref(),
+            format.as_deref(),
+            *limit,
+            tree.as_deref(),
+        ),
         Commands::Explain { code, format, json } => {
             let is_json = *json || format.as_deref() == Some("json");
             let output = diagnostics::cmd_explain(code, is_json);
             println!("{}", output);
             // Exit 0 when code or topic resolves; exit 1 otherwise.
             let lowered = code.to_lowercase();
-            if diagnostics::lookup(code).is_some() || diagnostics::topic_lookup(&lowered).is_some() {
+            if diagnostics::lookup(code).is_some() || diagnostics::topic_lookup(&lowered).is_some()
+            {
                 Ok(())
             } else {
                 Err(format!("unknown code or topic: {}", code))
@@ -892,14 +1026,14 @@ fn run(command: &Commands) -> Result<(), String> {
         }
         Commands::Doctor { target } => {
             let result = match target {
-                DoctorTarget::Journal => cmd_doctor_journal(),
+                DoctorTarget::Journal { strict } => cmd_doctor_journal(*strict),
             };
             match result {
                 Ok(true) => Err("journal issues detected".to_string()),
                 Ok(false) => Ok(()),
                 Err(e) => Err(format!("journal unreadable: {}", e)),
             }
-        },
+        }
 
         Commands::Export { out } => cmd_export(out),
 
@@ -913,25 +1047,59 @@ fn run(command: &Commands) -> Result<(), String> {
             None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
         },
 
-        Commands::Orient { format, include_hidden, limit, tree } => cmd_orient(format.as_deref(), *include_hidden, *limit, *tree),
+        Commands::Orient {
+            format,
+            include_hidden,
+            limit,
+            tree,
+        } => cmd_orient(format.as_deref(), *include_hidden, *limit, *tree),
 
-        Commands::AgentContext { format, include_hidden } => cmd_agent_context(format.as_deref(), *include_hidden),
+        Commands::AgentContext {
+            format,
+            include_hidden,
+        } => cmd_agent_context(format.as_deref(), *include_hidden),
 
-        Commands::Context { context_type, covers, since_offset, format, exclude_friction, include_hidden, include_observations } => {
-            cmd_context(context_type.as_deref(), &covers, *since_offset, format.as_deref(), *exclude_friction, *include_hidden, *include_observations)
-        },
+        Commands::Context {
+            context_type,
+            covers,
+            since_offset,
+            format,
+            exclude_friction,
+            include_hidden,
+            include_observations,
+        } => cmd_context(
+            context_type.as_deref(),
+            &covers,
+            *since_offset,
+            format.as_deref(),
+            *exclude_friction,
+            *include_hidden,
+            *include_observations,
+        ),
 
-        Commands::Bind { subject_type, subject_id, id, stdin, format } => {
+        Commands::Bind {
+            subject_type,
+            subject_id,
+            id,
+            stdin,
+            format,
+            provenance,
+        } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_bind(
+            cmd_bind_with_provenance(
                 subject_type.as_deref(),
                 subject_id.as_deref(),
                 id.as_deref(),
                 *stdin,
                 fmt,
+                provenance.as_deref(),
             )
         }
-        Commands::Current { subject_type, subject_id, format } => {
+        Commands::Current {
+            subject_type,
+            subject_id,
+            format,
+        } => {
             let fmt = format.as_deref() == Some("json");
             cmd_current(subject_type.as_deref(), subject_id.as_deref(), fmt)
         }
@@ -963,4 +1131,3 @@ pub(crate) fn exit_code_for(e: &str) -> i32 {
         1
     }
 }
-

@@ -35,11 +35,32 @@ pub(crate) fn normalize_content(raw: &str) -> String {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn cmd_add(
     content: Option<&str>,
     stdin: bool,
     file: Option<&str>,
     format_json: bool,
+    strand_type: Option<&str>,
+    provenance_raw: Option<&str>,
+) -> Result<(), String> {
+    cmd_add_with_parent(
+        content,
+        stdin,
+        file,
+        format_json,
+        None,
+        strand_type,
+        provenance_raw,
+    )
+}
+
+pub(crate) fn cmd_add_with_parent(
+    content: Option<&str>,
+    stdin: bool,
+    file: Option<&str>,
+    format_json: bool,
+    parent: Option<&str>,
     strand_type: Option<&str>,
     provenance_raw: Option<&str>,
 ) -> Result<(), String> {
@@ -109,8 +130,22 @@ pub(crate) fn cmd_add(
     });
 
     let provenance = parse_provenance_arg(provenance_raw)?;
+    let parent_id = if let Some(parent_raw) = parent {
+        let parent_raw = parent_raw.trim();
+        if parent_raw.is_empty() {
+            return Err("--parent cannot be empty".to_string());
+        }
+        let path = ensure_journal()?;
+        let (events, _) = read_events_lossy(&path);
+        Some(
+            find_strand(&events, parent_raw)
+                .ok_or_else(|| format!("parent strand {} not found", parent_raw))?,
+        )
+    } else {
+        None
+    };
 
-    // acquire lock once, write both events atomically
+    // acquire lock once, write all events atomically
     let result = with_journal_write_lock(|journal| {
         let (created, mut appended) = event::make_strand_created(&stored, resolved_type);
         // Attach provenance to the initial LogAppended event
@@ -124,6 +159,11 @@ pub(crate) fn cmd_add(
         let id = created.strand_id().to_string();
         append_event_unlocked(journal, &created)?;
         append_event_unlocked(journal, &appended)?;
+        if let Some(parent_id) = &parent_id {
+            let edge =
+                event::make_edge_linked(&id, parent_id, Some("belongs-to"), provenance.clone());
+            append_event_unlocked(journal, &edge)?;
+        }
         Ok(id)
     });
     let id = match result {
@@ -135,6 +175,8 @@ pub(crate) fn cmd_add(
             id: id.clone(),
             status: "ok",
             provenance: provenance.as_ref(),
+            parent_id: parent_id.clone(),
+            edge_type: parent_id.as_ref().map(|_| "belongs-to"),
             result: strand_card_fresh(&id),
         };
         println!("{}", serde_json::to_string(&output).unwrap());
@@ -306,6 +348,10 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         }
     }
 
+    if req.explicit_id.map_or(false, |id| id.trim().is_empty()) {
+        return Err("explicit --id cannot be empty".to_string());
+    }
+
     let target_count = [req.new, req.explicit_id.is_some(), req.legacy_id.is_some()]
         .iter()
         .filter(|&&x| x)
@@ -321,8 +367,17 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         );
     }
 
+    let provenance = parse_provenance_arg(req.provenance_raw)?;
+
     if req.new {
-        let (created, appended) = event::make_strand_created(&stored, Some("session"));
+        let (created, mut appended) = event::make_strand_created(&stored, Some("session"));
+        if let Event::LogAppended {
+            provenance: ref mut prov_field,
+            ..
+        } = appended
+        {
+            *prov_field = provenance.clone();
+        }
         let new_id = created.strand_id().to_string();
         with_journal_write_lock(|journal| {
             append_event_unlocked(journal, &created)?;
@@ -334,7 +389,7 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
             strand_id: new_id.clone(),
             append_id: None,
             stored_content: stored,
-            provenance: None,
+            provenance: provenance.clone(),
             seen_offset: req.seen_offset,
             seen_warning: None,
             marker_warning: None,
@@ -371,7 +426,6 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         .unwrap_or(0);
     let seen_warning =
         diagnostics::check_w076_seen_offset(&full_id, req.seen_offset, strand_last_offset);
-    let provenance = parse_provenance_arg(req.provenance_raw)?;
     let pinned_ref: Option<String> = match req.why {
         Some(w) => {
             let tgt = find_strand(&events, w)
