@@ -1,11 +1,11 @@
 //! Journal-backed view adapter.
 //!
 //! This module is the seam between append-only journal state and pure render
-//! functions. `render` builds and prints presentation values; this module reads
+//! functions. `output` builds contract values; this module reads
 //! the journal when callers need a fresh post-write view.
 
 use crate::journal::{ensure_journal, read_events_lossy};
-use crate::{output, projection, render};
+use crate::{output, projection};
 use serde_json::json;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +22,7 @@ pub(crate) fn strand_card_fresh(strand_id: &str) -> Option<output::OrientStrand>
     strands
         .iter()
         .find(|s| s.id == strand_id)
-        .map(render::make_card)
+        .map(output::OrientStrand::from)
 }
 
 pub(crate) fn strand_card_fresh_with_state(
@@ -34,7 +34,7 @@ pub(crate) fn strand_card_fresh_with_state(
     strands
         .iter()
         .find(|s| s.id == strand_id)
-        .map(|s| (render::make_card(s), s.state().to_string()))
+        .map(|s| (output::OrientStrand::from(s), s.state().to_string()))
 }
 
 pub(crate) fn visibility_ledger() -> Option<VisibilityLedger> {

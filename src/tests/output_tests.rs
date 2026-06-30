@@ -111,10 +111,10 @@ fn show_search_context_unchanged() {
     assert!(r.is_ok());
 }
 
-// ── card echo: make_card ──
+// ── orient card DTO ──
 
 #[test]
-fn make_card_fields_match_projected_strand() {
+fn orient_strand_fields_match_projected_strand() {
     let _env = setup();
     let id = create_strand("summary text for the card");
     cmd_append(
@@ -135,7 +135,7 @@ fn make_card_fields_match_projected_strand() {
         .iter()
         .find(|s| s.id == id)
         .expect("strand must exist");
-    let card = make_card(s);
+    let card = output::OrientStrand::from(s);
     assert_eq!(card.id, id);
     assert_eq!(card.entry_count, 2);
     assert_eq!(card.summary, truncate(s.first_summary(), 70));
@@ -144,7 +144,7 @@ fn make_card_fields_match_projected_strand() {
 }
 
 #[test]
-fn make_card_truncates_prose_to_70() {
+fn orient_strand_truncates_prose_to_70() {
     let _env = setup();
     let long = "x".repeat(100);
     let id = create_strand(&long);
@@ -155,7 +155,7 @@ fn make_card_truncates_prose_to_70() {
         .iter()
         .find(|s| s.id == id)
         .expect("strand must exist");
-    let card = make_card(s);
+    let card = output::OrientStrand::from(s);
     // truncate(100-char string, 70) → 70 chars + "..." = 73 total
     assert!(
         card.summary.len() <= 73,
@@ -297,7 +297,7 @@ fn handles_card_id_is_legal_prefix() {
         .iter()
         .find(|s| s.id == id)
         .expect("strand must exist");
-    let card = make_card(s);
+    let card = output::OrientStrand::from(s);
 
     // id: exactly 12 hex chars, is prefix of full id, contains no '…'
     assert_eq!(card.id.len(), 24, "card.id must be the full 24-hex id");
@@ -332,7 +332,7 @@ fn handles_card_id_is_legal_prefix() {
 
 // ── Test 2 ────────────────────────────────────────────────────────────
 
-// build_orient with long-summary strands: each OrientStrand in active[]
+// orient output with long-summary strands: each OrientStrand in active[]
 //   - id is 12 chars, prefix of full id, no '…'
 //   - catch_up has no '…', parses, and contains card.id (link points to self)
 //   - last_offset is the real offset
@@ -350,7 +350,7 @@ fn handles_orient_text_complete() {
     let (events, _) = read_events_lossy(&path);
     let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
     let strands = projection::project_strands(&events, true);
-    let out = build_orient(&strands, false, 10, max_offset);
+    let out = orient_output(&strands, false, 10, max_offset);
 
     assert!(
         !out.active.is_empty(),
@@ -601,7 +601,7 @@ fn handles_diag_details_parse() {
 //
 //   show --format json  → StrandDetailOutput.id = full id
 //   list --format json  → StrandListItem.id      = full id
-//   orient --format json (via build_orient) → OrientStrand.id = shorten(full id) = 12 chars
+//   orient --format json (via orient output) → OrientStrand.id = shorten(full id) = 12 chars
 //   search --format json → SearchMatch.strand_id = full id
 //
 // All forms are legally usable as tasktree --id arguments (prefix match
@@ -650,9 +650,9 @@ fn handles_truncate_never_applied_to_ids() {
         "list JSON: id must not contain truncation marker"
     );
 
-    // orient --format json (build_orient): full 24-hex id (joins across outputs)
+    // orient --format json (orient output): full 24-hex id (joins across outputs)
     let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
-    let out = build_orient(&strands, false, 10, max_offset);
+    let out = orient_output(&strands, false, 10, max_offset);
     let orient_card = out
         .active
         .iter()
@@ -787,7 +787,7 @@ fn handles_checkpoint_handle_fields() {
         .iter()
         .find(|s| s.id == id_a)
         .expect("strand A must exist");
-    let card = make_card(s);
+    let card = output::OrientStrand::from(s);
     assert_eq!(card.id, id_a, "post-checkpoint card id must be the full id");
     assert!(
         !card.catch_up.contains('\u{2026}') && !card.catch_up.contains("..."),
@@ -958,7 +958,7 @@ fn orient_catch_up_shows_content_not_empty_delta() {
     let (events, _) = read_events_lossy(&ensure_journal().unwrap());
     let strands = projection::project_strands(&events, true);
     let s = strands.iter().find(|s| s.id == id).unwrap();
-    let card = render::make_card(s);
+    let card = output::OrientStrand::from(s);
     // catch-up must show the strand's recent content (never the empty-prone
     // `--since-offset <last_offset>` form, which shows nothing at orient time).
     assert!(

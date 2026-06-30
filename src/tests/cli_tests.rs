@@ -298,7 +298,7 @@ fn orient_catch_up_command_parses() {
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
-    let out = build_orient(&strands, false, 10, 2);
+    let out = orient_output(&strands, false, 10, 2);
     try_parse_example(&out.active[0].catch_up).unwrap();
     let _ = id;
 }
@@ -458,7 +458,7 @@ fn grammar_json_field_naming() {
             strands: strands.iter().map(output::StrandListItem::from).collect(),
         })
         .unwrap(),
-        serde_json::to_value(build_orient(&strands, true, 10, 2)).unwrap(),
+        serde_json::to_value(orient_output(&strands, true, 10, 2)).unwrap(),
         serde_json::to_value(output::SearchOutput {
             matches: vec![],
             count: 0,

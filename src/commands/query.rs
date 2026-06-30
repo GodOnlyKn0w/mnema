@@ -403,14 +403,20 @@ pub(crate) struct OrientRequest {
 
 pub(crate) struct OrientPlan {
     pub(crate) strands: Vec<projection::ProjectedStrand>,
+    pub(crate) view: projection::OrientView,
     pub(crate) output: output::OrientOutput,
 }
 
 pub(crate) fn orient_plan(events: &[(usize, Event)], req: &OrientRequest) -> OrientPlan {
     let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
     let strands = projection::project_strands(events, true);
-    let output = build_orient(&strands, req.include_hidden, req.limit, max_offset);
-    OrientPlan { strands, output }
+    let view = projection::build_orient_view(&strands, req.include_hidden, req.limit, max_offset);
+    let output = output::OrientOutput::from((&view, strands.as_slice()));
+    OrientPlan {
+        strands,
+        view,
+        output,
+    }
 }
 pub(crate) fn cmd_orient(
     format: Option<&str>,
@@ -427,22 +433,21 @@ pub(crate) fn cmd_orient(
     };
     let plan = orient_plan(&events, &request);
     let strands = &plan.strands;
+    let view = &plan.view;
     let out = &plan.output;
 
     if show_tree {
         // Build the belongs-to forest from the active strand set.
         // The tree module returns projection nodes; Contract Surface maps them
         // to the public orient-tree DTO below.
-        let active_strands: Vec<&projection::ProjectedStrand> = out
-            .active
+        let active_strands: Vec<&projection::ProjectedStrand> = view
+            .active_ids
             .iter()
-            .filter_map(|card| strands.iter().find(|s| s.id == card.id))
+            .filter_map(|id| strands.iter().find(|s| &s.id == id))
             .collect();
         let forest = tree::build_orient_forest(&active_strands);
-        let roots: Vec<output::OrientForestNode> = forest
-            .iter()
-            .map(output::OrientForestNode::from)
-            .collect();
+        let roots: Vec<output::OrientForestNode> =
+            forest.iter().map(output::OrientForestNode::from).collect();
         let tree_out = output::OrientTreeOutput {
             max_offset: out.max_offset,
             roots,
@@ -838,4 +843,3 @@ pub(crate) fn cmd_depends(id: &str, format_json: Option<&str>) -> Result<(), Str
     }
     Ok(())
 }
-

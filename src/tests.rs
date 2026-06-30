@@ -12,12 +12,21 @@ use crate::markers::{
     levenshtein, suggest_marker, validate_lifecycle_marker,
 };
 use crate::output;
+use crate::output::ORIENT_REMIND;
 use crate::projection;
-use crate::render::{self, *};
 use crate::tree;
 use crate::util::*;
 use std::fs;
 
+fn orient_output(
+    strands: &[projection::ProjectedStrand],
+    include_hidden: bool,
+    limit: usize,
+    max_offset: usize,
+) -> output::OrientOutput {
+    let view = projection::build_orient_view(strands, include_hidden, limit, max_offset);
+    output::OrientOutput::from((&view, strands))
+}
 mod support;
 use support::*;
 

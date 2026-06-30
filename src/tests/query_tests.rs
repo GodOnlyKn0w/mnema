@@ -10,10 +10,10 @@ fn orient_menu_shows_active_folds_closed() {
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let max_offset = events.last().map(|(o, _)| *o).unwrap();
-    // build_orient always receives the full strand list (include_hidden=true
-    // in projection); the visible/hidden split is done inside build_orient.
+    // orient_output always receives the full strand list (include_hidden=true
+    // in projection); the visible/hidden split is done inside the orient view.
     let strands = projection::project_strands(&events, true);
-    let out = build_orient(&strands, false, 10, max_offset);
+    let out = orient_output(&strands, false, 10, max_offset);
 
     assert_eq!(out.max_offset, max_offset);
     assert_eq!(out.active.len(), 1);
@@ -48,7 +48,7 @@ fn orient_hidden_count_reflects_scar_principle() {
 
     // Default view (include_hidden=false): hidden strand must be absent
     // from active/closed pools but counted in hidden_count.
-    let out = build_orient(&strands, false, 10, max_offset);
+    let out = orient_output(&strands, false, 10, max_offset);
     assert_eq!(
         out.hidden_count, 1,
         "hidden strand must appear in hidden_count"
@@ -68,7 +68,7 @@ fn orient_hidden_count_reflects_scar_principle() {
     );
 
     // include_hidden=true: hidden strand joins the pool; hidden_count=0.
-    let out_all = build_orient(&strands, true, 10, max_offset);
+    let out_all = orient_output(&strands, true, 10, max_offset);
     assert_eq!(
         out_all.hidden_count, 0,
         "include_hidden=true must yield hidden_count=0"
@@ -100,7 +100,7 @@ fn orient_limit_keeps_most_recent() {
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
-    let out = build_orient(&strands, false, 1, events.last().map(|(o, _)| *o).unwrap());
+    let out = orient_output(&strands, false, 1, events.last().map(|(o, _)| *o).unwrap());
 
     assert_eq!(out.active.len(), 1);
     // `older` was touched last, so it outranks `newer` in the menu.
@@ -124,7 +124,7 @@ fn orient_flat_unaffected_by_belongs_to_edges() {
     let (events, _) = read_events_lossy(&path);
     let max_offset = events.last().map(|(o, _)| *o).unwrap();
     let strands = projection::project_strands(&events, true);
-    let out = build_orient(&strands, false, 10, max_offset);
+    let out = orient_output(&strands, false, 10, max_offset);
 
     // Flat orient must still return both strands in a flat list
     assert_eq!(out.active.len(), 2, "flat orient: both strands must appear");
@@ -152,7 +152,7 @@ fn orient_tree_nests_belongs_to_child_under_parent() {
     let (events, _) = read_events_lossy(&path);
     let max_offset = events.last().map(|(o, _)| *o).unwrap();
     let strands = projection::project_strands(&events, true);
-    let out = build_orient(&strands, false, 10, max_offset);
+    let out = orient_output(&strands, false, 10, max_offset);
 
     // Build active projection strands for tree construction (mirror of cmd_orient logic)
     let active_strands: Vec<&projection::ProjectedStrand> = out
@@ -187,7 +187,7 @@ fn orient_tree_parallel_siblings_visible_under_parent() {
     let (events, _) = read_events_lossy(&path);
     let max_offset = events.last().map(|(o, _)| *o).unwrap();
     let strands = projection::project_strands(&events, true);
-    let out = build_orient(&strands, false, 10, max_offset);
+    let out = orient_output(&strands, false, 10, max_offset);
 
     let active_strands: Vec<&projection::ProjectedStrand> = out
         .active
@@ -203,11 +203,7 @@ fn orient_tree_parallel_siblings_visible_under_parent() {
         2,
         "both siblings must appear under parent"
     );
-    let child_ids: Vec<&str> = roots[0]
-        .children
-        .iter()
-        .map(|n| n.id.as_str())
-        .collect();
+    let child_ids: Vec<&str> = roots[0].children.iter().map(|n| n.id.as_str()).collect();
     assert!(
         child_ids.contains(&sibling_a.as_str()),
         "sibling A must be visible"
@@ -231,7 +227,7 @@ fn orient_tree_orphan_strands_are_roots() {
     let (events, _) = read_events_lossy(&path);
     let max_offset = events.last().map(|(o, _)| *o).unwrap();
     let strands = projection::project_strands(&events, true);
-    let out = build_orient(&strands, false, 10, max_offset);
+    let out = orient_output(&strands, false, 10, max_offset);
 
     let active_strands: Vec<&projection::ProjectedStrand> = out
         .active
@@ -273,7 +269,7 @@ fn orient_tree_no_contention_markers() {
     let (events, _) = read_events_lossy(&path);
     let max_offset = events.last().map(|(o, _)| *o).unwrap();
     let strands = projection::project_strands(&events, true);
-    let out = build_orient(&strands, false, 10, max_offset);
+    let out = orient_output(&strands, false, 10, max_offset);
 
     let active_strands: Vec<&projection::ProjectedStrand> = out
         .active
@@ -307,7 +303,7 @@ fn orient_tree_json_shape_is_nested() {
     let (events, _) = read_events_lossy(&path);
     let max_offset = events.last().map(|(o, _)| *o).unwrap();
     let strands = projection::project_strands(&events, true);
-    let out = build_orient(&strands, false, 10, max_offset);
+    let out = orient_output(&strands, false, 10, max_offset);
 
     let active_strands: Vec<&projection::ProjectedStrand> = out
         .active
@@ -315,10 +311,8 @@ fn orient_tree_json_shape_is_nested() {
         .filter_map(|card| strands.iter().find(|s| s.id == card.id))
         .collect();
     let roots = tree::build_orient_forest(&active_strands);
-    let roots: Vec<output::OrientForestNode> = roots
-        .iter()
-        .map(output::OrientForestNode::from)
-        .collect();
+    let roots: Vec<output::OrientForestNode> =
+        roots.iter().map(output::OrientForestNode::from).collect();
     let tree_out = output::OrientTreeOutput {
         max_offset,
         roots,
@@ -440,7 +434,7 @@ fn tree_and_orient_forest_agree_on_nesting() {
     tree_child_ids.sort();
 
     // build_orient_forest (orient --tree) view
-    let out = build_orient(&strands, false, 10, max_offset);
+    let out = orient_output(&strands, false, 10, max_offset);
     let active_strands: Vec<&projection::ProjectedStrand> = out
         .active
         .iter()
@@ -451,11 +445,8 @@ fn tree_and_orient_forest_agree_on_nesting() {
         .iter()
         .find(|n| n.id == parent)
         .expect("parent is a root in the forest");
-    let mut forest_child_ids: Vec<String> = parent_root
-        .children
-        .iter()
-        .map(|c| c.id.clone())
-        .collect();
+    let mut forest_child_ids: Vec<String> =
+        parent_root.children.iter().map(|c| c.id.clone()).collect();
     forest_child_ids.sort();
 
     assert_eq!(
@@ -830,5 +821,3 @@ fn show_tail_works_with_explicit_id() {
 
 // StrandDetailOutput (show --format json) must serialize as "entry_count",
 // not "entries".
-
-

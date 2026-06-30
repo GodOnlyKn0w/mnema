@@ -13,10 +13,13 @@
 
 use serde::Serialize;
 
-use crate::projection::ProjectedStrand;
+use crate::projection::{OrientView, ProjectedStrand};
 use crate::util::truncate;
 
 // ── orient --format json ───────────────────────────────────
+
+/// Orient remind line: the operating loop surfaced by orient outputs.
+pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | read/extract → --format json | jq（id/offset/status，非文本切割）| more → tasktree --help";
 
 /// One active strand in the orient menu.
 #[derive(Debug, Serialize, Clone)]
@@ -89,6 +92,22 @@ pub struct OrientOutput {
     pub remind: String,
 }
 
+impl From<(&OrientView, &[ProjectedStrand])> for OrientOutput {
+    fn from((view, strands): (&OrientView, &[ProjectedStrand])) -> Self {
+        OrientOutput {
+            max_offset: view.max_offset,
+            active: view
+                .active_ids
+                .iter()
+                .filter_map(|id| strands.iter().find(|s| &s.id == id))
+                .map(OrientStrand::from)
+                .collect(),
+            closed_count: view.closed_count,
+            hidden_count: view.hidden_count,
+            remind: ORIENT_REMIND.to_string(),
+        }
+    }
+}
 /// External contract for `orient --tree --format json`.
 /// Strands are arranged as a belongs-to forest: strands declaring
 /// `belongs-to` edges to other active strands are nested under their parent.
@@ -230,14 +249,18 @@ impl From<&ProjectedStrand> for StrandDetailOutput {
             edges: s.edges.clone(),
             belongs_to_edges: s.belongs_to_edges.clone(),
             depends_on_edges: s.depends_on_edges.clone(),
-            strand_branch: None,   // deprecated; always null
-            events: s.log.iter().map(|e| EventOutput {
-                ts: e.ts.clone(),
-                append_id: e.append_id.clone(),
-                entry: e.content.clone(),
-                provenance: e.provenance.clone(),
-                ref_field: e.ref_.clone(),
-            }).collect(),
+            strand_branch: None, // deprecated; always null
+            events: s
+                .log
+                .iter()
+                .map(|e| EventOutput {
+                    ts: e.ts.clone(),
+                    append_id: e.append_id.clone(),
+                    entry: e.content.clone(),
+                    provenance: e.provenance.clone(),
+                    ref_field: e.ref_.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -266,9 +289,7 @@ pub enum TimelineEventKindOutput {
         edge_type: Option<String>,
     },
     #[serde(rename = "edge_unlinked")]
-    EdgeUnlinked {
-        target_id: String,
-    },
+    EdgeUnlinked { target_id: String },
     #[serde(rename = "strand_hidden")]
     StrandHidden,
     #[serde(rename = "strand_unhidden")]
@@ -287,14 +308,14 @@ pub enum TimelineEventKindOutput {
         strand_id: String,
     },
     #[serde(rename = "strand_closed")]
-    StrandClosed {
-        disposition: String,
-    },
+    StrandClosed { disposition: String },
     #[serde(rename = "strand_reopened")]
     StrandReopened,
 }
 
-fn is_false(b: &bool) -> bool { !b }
+fn is_false(b: &bool) -> bool {
+    !b
+}
 
 /// One timeline entry in JSON output.
 #[derive(Debug, Serialize)]
@@ -326,38 +347,63 @@ impl From<&crate::event::TimelineEntry> for TimelineEntryOutput {
             strand_id: e.strand_id.clone(),
             strand_type: e.strand_type.clone(),
             kind: match &e.kind {
-                crate::event::TimelineEventKind::StrandCreated { summary } =>
-                    TimelineEventKindOutput::StrandCreated { summary: summary.clone() },
-                crate::event::TimelineEventKind::LogAppended { content, append_id } =>
-                    TimelineEventKindOutput::LogAppended { content: content.clone(), append_id: append_id.clone() },
-                crate::event::TimelineEventKind::EdgeLinked { target_id, edge_type } =>
-                    TimelineEventKindOutput::EdgeLinked { target_id: target_id.clone(), edge_type: edge_type.clone() },
-                crate::event::TimelineEventKind::EdgeUnlinked { target_id } =>
-                    TimelineEventKindOutput::EdgeUnlinked { target_id: target_id.clone() },
-                crate::event::TimelineEventKind::StrandHidden =>
-                    TimelineEventKindOutput::StrandHidden,
-                crate::event::TimelineEventKind::StrandUnhidden =>
-                    TimelineEventKindOutput::StrandUnhidden,
-                crate::event::TimelineEventKind::CheckpointCreated { observed, action, append_id } =>
-                    TimelineEventKindOutput::CheckpointCreated {
-                        observed: observed.clone(),
-                        action: action.clone(),
+                crate::event::TimelineEventKind::StrandCreated { summary } => {
+                    TimelineEventKindOutput::StrandCreated {
+                        summary: summary.clone(),
+                    }
+                }
+                crate::event::TimelineEventKind::LogAppended { content, append_id } => {
+                    TimelineEventKindOutput::LogAppended {
+                        content: content.clone(),
                         append_id: append_id.clone(),
-                    },
-                crate::event::TimelineEventKind::SubjectBound { subject_type, subject_id, strand_id } =>
-                    TimelineEventKindOutput::SubjectBound {
-                        subject_type: subject_type.clone(),
-                        subject_id: subject_id.clone(),
-                        strand_id: strand_id.clone(),
-                    },
-                crate::event::TimelineEventKind::StrandClosed { disposition } =>
-                    TimelineEventKindOutput::StrandClosed { disposition: disposition.clone() },
-                crate::event::TimelineEventKind::StrandReopened =>
-                    TimelineEventKindOutput::StrandReopened,
+                    }
+                }
+                crate::event::TimelineEventKind::EdgeLinked {
+                    target_id,
+                    edge_type,
+                } => TimelineEventKindOutput::EdgeLinked {
+                    target_id: target_id.clone(),
+                    edge_type: edge_type.clone(),
+                },
+                crate::event::TimelineEventKind::EdgeUnlinked { target_id } => {
+                    TimelineEventKindOutput::EdgeUnlinked {
+                        target_id: target_id.clone(),
+                    }
+                }
+                crate::event::TimelineEventKind::StrandHidden => {
+                    TimelineEventKindOutput::StrandHidden
+                }
+                crate::event::TimelineEventKind::StrandUnhidden => {
+                    TimelineEventKindOutput::StrandUnhidden
+                }
+                crate::event::TimelineEventKind::CheckpointCreated {
+                    observed,
+                    action,
+                    append_id,
+                } => TimelineEventKindOutput::CheckpointCreated {
+                    observed: observed.clone(),
+                    action: action.clone(),
+                    append_id: append_id.clone(),
+                },
+                crate::event::TimelineEventKind::SubjectBound {
+                    subject_type,
+                    subject_id,
+                    strand_id,
+                } => TimelineEventKindOutput::SubjectBound {
+                    subject_type: subject_type.clone(),
+                    subject_id: subject_id.clone(),
+                    strand_id: strand_id.clone(),
+                },
+                crate::event::TimelineEventKind::StrandClosed { disposition } => {
+                    TimelineEventKindOutput::StrandClosed {
+                        disposition: disposition.clone(),
+                    }
+                }
+                crate::event::TimelineEventKind::StrandReopened => {
+                    TimelineEventKindOutput::StrandReopened
+                }
             },
             ts_skew: e.ts_skew,
         }
     }
 }
-
-

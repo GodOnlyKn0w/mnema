@@ -45,13 +45,7 @@ pub const STATE_MARKERS: &[&str] = &[
 ];
 
 /// Valid close dispositions accepted by `tasktree close --as <DISPOSITION>`.
-pub const CLOSE_DISPOSITIONS: &[&str] = &[
-    "done",
-    "failed",
-    "cancelled",
-    "merged",
-    "verified",
-];
+pub const CLOSE_DISPOSITIONS: &[&str] = &["done", "failed", "cancelled", "merged", "verified"];
 
 /// Compute canonical lifecycle state from raw events (not log content).
 /// Only StrandClosed and StrandReopened events affect state;
@@ -79,12 +73,12 @@ pub fn compute_state_from_events(
         }
     }
     match last {
-        Some((offset, Event::StrandClosed { disposition, .. })) => {
-            (format!("closed:{}", disposition), disposition.clone(), offset)
-        }
-        Some((_, Event::StrandReopened { .. })) => {
-            ("registered".to_string(), String::new(), 0)
-        }
+        Some((offset, Event::StrandClosed { disposition, .. })) => (
+            format!("closed:{}", disposition),
+            disposition.clone(),
+            offset,
+        ),
+        Some((_, Event::StrandReopened { .. })) => ("registered".to_string(), String::new(), 0),
         _ => ("registered".to_string(), String::new(), 0),
     }
 }
@@ -155,6 +149,57 @@ impl ProjectedStrand {
     }
 }
 
+// ── Orient view ────────────────────────────────────────────
+
+/// Internal derived view for `orient`.
+///
+/// This is projection state, not the public JSON contract. It keeps only the
+/// selected active strand IDs plus fold counts; Contract Surface maps those IDs
+/// back to DTO cards.
+#[derive(Debug)]
+pub struct OrientView {
+    pub max_offset: usize,
+    pub active_ids: Vec<String>,
+    pub closed_count: usize,
+    pub hidden_count: usize,
+}
+
+/// Build the orient menu view from a full strand projection.
+///
+/// `strands` must include hidden strands so the default view can exclude them
+/// while still reporting `hidden_count`.
+pub fn build_orient_view(
+    strands: &[ProjectedStrand],
+    include_hidden: bool,
+    limit: usize,
+    max_offset: usize,
+) -> OrientView {
+    let hidden_count = if include_hidden {
+        0
+    } else {
+        strands.iter().filter(|s| s.hidden).count()
+    };
+    let visible: Vec<&ProjectedStrand> = strands
+        .iter()
+        .filter(|s| !s.hidden || include_hidden)
+        .collect();
+    let mut active: Vec<&ProjectedStrand> = visible
+        .iter()
+        .copied()
+        .filter(|s| s.state() == "registered")
+        .collect();
+    let closed_count = visible.len() - active.len();
+
+    active.sort_by(|a, b| b.last_offset().cmp(&a.last_offset()));
+    active.truncate(limit);
+
+    OrientView {
+        max_offset,
+        active_ids: active.iter().map(|s| s.id.clone()).collect(),
+        closed_count,
+        hidden_count,
+    }
+}
 // ── Entry point: project_raw → structured ──────────────────
 
 /// Project raw event stream into a Vec<ProjectedStrand>.
@@ -289,7 +334,10 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
     let mut strand_types: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
     for (_, event) in events {
-        if let Event::StrandCreated { id, strand_type, .. } = event {
+        if let Event::StrandCreated {
+            id, strand_type, ..
+        } = event
+        {
             strand_types.insert(id.clone(), strand_type.clone());
         }
     }
@@ -316,7 +364,9 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
         prev_ts = Some(ts_str.clone());
         let kind = match event {
             Event::StrandCreated { .. } => TimelineEventKind::StrandCreated { summary: None },
-            Event::LogAppended { content, append_id, .. } => TimelineEventKind::LogAppended {
+            Event::LogAppended {
+                content, append_id, ..
+            } => TimelineEventKind::LogAppended {
                 content: content.clone(),
                 append_id: append_id.clone(),
             },
@@ -329,20 +379,26 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
             },
             Event::StrandHidden { .. } => TimelineEventKind::StrandHidden,
             Event::StrandUnhidden { .. } => TimelineEventKind::StrandUnhidden,
-            Event::CheckpointCreated { observed, action, append_id, .. } => {
-                TimelineEventKind::CheckpointCreated {
-                    observed: observed.clone(),
-                    action: action.clone(),
-                    append_id: append_id.clone(),
-                }
-            }
-            Event::SubjectBound { subject_type, subject_id, strand_id, .. } => {
-                TimelineEventKind::SubjectBound {
-                    subject_type: subject_type.clone(),
-                    subject_id: subject_id.clone(),
-                    strand_id: strand_id.clone(),
-                }
-            }
+            Event::CheckpointCreated {
+                observed,
+                action,
+                append_id,
+                ..
+            } => TimelineEventKind::CheckpointCreated {
+                observed: observed.clone(),
+                action: action.clone(),
+                append_id: append_id.clone(),
+            },
+            Event::SubjectBound {
+                subject_type,
+                subject_id,
+                strand_id,
+                ..
+            } => TimelineEventKind::SubjectBound {
+                subject_type: subject_type.clone(),
+                subject_id: subject_id.clone(),
+                strand_id: strand_id.clone(),
+            },
             Event::StrandClosed { disposition, .. } => TimelineEventKind::StrandClosed {
                 disposition: disposition.clone(),
             },
