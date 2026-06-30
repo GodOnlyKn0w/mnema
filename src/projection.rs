@@ -598,6 +598,84 @@ pub(crate) fn build_context_strands(
     )
     .strands
 }
+
+// ── Small derived views ───────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VisibilityLedger {
+    pub(crate) active_count: usize,
+    pub(crate) closed_count: usize,
+    pub(crate) hidden_count: usize,
+}
+
+pub(crate) fn project_visibility_ledger(strands: &[ProjectedStrand]) -> VisibilityLedger {
+    let hidden_count = strands.iter().filter(|s| s.hidden).count();
+    let visible_count = strands.len() - hidden_count;
+    let active_count = strands
+        .iter()
+        .filter(|s| !s.hidden && s.state() == "registered")
+        .count();
+    VisibilityLedger {
+        active_count,
+        closed_count: visible_count - active_count,
+        hidden_count,
+    }
+}
+
+/// Balance of StrandHidden minus StrandUnhidden events for one strand.
+pub(crate) fn hide_balance(events: &[(usize, Event)], strand_id: &str) -> i32 {
+    let mut count: i32 = 0;
+    for (_, event) in events {
+        if event.strand_id() != strand_id {
+            continue;
+        }
+        match event {
+            Event::StrandHidden { .. } => count += 1,
+            Event::StrandUnhidden { .. } => count -= 1,
+            _ => {}
+        }
+    }
+    count
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CurrentBinding {
+    pub(crate) binding_id: String,
+    pub(crate) ts: String,
+    pub(crate) strand_id: String,
+}
+
+pub(crate) fn current_binding(
+    events: &[(usize, Event)],
+    subject_type: &str,
+    subject_id: &str,
+) -> Option<CurrentBinding> {
+    let mut latest: Option<CurrentBinding> = None;
+    for (_offset, event) in events {
+        if let Event::SubjectBound {
+            id,
+            ts,
+            subject_type: event_subject_type,
+            subject_id: event_subject_id,
+            strand_id,
+        } = event
+        {
+            if event_subject_type == subject_type && event_subject_id == subject_id {
+                match &latest {
+                    Some(prev) if ts.as_str() <= prev.ts.as_str() => {}
+                    _ => {
+                        latest = Some(CurrentBinding {
+                            binding_id: id.clone(),
+                            ts: ts.clone(),
+                            strand_id: strand_id.clone(),
+                        })
+                    }
+                }
+            }
+        }
+    }
+    latest
+}
 // ── Entry point: project_raw → structured ──────────────────
 
 /// Project raw event stream into a Vec<ProjectedStrand>.

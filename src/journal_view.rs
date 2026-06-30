@@ -7,14 +7,6 @@
 
 use crate::journal::{ensure_journal, read_events_lossy};
 use crate::{output, projection};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct VisibilityLedger {
-    pub(crate) active_count: usize,
-    pub(crate) closed_count: usize,
-    pub(crate) hidden_count: usize,
-}
-
 pub(crate) fn strand_card_fresh(strand_id: &str) -> Option<output::OrientStrand> {
     let path = ensure_journal().ok()?;
     let (events, _) = read_events_lossy(&path);
@@ -24,7 +16,6 @@ pub(crate) fn strand_card_fresh(strand_id: &str) -> Option<output::OrientStrand>
         .find(|s| s.id == strand_id)
         .map(output::OrientStrand::from)
 }
-
 pub(crate) fn strand_card_fresh_with_state(
     strand_id: &str,
 ) -> Option<(output::OrientStrand, String)> {
@@ -37,18 +28,11 @@ pub(crate) fn strand_card_fresh_with_state(
         .map(|s| (output::OrientStrand::from(s), s.state().to_string()))
 }
 
-pub(crate) fn visibility_ledger() -> Option<VisibilityLedger> {
+pub(crate) fn visibility_ledger() -> Option<projection::VisibilityLedger> {
     let path = ensure_journal().ok()?;
     let (events, _) = read_events_lossy(&path);
     let all = projection::project_strands(&events, true);
-    let hidden_count = all.iter().filter(|s| s.hidden).count();
-    let visible: Vec<_> = all.iter().filter(|s| !s.hidden).collect();
-    let active_count = visible.iter().filter(|s| s.state() == "registered").count();
-    Some(VisibilityLedger {
-        active_count,
-        closed_count: visible.len() - active_count,
-        hidden_count,
-    })
+    Some(projection::project_visibility_ledger(&all))
 }
 
 pub(crate) fn print_visibility_ledger() {
@@ -61,7 +45,7 @@ pub(crate) fn print_visibility_ledger() {
 }
 
 pub(crate) fn visibility_ledger_json(strand_id: &str, noop: bool) -> serde_json::Value {
-    let ledger = visibility_ledger().unwrap_or(VisibilityLedger {
+    let ledger = visibility_ledger().unwrap_or(projection::VisibilityLedger {
         active_count: 0,
         closed_count: 0,
         hidden_count: 0,

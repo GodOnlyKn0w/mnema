@@ -4,6 +4,7 @@
 use crate::event::{self, Event, find_strand, resolve_id};
 use crate::journal::*;
 use crate::output;
+use crate::projection;
 use crate::util::{parse_provenance_arg, shorten};
 use crate::{
     print_handle_line, print_visibility_ledger, strand_card_fresh, strand_card_fresh_with_state,
@@ -151,24 +152,6 @@ pub(crate) fn cmd_unlink(
     Ok(())
 }
 
-/// Compute current hide_count for a strand by scanning its events. The
-/// balance is the number of `StrandHidden` minus `StrandUnhidden` events.
-/// Used by hide/unhide to make the operations idempotent.
-pub(crate) fn count_hide_unhide(events: &[(usize, Event)], strand_id: &str) -> i32 {
-    let mut count: i32 = 0;
-    for (_, e) in events {
-        if e.strand_id() != strand_id {
-            continue;
-        }
-        match e {
-            Event::StrandHidden { .. } => count += 1,
-            Event::StrandUnhidden { .. } => count -= 1,
-            _ => {}
-        }
-    }
-    count
-}
-
 /// Hide a strand. Idempotent: if the strand is already hidden (hide_count > 0),
 /// no event is written. The current state read and the append happen inside the
 /// same journal write lock so concurrent hide/unhide calls are serialised.
@@ -193,7 +176,7 @@ pub(crate) fn cmd_hide(
         // shared reader for consistency.
         let path = ensure_journal()?;
         let (events, _) = read_events_lossy(&path);
-        let current = count_hide_unhide(&events, &strand_id);
+        let current = projection::hide_balance(&events, &strand_id);
         if current > 0 {
             return Ok(false); // already hidden: no-op
         }
@@ -235,7 +218,7 @@ pub(crate) fn cmd_unhide(id: &str, format_json: bool) -> Result<(), String> {
     let outcome = with_journal_write_lock(|journal| {
         let path = ensure_journal()?;
         let (events, _) = read_events_lossy(&path);
-        let current = count_hide_unhide(&events, &strand_id);
+        let current = projection::hide_balance(&events, &strand_id);
         if current <= 0 {
             return Ok(false); // already visible: no-op
         }
@@ -377,27 +360,8 @@ pub(crate) fn cmd_current(
 
     let path = ensure_journal()?;
     let (events, _) = read_events_lossy(&path);
-    let mut latest: Option<(String, String, String)> = None; // (binding_id, ts, strand_id)
-    for (_offset, ev) in &events {
-        if let Event::SubjectBound {
-            id,
-            ts,
-            subject_type: t,
-            subject_id: i,
-            strand_id: s,
-        } = ev
-        {
-            if t == st && i == sid {
-                match &latest {
-                    Some((_, prev_ts, _)) if ts.as_str() <= prev_ts.as_str() => {}
-                    _ => latest = Some((id.clone(), ts.clone(), s.clone())),
-                }
-            }
-        }
-    }
-
-    let (binding_id, ts, strand_id) = match latest {
-        Some(v) => v,
+    let binding = match projection::current_binding(&events, st, sid) {
+        Some(binding) => binding,
         None => {
             eprintln!("no binding for subject_type={} subject_id={}", st, sid);
             return Err("no current binding".to_string());
@@ -406,15 +370,15 @@ pub(crate) fn cmd_current(
 
     if format_json {
         let output = output::CurrentOutput {
-            binding_id,
+            binding_id: binding.binding_id,
             subject_type: st.to_string(),
             subject_id: sid.to_string(),
-            strand_id: strand_id.clone(),
-            ts,
+            strand_id: binding.strand_id.clone(),
+            ts: binding.ts,
         };
         println!("{}", serde_json::to_string(&output).unwrap());
     } else {
-        println!("{}", strand_id);
+        println!("{}", binding.strand_id);
     }
     Ok(())
 }
