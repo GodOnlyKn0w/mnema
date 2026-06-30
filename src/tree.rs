@@ -3,7 +3,7 @@
 //! The graph rules live in `crate::graph`; this module keeps the historical
 //! `tree::...` interface stable for callers.
 
-pub use crate::graph::{OrientForestNode, TreeNode, TreeOutput};
+pub use crate::graph::{OrientForestNode, TreeNode};
 
 use crate::graph;
 use crate::projection::ProjectedStrand;

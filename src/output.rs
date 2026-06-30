@@ -123,6 +123,127 @@ pub struct OrientTreeOutput {
     pub remind: String,
 }
 
+// ── query JSON DTOs ────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AgentContextPromptStrandOutput {
+    pub(crate) id: String,
+    pub(crate) entry_count: usize,
+    pub(crate) first_summary: String,
+    pub(crate) last_summary: String,
+    pub(crate) last_entry_offset: usize,
+    pub(crate) last_entry_ts: String,
+    pub(crate) status: String,
+    pub(crate) hidden: bool,
+}
+
+impl From<&ProjectedStrand> for AgentContextPromptStrandOutput {
+    fn from(strand: &ProjectedStrand) -> Self {
+        AgentContextPromptStrandOutput {
+            id: strand.id.clone(),
+            entry_count: strand.log_count(),
+            first_summary: strand.first_summary().to_string(),
+            last_summary: strand.last_summary().to_string(),
+            last_entry_offset: strand.last_offset(),
+            last_entry_ts: strand.last_ts().to_string(),
+            status: strand.state().to_string(),
+            hidden: strand.hidden,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AgentContextOutput {
+    pub(crate) prompt_strands: Vec<AgentContextPromptStrandOutput>,
+    pub(crate) last_session_offset: usize,
+    pub(crate) timeline_since_last_session: Vec<TimelineEntryOutput>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TreeOutput {
+    pub(crate) root: TreeNodeOutput,
+}
+
+impl From<&crate::tree::TreeNode> for TreeOutput {
+    fn from(root: &crate::tree::TreeNode) -> Self {
+        TreeOutput {
+            root: TreeNodeOutput::from(root),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TreeNodeOutput {
+    pub(crate) id: String,
+    pub(crate) summary: String,
+    pub(crate) status: String,
+    pub(crate) state_marker: Option<String>,
+    pub(crate) state_offset: usize,
+    pub(crate) strand_type: Option<String>,
+    pub(crate) entries: usize,
+    pub(crate) children: Vec<TreeNodeOutput>,
+}
+
+impl From<&crate::tree::TreeNode> for TreeNodeOutput {
+    fn from(node: &crate::tree::TreeNode) -> Self {
+        TreeNodeOutput {
+            id: node.id.clone(),
+            summary: node.summary.clone(),
+            status: node.status.clone(),
+            state_marker: node.state_marker.clone(),
+            state_offset: node.state_offset,
+            strand_type: node.strand_type.clone(),
+            entries: node.entries,
+            children: node.children.iter().map(TreeNodeOutput::from).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct DependsBlockerOutput {
+    pub(crate) id: String,
+    pub(crate) status: String,
+    pub(crate) closed: bool,
+}
+
+impl From<&crate::graph::DependsBlocker> for DependsBlockerOutput {
+    fn from(blocker: &crate::graph::DependsBlocker) -> Self {
+        DependsBlockerOutput {
+            id: blocker.id.clone(),
+            status: blocker.status.clone(),
+            closed: blocker.closed,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct DependsOutput {
+    pub(crate) id: String,
+    pub(crate) summary: String,
+    pub(crate) ready: bool,
+    pub(crate) open_blocker_count: usize,
+    pub(crate) blockers: Vec<DependsBlockerOutput>,
+    pub(crate) critical_path: Vec<String>,
+    pub(crate) critical_path_len: usize,
+}
+
+impl From<&crate::graph::DependsAnalysis> for DependsOutput {
+    fn from(analysis: &crate::graph::DependsAnalysis) -> Self {
+        DependsOutput {
+            id: analysis.id.clone(),
+            summary: analysis.summary.clone(),
+            ready: analysis.ready,
+            open_blocker_count: analysis.open_blocker_count,
+            blockers: analysis
+                .blockers
+                .iter()
+                .map(DependsBlockerOutput::from)
+                .collect(),
+            critical_path: analysis.critical_path.clone(),
+            critical_path_len: analysis.critical_path.len(),
+        }
+    }
+}
 // ── command result JSON DTOs ───────────────────────────────
 
 #[derive(Debug, Serialize)]

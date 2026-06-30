@@ -1,4 +1,4 @@
-use crate::event::{Event, TimelineEventKind, find_strand};
+use crate::event::{find_strand, Event, TimelineEventKind};
 use crate::graph;
 /// Query-command family: cmd_list, cmd_show, cmd_search, cmd_timeline,
 /// cmd_orient, cmd_agent_context, cmd_tree (+ print_tree_text helper).
@@ -14,7 +14,6 @@ use crate::projection;
 use crate::render::*;
 use crate::tree;
 use crate::util::{parse_duration, shorten, truncate};
-use serde_json::json;
 use std::time::Instant;
 
 pub(crate) struct ListRequest<'a> {
@@ -314,15 +313,16 @@ pub(crate) fn cmd_timeline(
     let is_json = format_json == Some("json");
 
     if is_json {
-        println!(
-            "{}",
-            json!({
-                "timeline": entries,
-                "truncated": truncated,
-                "count": count,
-                "max_offset": max_offset,
-            })
-        );
+        let output = output::TimelineOutput {
+            timeline: entries
+                .iter()
+                .map(output::TimelineEntryOutput::from)
+                .collect(),
+            truncated,
+            count,
+            max_offset,
+        };
+        println!("{}", serde_json::to_string(&output).expect("serialize"));
     } else if entries.is_empty() {
         // No dead ends (design principle): empty result must say something.
         let mut parts: Vec<String> = Vec::new();
@@ -541,31 +541,19 @@ pub(crate) fn cmd_agent_context(
         .filter(|e| e.journal_offset > last_session_offset)
         .collect();
 
-    let prompt_strand_json: Vec<_> = prompt_strands
-        .iter()
-        .map(|s| {
-            json!({
-                "id": s.id,
-                "entry_count": s.log_count(),
-                "first_summary": s.first_summary(),
-                "last_summary": s.last_summary(),
-                "last_entry_offset": s.last_offset(),
-                "last_entry_ts": s.last_ts(),
-                "status": s.state(),
-                "hidden": s.hidden,
-            })
-        })
-        .collect();
-
     if format_json == Some("json") {
-        println!(
-            "{}",
-            json!({
-                "prompt_strands": prompt_strand_json,
-                "last_session_offset": last_session_offset,
-                "timeline_since_last_session": timeline_since_last_session,
-            })
-        );
+        let output = output::AgentContextOutput {
+            prompt_strands: prompt_strands
+                .iter()
+                .map(|s| output::AgentContextPromptStrandOutput::from(*s))
+                .collect(),
+            last_session_offset,
+            timeline_since_last_session: timeline_since_last_session
+                .iter()
+                .map(output::TimelineEntryOutput::from)
+                .collect(),
+        };
+        println!("{}", serde_json::to_string(&output).expect("serialize"));
     } else {
         println!("prompt_strands: {}", prompt_strands.len());
         println!("last_session_offset: {}", last_session_offset);
@@ -736,7 +724,7 @@ pub(crate) fn cmd_tree(root_id: &str, format_json: Option<&str>) -> Result<(), S
     match tree::project_tree(root_id, &strands) {
         Some(root) => {
             if format_json == Some("json") {
-                let output = tree::TreeOutput { root };
+                let output = output::TreeOutput::from(&root);
                 println!("{}", serde_json::to_string_pretty(&output).unwrap());
             } else {
                 print_tree_text(&root, 0);
@@ -782,29 +770,8 @@ pub(crate) fn cmd_depends(id: &str, format_json: Option<&str>) -> Result<(), Str
         .ok_or_else(|| format!("strand {} not found", id))?;
 
     if format_json == Some("json") {
-        let blocker_objs: Vec<_> = analysis
-            .blockers
-            .iter()
-            .map(|b| {
-                json!({
-                    "id": b.id,
-                    "status": b.status,
-                    "closed": b.closed,
-                })
-            })
-            .collect();
-        println!(
-            "{}",
-            json!({
-                "id": analysis.id,
-                "summary": analysis.summary,
-                "ready": analysis.ready,
-                "open_blocker_count": analysis.open_blocker_count,
-                "blockers": blocker_objs,
-                "critical_path": analysis.critical_path,
-                "critical_path_len": analysis.critical_path.len(),
-            })
-        );
+        let output = output::DependsOutput::from(&analysis);
+        println!("{}", serde_json::to_string(&output).expect("serialize"));
     } else {
         println!(
             "depends-on analysis: {}  {}",

@@ -34,11 +34,6 @@ pub struct TreeNode {
     pub children: Vec<TreeNode>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct TreeOutput {
-    pub root: TreeNode,
-}
-
 #[derive(Debug, Serialize, Clone)]
 pub struct OrientForestNode {
     pub id: String,
