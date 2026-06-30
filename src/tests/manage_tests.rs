@@ -499,7 +499,7 @@ fn w074_fires_on_closing_annotation_marker() {
     let id = create_strand("some work");
     // The predicate that gates the W074 nudge must be true for a closing marker.
     assert!(
-        diagnostics::is_closing_annotation_marker("[done] sub-step done"),
+        is_closing_annotation_marker("[done] sub-step done"),
         "closing marker must gate W074"
     );
     let result = cmd_append(
@@ -542,7 +542,7 @@ fn w074_silent_on_non_closing_markers() {
         "[insight]",
     ] {
         assert!(
-            !diagnostics::is_closing_annotation_marker(m),
+            !is_closing_annotation_marker(m),
             "{} must not trigger W074",
             m
         );

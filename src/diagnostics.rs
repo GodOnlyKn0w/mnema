@@ -21,7 +21,6 @@
 //! removed; see git history and `test_removed_workflow_codes_stay_removed`.
 
 use serde::Serialize;
-use chrono;
 
 // ── Topic catalog (L3 encyclopaedia layer) ──────────────────
 
@@ -439,7 +438,6 @@ static CATALOG: &[DiagnosticInfo] = &[
         },
         producer: "lifecycle",
     },
-
     // ── Health (W062) ───────────────────────────────────
     DiagnosticInfo {
         code: "W062",
@@ -541,13 +539,19 @@ pub fn cmd_explain(input: &str, format_json: bool) -> String {
         let output = ExplainSuccessOutput::from(info);
         return if format_json {
             serde_json::to_string_pretty(&output).unwrap_or_else(|e| {
-                format!(r#"{{"ok":false,"code":"{}","error":"serialization failed: {}"}}"#, input, e)
+                format!(
+                    r#"{{"ok":false,"code":"{}","error":"serialization failed: {}"}}"#,
+                    input, e
+                )
             })
         } else {
             format!(
                 "{}\n  severity: {}\n  category: {}\n  title: {}\n\n  finding: {}\n\n  impact: {}\n\n  recovery:\n    kind: {:?}\n    command: {}\n    executable: {}\n    requires_human: {}\n\n  producer: {}",
                 info.code,
-                match info.severity { Severity::Error => "error", Severity::Warning => "warning" },
+                match info.severity {
+                    Severity::Error => "error",
+                    Severity::Warning => "warning",
+                },
                 info.category,
                 info.title,
                 info.finding,
@@ -572,7 +576,10 @@ pub fn cmd_explain(input: &str, format_json: bool) -> String {
         };
         return if format_json {
             serde_json::to_string_pretty(&output).unwrap_or_else(|e| {
-                format!(r#"{{"ok":false,"topic":"{}","error":"serialization failed: {}"}}"#, input, e)
+                format!(
+                    r#"{{"ok":false,"topic":"{}","error":"serialization failed: {}"}}"#,
+                    input, e
+                )
             })
         } else {
             format!("{}\n\n{}", topic.title, topic.body)
@@ -590,7 +597,10 @@ pub fn cmd_explain(input: &str, format_json: bool) -> String {
             "hint": "diagnostic codes: tasktree explain W062 etc",
         });
         serde_json::to_string_pretty(&error_output).unwrap_or_else(|_| {
-            format!(r#"{{"ok":false,"input":"{}","error":"unknown code or topic"}}"#, input)
+            format!(
+                r#"{{"ok":false,"input":"{}","error":"unknown code or topic"}}"#,
+                input
+            )
         })
     } else {
         format!(
@@ -601,320 +611,8 @@ pub fn cmd_explain(input: &str, format_json: bool) -> String {
     }
 }
 
-// ── Runtime emitters ────────────────────────────────────────
-//
-// Moved here from main.rs (Layer 2 refactor). Behavior is unchanged;
-// only the module home changed.
-
-/// One emitted diagnostic: (code, one-line detail). The code resolves via
-/// `tasktree explain <code>`.
-pub(crate) type EmittedDiag = (&'static str, String);
-
-/// W074 predicate: true when an appended entry's marker is a closing-class
-/// annotation ([done]/[failed]/[cancelled]/[merged]/[verified]) — these are
-/// annotations that no longer change strand lifecycle (lifecycle moves via
-/// `close`/`reopen`). Single source for the runtime nudge and its tests.
-pub(crate) fn is_closing_annotation_marker(content: &str) -> bool {
-    const CLOSING_ANNOTATION_MARKERS: &[&str] = &[
-        "[done]", "[failed]", "[cancelled]", "[merged]", "[verified]",
-    ];
-    let trimmed = content.trim_start();
-    CLOSING_ANNOTATION_MARKERS.iter().any(|m| trimmed.starts_with(*m))
-}
-
-/// Extract comparison tokens for W062 keyword matching: ASCII words of
-/// length >= 5 (lowercased) plus contiguous CJK runs of length >= 3.
-/// Conservative on purpose — shared full runs, not n-grams.
-pub(crate) fn w062_tokens(text: &str) -> std::collections::HashSet<String> {
-    let mut tokens = std::collections::HashSet::new();
-    let mut ascii_word = String::new();
-    let mut cjk_run = String::new();
-    for c in text.chars() {
-        if c.is_ascii_alphanumeric() {
-            ascii_word.push(c.to_ascii_lowercase());
-        } else {
-            if ascii_word.len() >= 5 {
-                tokens.insert(ascii_word.clone());
-            }
-            ascii_word.clear();
-        }
-        let is_cjk = ('\u{4e00}'..='\u{9fff}').contains(&c);
-        if is_cjk {
-            cjk_run.push(c);
-        } else {
-            if cjk_run.chars().count() >= 3 {
-                tokens.insert(cjk_run.clone());
-            }
-            cjk_run.clear();
-        }
-    }
-    if ascii_word.len() >= 5 {
-        tokens.insert(ascii_word);
-    }
-    if cjk_run.chars().count() >= 3 {
-        tokens.insert(cjk_run);
-    }
-    tokens
-}
-
-/// Run the W062/W068/W069 emitters over the journal events.
-/// Pure: `now` is a parameter, nothing is written.
-pub(crate) fn run_journal_diagnostics(events: &[crate::event::Event], now: chrono::DateTime<chrono::Utc>) -> Vec<EmittedDiag> {
-    use crate::event::Event;
-    use std::collections::{HashMap, HashSet};
-    let mut diags: Vec<EmittedDiag> = Vec::new();
-
-    // Group LogAppended per strand, keeping ts + provenance
-    struct EntryRef<'a> {
-        ts: &'a str,
-        content: &'a str,
-        producer: Option<&'a str>,
-    }
-    let mut per_strand: HashMap<&str, Vec<EntryRef>> = HashMap::new();
-    for event in events {
-        if let Event::LogAppended { id, ts, content, provenance, .. } = event {
-            per_strand.entry(id.as_str()).or_default().push(EntryRef {
-                ts: ts.as_str(),
-                content: content.as_str(),
-                producer: provenance
-                    .as_ref()
-                    .and_then(|p| p.get("producer"))
-                    .and_then(|v| v.as_str()),
-            });
-        }
-    }
-
-    // Build closed-strand set from explicit StrandClosed events (lifecycle state).
-    // Legacy CLOSING markers in log content are no longer authoritative.
-    let mut closed_strands: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut reopened_strands: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for event in events {
-        match event {
-            Event::StrandClosed { id, .. } => { closed_strands.insert(id.as_str()); reopened_strands.remove(id.as_str()); }
-            Event::StrandReopened { id, .. } => { reopened_strands.insert(id.as_str()); closed_strands.remove(id.as_str()); }
-            _ => {}
-        }
-    }
-
-    // ── W068: deadline overdue ──
-    for (id, entries) in &per_strand {
-        let closed = closed_strands.contains(id);
-        if closed {
-            continue;
-        }
-        for e in entries {
-            if !e.content.starts_with("[deadline]") {
-                continue;
-            }
-            if let Some(by) = crate::util::parse_deadline_by(e.content) {
-                if now > by {
-                    diags.push((
-                        "W068",
-                        format!("strand {} deadline passed ({})", crate::util::shorten(id), by.to_rfc3339()),
-                    ));
-                }
-            }
-        }
-    }
-
-    // ── W069: concurrent marker write ──
-    // Same lifecycle marker on the same strand from >= 2 distinct
-    // provenance producers. Entries without provenance can't be
-    // attributed and are ignored (no guessing).
-    // Annotation markers (closing + state) are checked for concurrent writes.
-    const ANNOTATION_MARKERS: &[&str] = &[
-        "[verified]", "[done]", "[cancelled]", "[failed]", "[merged]", "[ended]",
-        "[dispatched]", "[registered]",
-    ];
-    for (id, entries) in &per_strand {
-        let mut writers: HashMap<&str, HashSet<&str>> = HashMap::new();
-        for e in entries {
-            if let Some(producer) = e.producer {
-                if let Some(marker) = ANNOTATION_MARKERS.iter().find(|m| e.content.starts_with(*m)) {
-                    writers.entry(marker).or_default().insert(producer);
-                }
-            }
-        }
-        for (marker, producers) in writers {
-            if producers.len() >= 2 {
-                let mut who: Vec<&str> = producers.into_iter().collect();
-                who.sort();
-                diags.push((
-                    "W069",
-                    format!("strand {} marker {} written by: {}", crate::util::shorten(id), marker, who.join(", ")),
-                ));
-            }
-        }
-    }
-
-    // ── W062: contradictory decision/constraint ──
-    // [decision] and [constraint] sharing a keyword, written within 10
-    // minutes, from different strands.
-    struct Governed<'a> {
-        strand: &'a str,
-        ts: chrono::DateTime<chrono::Utc>,
-        tokens: std::collections::HashSet<String>,
-    }
-    let mut decisions: Vec<Governed> = Vec::new();
-    let mut constraints: Vec<Governed> = Vec::new();
-    for (id, entries) in &per_strand {
-        for e in entries {
-            let bucket = if e.content.starts_with("[decision]") {
-                &mut decisions
-            } else if e.content.starts_with("[constraint]") {
-                &mut constraints
-            } else {
-                continue;
-            };
-            if let Some(ts) = crate::util::parse_event_ts(e.ts) {
-                bucket.push(Governed { strand: id, ts, tokens: w062_tokens(e.content) });
-            }
-        }
-    }
-    let mut seen_pairs: HashSet<(String, String, String)> = HashSet::new();
-    for d in &decisions {
-        for c in &constraints {
-            if d.strand == c.strand {
-                continue;
-            }
-            if (d.ts - c.ts).num_seconds().abs() > 600 {
-                continue;
-            }
-            if let Some(shared) = d.tokens.intersection(&c.tokens).next() {
-                let key = (
-                    crate::util::shorten(d.strand),
-                    crate::util::shorten(c.strand),
-                    shared.clone(),
-                );
-                if seen_pairs.insert(key) {
-                    diags.push((
-                        "W062",
-                        format!(
-                            "decision in {} vs constraint in {} share keyword \"{}\" within 10min",
-                            crate::util::shorten(d.strand),
-                            crate::util::shorten(c.strand),
-                            shared
-                        ),
-                    ));
-                }
-            }
-        }
-    }
-
-    diags
-}
-
-/// Check W070: checkpoint's provenance.producer differs from the last
-/// LogAppended entry's provenance.producer on the target strand.
-///
-/// Both producers must be non-empty strings for this check to fire;
-/// if either is absent the function returns None (no guessing).
-///
-/// Returns `Some((code, detail))` when the check fires, `None` otherwise.
-pub(crate) fn check_w070_strand_moved(
-    events: &[(usize, crate::event::Event)],
-    strand_id: &str,
-    checkpoint_producer: Option<&str>,
-) -> Option<EmittedDiag> {
-    use crate::event::Event;
-    let cp_producer = checkpoint_producer?;
-    if cp_producer.is_empty() {
-        return None;
-    }
-    // Find the last LogAppended event for this strand.
-    let last_entry_producer: Option<&str> = events
-        .iter()
-        .filter_map(|(_, e)| {
-            if let Event::LogAppended { id, provenance, .. } = e {
-                if id == strand_id {
-                    Some(
-                        provenance
-                            .as_ref()
-                            .and_then(|p| p.get("producer"))
-                            .and_then(|v| v.as_str()),
-                    )
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .last()
-        .flatten();
-    let last_producer = last_entry_producer?;
-    if last_producer.is_empty() {
-        return None;
-    }
-    if last_producer != cp_producer {
-        Some((
-            "W070",
-            format!(
-                "strand moved under you: last entry by \"{}\", you are \"{}\"",
-                last_producer, cp_producer
-            ),
-        ))
-    } else {
-        None
-    }
-}
-
-/// Check W071: checkpoint target strand state is not "registered" (already closed).
-///
-/// Returns `Some((code, detail))` when the check fires, `None` otherwise.
-pub(crate) fn check_w071_closed_strand(strand: &crate::projection::ProjectedStrand) -> Option<EmittedDiag> {
-    if strand.state() != "registered" {
-        Some((
-            "W071",
-            format!(
-                "checkpoint on closed strand: state is {}",
-                strand.state()
-            ),
-        ))
-    } else {
-        None
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SeenOffsetWarning {
-    pub(crate) code: &'static str,
-    pub(crate) detail: String,
-    pub(crate) seen_offset: usize,
-    pub(crate) strand_last_offset: usize,
-    pub(crate) seen_gap: usize,
-    pub(crate) catch_up: String,
-}
-
-/// Check W076: caller-declared --seen-offset is behind the target strand's
-/// pre-write last_offset. Missing or future offsets are best-effort ignored.
-pub(crate) fn check_w076_seen_offset(
-    strand_id: &str,
-    seen_offset: Option<usize>,
-    strand_last_offset: usize,
-) -> Option<SeenOffsetWarning> {
-    let seen = seen_offset?;
-    if seen >= strand_last_offset {
-        return None;
-    }
-    let gap = strand_last_offset - seen;
-    let catch_up = format!(
-        "tasktree timeline --since-offset {} --links {}",
-        seen,
-        crate::util::shorten(strand_id)
-    );
-    Some(SeenOffsetWarning {
-        code: "W076",
-        detail: format!(
-            "seen offset {} is {} entries behind strand last offset {}; catch-up: {}",
-            seen, gap, strand_last_offset, catch_up
-        ),
-        seen_offset: seen,
-        strand_last_offset,
-        seen_gap: gap,
-        catch_up,
-    })
-}
+mod runtime;
+pub(crate) use runtime::*;
 
 pub fn all_codes() -> Vec<&'static str> {
     CATALOG.iter().map(|d| d.code).collect()
@@ -924,209 +622,9 @@ pub fn catalog_size() -> usize {
     CATALOG.len()
 }
 
+mod audit;
+pub use audit::*;
 
-// -- Journal audit ---------------------------------------------------------
-
-#[derive(Debug, Clone)]
-pub struct LintSection {
-    pub name: &'static str,
-    pub summary_label: &'static str,
-    pub findings: Vec<String>,
-}
-
-impl LintSection {
-    pub fn count(&self) -> usize { self.findings.len() }
-}
-
-#[derive(Debug, Clone)]
-pub struct JournalAudit {
-    pub lint_sections: Vec<LintSection>,
-    pub diagnostics: Vec<(String, String)>,
-}
-
-impl JournalAudit {
-    pub fn lint_count(&self) -> usize {
-        self.lint_sections.iter().map(LintSection::count).sum()
-    }
-
-}
-
-pub fn audit_journal(events: &[crate::event::Event], now: chrono::DateTime<chrono::Utc>) -> JournalAudit {
-    use crate::event::Event;
-    use std::collections::{HashMap, HashSet};
-
-    let mut created_ids: HashSet<String> = HashSet::new();
-    let mut strand_summaries: HashMap<String, String> = HashMap::new();
-    let mut strand_entries: HashMap<String, Vec<String>> = HashMap::new();
-    for event in events {
-        match event {
-            Event::StrandCreated { id, .. } => { created_ids.insert(id.clone()); }
-            Event::LogAppended { id, content, .. } => {
-                strand_summaries.entry(id.clone()).or_insert_with(|| content.clone());
-                strand_entries.entry(id.clone()).or_default().push(content.clone());
-            }
-            _ => {}
-        }
-    }
-
-    let mut sections = Vec::new();
-
-    let mut dag_done = Vec::new();
-    for (id, summary) in &strand_summaries {
-        if summary.starts_with("para group ") {
-            if let Some(entries) = strand_entries.get(id) {
-                if entries.iter().any(|e| e.contains("[done]")) {
-                    dag_done.push(format!("DAG strand {} has [done] entry - DAG should only record layer events", id));
-                }
-            }
-        }
-    }
-    sections.push(LintSection { name: "dag-done", summary_label: "dag strands with [done]", findings: dag_done });
-
-    let mut task_created = Vec::new();
-    for (id, summary) in &strand_summaries {
-        if summary.starts_with('[') {
-            if let Some(entries) = strand_entries.get(id) {
-                if entries.iter().any(|e| e.contains("task_created")) {
-                    task_created.push(format!("Task strand {} has task_created JSON event - task strands should not have DAG events", id));
-                }
-            }
-        }
-    }
-    sections.push(LintSection { name: "task-created", summary_label: "task strands with task_created", findings: task_created });
-
-    let mut orphan_links = Vec::new();
-    for event in events {
-        if let Event::EdgeLinked { to, .. } = event {
-            if !created_ids.contains(to) {
-                orphan_links.push(format!("orphan link: target strand {} not found", to));
-            }
-        }
-    }
-    sections.push(LintSection { name: "orphan-links", summary_label: "orphan links", findings: orphan_links });
-
-    let mut touches_format = Vec::new();
-    for entries in strand_entries.values() {
-        for entry in entries {
-            if let Some(tail) = entry.strip_prefix("[touches] ") {
-                for part in tail.split(' ') {
-                    if part.is_empty() { continue; }
-                    let field = part.split(':').next().unwrap_or("");
-                    if field != "write" && field != "read" && field != "creates" && field != "readonly" {
-                        touches_format.push(format!("touches format: unrecognized field '{}' in [touches] entry", field));
-                    }
-                }
-            }
-        }
-    }
-    sections.push(LintSection { name: "touches-format", summary_label: "unrecognized touches fields", findings: touches_format });
-
-    let mut link_direction = Vec::new();
-    for event in events {
-        if let Event::EdgeLinked { id: source, to: target, .. } = event {
-            let src_summary = strand_summaries.get(source).map(|s| s.as_str()).unwrap_or("");
-            let tgt_summary = strand_summaries.get(target).map(|s| s.as_str()).unwrap_or("");
-            let src_is_dag = src_summary.starts_with("para group ");
-            let src_is_task = src_summary.starts_with('[') && src_summary[1..].chars().next().map_or(false, |c| c.is_ascii_digit());
-            let tgt_is_dag = tgt_summary.starts_with("para group ");
-            if src_is_task && tgt_is_dag {
-                link_direction.push(format!("link direction: task {} links to DAG {} - unusual", source, target));
-            }
-            if !src_is_dag && !src_is_task && tgt_is_dag {
-                link_direction.push(format!("link direction: non-task {} links to DAG {} - unusual", source, target));
-            }
-        }
-    }
-    sections.push(LintSection { name: "link-direction", summary_label: "unusual link directions", findings: link_direction });
-
-    let mut strand_identity = Vec::new();
-    for (id, summary) in &strand_summaries {
-        let is_dag = summary.starts_with("para group ");
-        let is_task = summary.starts_with('[') && summary.chars().nth(1).map_or(false, |c| c.is_ascii_digit());
-        if let Some(entries) = strand_entries.get(id) {
-            if is_dag {
-                let has_task_marker = entries.iter().any(|e| {
-                    e.starts_with('[') && e.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
-                });
-                if has_task_marker {
-                    strand_identity.push(format!("strand identity: DAG strand {} has task-like entries - identity mismatch", id));
-                }
-            }
-            if is_task {
-                let has_para_prefix = entries.iter().any(|e| e.starts_with("para group "));
-                if has_para_prefix {
-                    strand_identity.push(format!("strand identity: task strand {} has DAG-like entries - identity mismatch", id));
-                }
-            }
-        }
-    }
-    sections.push(LintSection { name: "strand-identity", summary_label: "identity mismatches", findings: strand_identity });
-
-    let indexed: Vec<(usize, Event)> = events.iter().cloned().enumerate().collect();
-    let strands = crate::projection::project_strands(&indexed, true);
-    let graph = crate::graph::StrandGraph::from_strands(&strands);
-    let edge_findings = graph
-        .edge_findings()
-        .into_iter()
-        .map(|f| f.detail)
-        .collect();
-    sections.push(LintSection { name: "edge-validity", summary_label: "edge-validity warnings", findings: edge_findings });
-
-    let mut metric_format = Vec::new();
-    for (id, entries) in &strand_entries {
-        for e in entries {
-            if let Some(rest) = e.strip_prefix("[metric] ") {
-                let ok = rest.split_whitespace().any(|tok| {
-                    if let Some((k, v)) = tok.split_once('=') {
-                        !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_') && !v.is_empty()
-                    } else {
-                        false
-                    }
-                });
-                if !ok {
-                    let preview: String = rest.chars().take(40).collect();
-                    metric_format.push(format!("metric-format: strand {} [metric] entry has no jq-capturable name=value: {:?}", id, preview));
-                }
-            }
-        }
-    }
-    sections.push(LintSection { name: "metric-format", summary_label: "uncapturable [metric] entries", findings: metric_format });
-
-    let mut legacy_why = Vec::new();
-    for event in events {
-        if let Event::EdgeLinked { id, to, edge_type, .. } = event {
-            if edge_type.as_deref() == Some("why") {
-                legacy_why.push(format!("legacy why-edge {} -> {}: why is no longer a link (D2) - record the reason in an entry", id, to));
-            }
-        }
-    }
-    sections.push(LintSection { name: "legacy-why-edges", summary_label: "legacy why-edges", findings: legacy_why });
-
-    let mut cur_offset: HashMap<String, usize> = HashMap::new();
-    for s in &strands { cur_offset.insert(s.id.clone(), s.last_offset()); }
-    let mut stale_why = Vec::new();
-    for s in &strands {
-        for entry in &s.log {
-            if let Some(r) = &entry.ref_ {
-                if let Some((tgt, pin)) = r.rsplit_once('@') {
-                    if let Ok(pin_off) = pin.parse::<usize>() {
-                        if let Some(&cur) = cur_offset.get(tgt) {
-                            if cur > pin_off {
-                                stale_why.push(format!("why-staleness: strand {} cites {} pinned@{} but it advanced to @{} - may warrant review", s.id, tgt, pin_off, cur));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    sections.push(LintSection { name: "why-staleness", summary_label: "stale rationale refs", findings: stale_why });
-
-    JournalAudit {
-        lint_sections: sections,
-        diagnostics: run_journal_diagnostics(events, now).into_iter().map(|(code, detail)| (code.to_string(), detail)).collect(),
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1135,18 +633,68 @@ mod tests {
         use crate::event::Event;
         let ts = "2026-01-01T00:00:00Z".to_string();
         let events = vec![
-            Event::StrandCreated { id: "task".to_string(), ts: ts.clone(), strand_type: None },
-            Event::LogAppended { id: "task".to_string(), ts: ts.clone(), content: "task summary".to_string(), ref_: None, append_id: None, git: None, provenance: None },
-            Event::StrandCreated { id: "parent_a".to_string(), ts: ts.clone(), strand_type: None },
-            Event::LogAppended { id: "parent_a".to_string(), ts: ts.clone(), content: "parent a".to_string(), ref_: None, append_id: None, git: None, provenance: None },
-            Event::StrandCreated { id: "parent_b".to_string(), ts: ts.clone(), strand_type: None },
-            Event::LogAppended { id: "parent_b".to_string(), ts: ts.clone(), content: "parent b".to_string(), ref_: None, append_id: None, git: None, provenance: None },
-            Event::EdgeLinked { id: "task".to_string(), ts: ts.clone(), to: "parent_a".to_string(), edge_type: Some("belongs-to".to_string()), provenance: None },
-            Event::EdgeLinked { id: "task".to_string(), ts, to: "parent_b".to_string(), edge_type: Some("belongs-to".to_string()), provenance: None },
+            Event::StrandCreated {
+                id: "task".to_string(),
+                ts: ts.clone(),
+                strand_type: None,
+            },
+            Event::LogAppended {
+                id: "task".to_string(),
+                ts: ts.clone(),
+                content: "task summary".to_string(),
+                ref_: None,
+                append_id: None,
+                git: None,
+                provenance: None,
+            },
+            Event::StrandCreated {
+                id: "parent_a".to_string(),
+                ts: ts.clone(),
+                strand_type: None,
+            },
+            Event::LogAppended {
+                id: "parent_a".to_string(),
+                ts: ts.clone(),
+                content: "parent a".to_string(),
+                ref_: None,
+                append_id: None,
+                git: None,
+                provenance: None,
+            },
+            Event::StrandCreated {
+                id: "parent_b".to_string(),
+                ts: ts.clone(),
+                strand_type: None,
+            },
+            Event::LogAppended {
+                id: "parent_b".to_string(),
+                ts: ts.clone(),
+                content: "parent b".to_string(),
+                ref_: None,
+                append_id: None,
+                git: None,
+                provenance: None,
+            },
+            Event::EdgeLinked {
+                id: "task".to_string(),
+                ts: ts.clone(),
+                to: "parent_a".to_string(),
+                edge_type: Some("belongs-to".to_string()),
+                provenance: None,
+            },
+            Event::EdgeLinked {
+                id: "task".to_string(),
+                ts,
+                to: "parent_b".to_string(),
+                edge_type: Some("belongs-to".to_string()),
+                provenance: None,
+            },
         ];
 
         let audit = audit_journal(&events, chrono::Utc::now());
-        let edge_section = audit.lint_sections.iter()
+        let edge_section = audit
+            .lint_sections
+            .iter()
             .find(|section| section.name == "edge-validity")
             .expect("edge-validity section");
 
@@ -1190,7 +738,12 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         assert_eq!(v["ok"], false);
         // new error key is "error" with updated message
-        assert!(v["error"].as_str().unwrap_or("").contains("unknown code or topic"));
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("unknown code or topic")
+        );
     }
 
     #[test]
@@ -1213,28 +766,51 @@ mod tests {
         // All four topics resolve in both text and JSON modes.
         for name in ["card", "markers", "retry", "json"] {
             let text = cmd_explain(name, false);
-            assert!(!text.contains("unknown code or topic"), "topic {} failed text: {}", name, text);
+            assert!(
+                !text.contains("unknown code or topic"),
+                "topic {} failed text: {}",
+                name,
+                text
+            );
 
             let json_out = cmd_explain(name, true);
             let v: serde_json::Value = serde_json::from_str(&json_out)
                 .unwrap_or_else(|_| panic!("topic {} json not valid JSON: {}", name, json_out));
             assert_eq!(v["ok"], true, "topic {} json ok must be true", name);
             assert_eq!(v["topic"], name, "topic {} json name mismatch", name);
-            assert!(v["title"].as_str().is_some(), "topic {} missing title", name);
+            assert!(
+                v["title"].as_str().is_some(),
+                "topic {} missing title",
+                name
+            );
             assert!(v["body"].as_str().is_some(), "topic {} missing body", name);
         }
 
         // Unknown input shows error AND lists "card" (no dead ends)
         let err_text = cmd_explain("nonexistent_topic", false);
-        assert!(err_text.contains("unknown code or topic"), "expected error in: {}", err_text);
-        assert!(err_text.contains("card"), "error must list available topics, missing 'card': {}", err_text);
+        assert!(
+            err_text.contains("unknown code or topic"),
+            "expected error in: {}",
+            err_text
+        );
+        assert!(
+            err_text.contains("card"),
+            "error must list available topics, missing 'card': {}",
+            err_text
+        );
 
         let err_json = cmd_explain("nonexistent_topic", true);
-        let v: serde_json::Value = serde_json::from_str(&err_json).expect("error JSON must be valid");
+        let v: serde_json::Value =
+            serde_json::from_str(&err_json).expect("error JSON must be valid");
         assert_eq!(v["ok"], false);
         // available_topics array must contain "card"
-        let topics_arr = v["available_topics"].as_array().expect("available_topics must be array");
-        assert!(topics_arr.iter().any(|x| x == "card"), "available_topics must include card");
+        let topics_arr = v["available_topics"]
+            .as_array()
+            .expect("available_topics must be array");
+        assert!(
+            topics_arr.iter().any(|x| x == "card"),
+            "available_topics must include card"
+        );
     }
 
     #[test]
@@ -1294,8 +870,7 @@ mod tests {
     #[test]
     fn json_topic_fields_match_serialization() {
         use crate::output::{
-            StrandDetailOutput, StrandListItem, OrientOutput,
-            SearchOutput, TimelineOutput,
+            OrientOutput, SearchOutput, StrandDetailOutput, StrandListItem, TimelineOutput,
         };
         let topic = topic_lookup("json").expect("json topic must exist");
 
@@ -1317,7 +892,11 @@ mod tests {
         };
         let v = serde_json::to_value(&show_sample).expect("serialize StrandDetailOutput");
         for key in v.as_object().unwrap().keys() {
-            assert!(topic.body.contains(key.as_str()), "json topic missing show field: {}", key);
+            assert!(
+                topic.body.contains(key.as_str()),
+                "json topic missing show field: {}",
+                key
+            );
         }
 
         // list → StrandListItem
@@ -1339,7 +918,11 @@ mod tests {
         };
         let v = serde_json::to_value(&list_sample).expect("serialize StrandListItem");
         for key in v.as_object().unwrap().keys() {
-            assert!(topic.body.contains(key.as_str()), "json topic missing list field: {}", key);
+            assert!(
+                topic.body.contains(key.as_str()),
+                "json topic missing list field: {}",
+                key
+            );
         }
 
         // orient → OrientOutput (check top-level fields)
@@ -1352,7 +935,11 @@ mod tests {
         };
         let v = serde_json::to_value(&orient_sample).expect("serialize OrientOutput");
         for key in v.as_object().unwrap().keys() {
-            assert!(topic.body.contains(key.as_str()), "json topic missing orient field: {}", key);
+            assert!(
+                topic.body.contains(key.as_str()),
+                "json topic missing orient field: {}",
+                key
+            );
         }
 
         // search → SearchOutput
@@ -1363,7 +950,11 @@ mod tests {
         };
         let v = serde_json::to_value(&search_sample).expect("serialize SearchOutput");
         for key in v.as_object().unwrap().keys() {
-            assert!(topic.body.contains(key.as_str()), "json topic missing search field: {}", key);
+            assert!(
+                topic.body.contains(key.as_str()),
+                "json topic missing search field: {}",
+                key
+            );
         }
 
         // timeline → TimelineOutput
@@ -1375,7 +966,11 @@ mod tests {
         };
         let v = serde_json::to_value(&timeline_sample).expect("serialize TimelineOutput");
         for key in v.as_object().unwrap().keys() {
-            assert!(topic.body.contains(key.as_str()), "json topic missing timeline field: {}", key);
+            assert!(
+                topic.body.contains(key.as_str()),
+                "json topic missing timeline field: {}",
+                key
+            );
         }
     }
 
@@ -1391,7 +986,11 @@ mod tests {
         assert!(codes.contains(&"W074"));
         assert!(codes.contains(&"W075"));
         assert!(codes.contains(&"W076"));
-        assert_eq!(codes.len(), 9, "catalog size changed — update this test deliberately");
+        assert_eq!(
+            codes.len(),
+            9,
+            "catalog size changed — update this test deliberately"
+        );
     }
 
     #[test]
@@ -1407,9 +1006,10 @@ mod tests {
         // codes; they have been revived with new lifecycle semantics for the
         // checkpoint command (strand-moved and closed-strand guards) — see
         // git history for the old meanings.
-        for code in ["E047", "W058", "W065", "W067", "W072",
-                     "E081", "W081", "E082", "W082", "E083", "W083",
-                     "E084", "W085", "E055", "E057", "E058", "W066"] {
+        for code in [
+            "E047", "W058", "W065", "W067", "W072", "E081", "W081", "E082", "W082", "E083", "W083",
+            "E084", "W085", "E055", "E057", "E058", "W066",
+        ] {
             assert!(lookup(code).is_none(), "removed code {} reappeared", code);
         }
     }
@@ -1430,7 +1030,12 @@ mod tests {
         let recovery = &v["recovery"];
         assert_eq!(recovery["executable"], false);
         assert_eq!(recovery["requires_human"], true);
-        assert!(recovery["command"].as_str().unwrap().contains("contradiction"));
+        assert!(
+            recovery["command"]
+                .as_str()
+                .unwrap()
+                .contains("contradiction")
+        );
     }
 
     #[test]
@@ -1453,7 +1058,10 @@ mod tests {
     fn test_w075_can_explain() {
         let info = lookup("W075").expect("W075 should be in catalog");
         assert_eq!(info.code, "W075");
-        assert_eq!(info.title, "dangling fix reference — fixes= prefix unmatched");
+        assert_eq!(
+            info.title,
+            "dangling fix reference — fixes= prefix unmatched"
+        );
         assert!(matches!(info.severity, Severity::Warning));
         assert_eq!(info.category, "lifecycle");
         assert_eq!(info.producer, "context");
@@ -1470,7 +1078,11 @@ mod tests {
         use std::collections::HashSet;
         let codes: Vec<&str> = CATALOG.iter().map(|d| d.code).collect();
         let unique: HashSet<&str> = codes.iter().copied().collect();
-        assert_eq!(codes.len(), unique.len(), "duplicate diagnostic codes found");
+        assert_eq!(
+            codes.len(),
+            unique.len(),
+            "duplicate diagnostic codes found"
+        );
     }
 
     #[test]
@@ -1534,6 +1146,3 @@ mod tests {
         assert!(check_w076_seen_offset(id, None, 5).is_none());
     }
 }
-
-
-

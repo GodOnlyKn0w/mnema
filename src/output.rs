@@ -14,6 +14,7 @@
 use serde::Serialize;
 
 use crate::projection::ProjectedStrand;
+use crate::util::truncate;
 
 // ── orient --format json ───────────────────────────────────
 
@@ -34,7 +35,46 @@ pub struct OrientStrand {
     /// not by append markers. New field — additive to schema.
     pub lifecycle: String,
 }
+impl From<&ProjectedStrand> for OrientStrand {
+    fn from(s: &ProjectedStrand) -> Self {
+        OrientStrand {
+            id: s.id.clone(),
+            strand_type: s.strand_type.clone(),
+            entry_count: s.log_count(),
+            summary: truncate(s.first_summary(), 70),
+            last_entry: truncate(s.last_summary(), 70),
+            last_offset: s.last_offset(),
+            catch_up: format!("tasktree show --id {} --tail 8", s.id),
+            lifecycle: s.state().to_string(),
+        }
+    }
+}
 
+/// One node in the public `orient --tree --format json` forest.
+#[derive(Debug, Serialize, Clone)]
+pub struct OrientForestNode {
+    #[serde(flatten)]
+    pub card: OrientStrand,
+    pub children: Vec<OrientForestNode>,
+}
+
+impl From<&crate::graph::OrientForestNode> for OrientForestNode {
+    fn from(node: &crate::graph::OrientForestNode) -> Self {
+        OrientForestNode {
+            card: OrientStrand {
+                id: node.id.clone(),
+                strand_type: node.strand_type.clone(),
+                entry_count: node.entry_count,
+                summary: truncate(&node.summary, 70),
+                last_entry: truncate(&node.last_entry, 70),
+                last_offset: node.last_offset,
+                catch_up: format!("tasktree show --id {} --tail 8", node.id),
+                lifecycle: node.lifecycle.clone(),
+            },
+            children: node.children.iter().map(OrientForestNode::from).collect(),
+        }
+    }
+}
 /// External contract for `orient --format json`.
 #[derive(Debug, Serialize)]
 pub struct OrientOutput {
@@ -58,7 +98,7 @@ pub struct OrientTreeOutput {
     pub max_offset: usize,
     /// Forest roots (strands with no belongs-to parent in the active set).
     /// Each root's `children` hold strands that declared `belongs-to` this root.
-    pub roots: Vec<crate::tree::OrientForestNode>,
+    pub roots: Vec<OrientForestNode>,
     pub closed_count: usize,
     pub hidden_count: usize,
     pub remind: String,
@@ -319,3 +359,5 @@ impl From<&crate::event::TimelineEntry> for TimelineEntryOutput {
         }
     }
 }
+
+

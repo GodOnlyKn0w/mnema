@@ -1,6 +1,7 @@
 /// Context-command family: cmd_context plus pure context projection helpers.
 /// Moved from main.rs (Layer 4c-context refactor).
 use crate::journal::*;
+use crate::markers;
 use crate::projection;
 use crate::util::shorten;
 
@@ -114,9 +115,7 @@ pub(crate) fn pair_frictions(log: &[projection::LogEntry]) -> FrictionPairing {
         match matched {
             Some(fidx) => {
                 // Build scar content: friction text truncated at 50 chars → fixed
-                let friction_body = log[fidx].content
-                    .trim_start_matches("[friction]")
-                    .trim();
+                let friction_body = log[fidx].content.trim_start_matches("[friction]").trim();
                 let truncated: String = friction_body.chars().take(50).collect();
                 let scar = format!("{} → fixed", truncated);
 
@@ -131,7 +130,12 @@ pub(crate) fn pair_frictions(log: &[projection::LogEntry]) -> FrictionPairing {
         }
     }
 
-    FrictionPairing { paired_friction, paired_fixed, scar_content, dangling_fixes }
+    FrictionPairing {
+        paired_friction,
+        paired_fixed,
+        scar_content,
+        dangling_fixes,
+    }
 }
 
 /// Pure projection for context (testable without stdout capture).
@@ -180,9 +184,9 @@ pub(crate) fn build_context_strands(
 
         // --covers filter: check if any [covers] entry contains one of the paths
         if !covers.is_empty() {
-            let has_match = covers_list.iter().any(|c| {
-                covers.iter().any(|p| c.contains(p.as_str()))
-            });
+            let has_match = covers_list
+                .iter()
+                .any(|c| covers.iter().any(|p| c.contains(p.as_str())));
             if !has_match {
                 continue;
             }
@@ -223,7 +227,8 @@ pub(crate) fn build_context_strands(
         // ── B. observation-class tail-folding pre-pass ──────────────────
         // For each obs marker, find the index of the LAST occurrence in the log
         // (that is the tail to keep). All earlier occurrences are folded.
-        let mut last_obs_idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut last_obs_idx: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
         if !include_observations {
             for (idx, entry) in strand.log.iter().enumerate() {
                 for &om in &OBS_MARKERS {
@@ -255,7 +260,10 @@ pub(crate) fn build_context_strands(
                     // Live strand: check if paired
                     if pairing.paired_friction.contains(&idx) {
                         // Emit scar entry instead of full text
-                        let scar = pairing.scar_content.get(&idx).cloned()
+                        let scar = pairing
+                            .scar_content
+                            .get(&idx)
+                            .cloned()
                             .unwrap_or_else(|| "→ fixed".to_string());
                         return Some(ContextEntryOutput {
                             marker: "[friction]".to_string(),
@@ -265,7 +273,7 @@ pub(crate) fn build_context_strands(
                         });
                     }
                     // Unpaired friction: expose full text
-                    let (marker, content) = extract_marker(&e.content);
+                    let (marker, content) = markers::split_marker(&e.content);
                     return Some(ContextEntryOutput {
                         marker: marker.to_string(),
                         content: content.to_string(),
@@ -282,7 +290,7 @@ pub(crate) fn build_context_strands(
                         return None;
                     }
                     // Unpaired [fixed]: expose as normal entry
-                    let (marker, content) = extract_marker(&e.content);
+                    let (marker, content) = markers::split_marker(&e.content);
                     return Some(ContextEntryOutput {
                         marker: marker.to_string(),
                         content: content.to_string(),
@@ -307,7 +315,7 @@ pub(crate) fn build_context_strands(
                                 match om {
                                     "[progress]" => folded_counts.progress += 1,
                                     "[observed]" => folded_counts.observed += 1,
-                                    "[check]"    => folded_counts.check    += 1,
+                                    "[check]" => folded_counts.check += 1,
                                     _ => {}
                                 }
                                 return None;
@@ -319,7 +327,7 @@ pub(crate) fn build_context_strands(
                 }
 
                 // Normal entry
-                let (marker, content) = extract_marker(&e.content);
+                let (marker, content) = markers::split_marker(&e.content);
                 Some(ContextEntryOutput {
                     marker: marker.to_string(),
                     content: content.to_string(),
@@ -377,13 +385,23 @@ pub(crate) fn cmd_context(
     let target_type = context_type.unwrap_or("prompt-strand");
     let is_json = format_json == Some("json");
 
-    let output_strands =
-        build_context_strands(&strands, target_type, covers, since_offset, exclude_friction, include_observations);
+    let output_strands = build_context_strands(
+        &strands,
+        target_type,
+        covers,
+        since_offset,
+        exclude_friction,
+        include_observations,
+    );
 
     if is_json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "strands": output_strands,
-        })).map_err(|e| format!("serialize error: {}", e))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "strands": output_strands,
+            }))
+            .map_err(|e| format!("serialize error: {}", e))?
+        );
     } else {
         println!("# Strand Context\n");
         let strand_count = output_strands.len();
@@ -393,7 +411,11 @@ pub(crate) fn cmd_context(
             } else {
                 format!(" [covers: {}]", strand.covers.join(", "))
             };
-            println!("## prompt-strand:{} <id:{}>", covers_str, shorten(&strand.id));
+            println!(
+                "## prompt-strand:{} <id:{}>",
+                covers_str,
+                shorten(&strand.id)
+            );
             for entry in &strand.entries {
                 if entry.marker.is_empty() {
                     println!("  {}", entry.content);
@@ -412,7 +434,9 @@ pub(crate) fn cmd_context(
                 let fc = &strand.folded_counts;
                 println!(
                     "  folded: progress ×{} | observed ×{} | check ×{}  (tasktree show {})",
-                    fc.progress, fc.observed, fc.check,
+                    fc.progress,
+                    fc.observed,
+                    fc.check,
                     shorten(&strand.id)
                 );
             }
@@ -423,34 +447,6 @@ pub(crate) fn cmd_context(
     }
 
     Ok(())
-}
-
-/// Extract bracket-prefix marker from content.
-/// Returns ("[guide]", "remaining text") or ("", "full text") if no marker.
-pub(crate) fn extract_marker(content: &str) -> (&str, &str) {
-    if let Some(rest) = content.strip_prefix("[guide]") {
-        ("[guide]", rest.trim())
-    } else if let Some(rest) = content.strip_prefix("[observed]") {
-        ("[observed]", rest.trim())
-    } else if let Some(rest) = content.strip_prefix("[constraint]") {
-        ("[constraint]", rest.trim())
-    } else if let Some(rest) = content.strip_prefix("[decision]") {
-        ("[decision]", rest.trim())
-    } else if let Some(rest) = content.strip_prefix("[friction]") {
-        ("[friction]", rest.trim())
-    } else if let Some(rest) = content.strip_prefix("[covers]") {
-        ("[covers]", rest.trim())
-    } else if content.starts_with('[') {
-        if let Some(bracket_end) = content.find(']') {
-            let marker = &content[..=bracket_end];
-            let rest = content[bracket_end + 1..].trim();
-            (marker, rest)
-        } else {
-            ("", content)
-        }
-    } else {
-        ("", content)
-    }
 }
 
 /// Folded observation-class entry counts. Always serialised (including zeros)
@@ -466,8 +462,16 @@ pub(crate) struct FoldedCounts {
 }
 
 impl FoldedCounts {
-    pub(crate) fn zero() -> Self { FoldedCounts { progress: 0, observed: 0, check: 0 } }
-    pub(crate) fn any_folded(&self) -> bool { self.progress > 0 || self.observed > 0 || self.check > 0 }
+    pub(crate) fn zero() -> Self {
+        FoldedCounts {
+            progress: 0,
+            observed: 0,
+            check: 0,
+        }
+    }
+    pub(crate) fn any_folded(&self) -> bool {
+        self.progress > 0 || self.observed > 0 || self.check > 0
+    }
 }
 
 #[derive(Debug, serde::Serialize)]

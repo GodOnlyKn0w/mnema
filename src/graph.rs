@@ -1,4 +1,3 @@
-use crate::output::OrientStrand;
 use crate::projection::ProjectedStrand;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -42,8 +41,13 @@ pub struct TreeOutput {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct OrientForestNode {
-    #[serde(flatten)]
-    pub card: OrientStrand,
+    pub id: String,
+    pub strand_type: Option<String>,
+    pub entry_count: usize,
+    pub summary: String,
+    pub last_entry: String,
+    pub last_offset: usize,
+    pub lifecycle: String,
     pub children: Vec<OrientForestNode>,
 }
 
@@ -307,12 +311,12 @@ impl StrandGraph {
 
 }
 
-fn orient_forest_from_cards(
-    strand_cards: &[(&ProjectedStrand, OrientStrand)],
+fn orient_forest_from_strands(
+    strands: &[&ProjectedStrand],
 ) -> Vec<OrientForestNode> {
-    let id_set: HashSet<&str> = strand_cards.iter().map(|(s, _)| s.id.as_str()).collect();
+    let id_set: HashSet<&str> = strands.iter().map(|s| s.id.as_str()).collect();
     let mut parent_of: HashMap<String, String> = HashMap::new();
-    for (s, _) in strand_cards {
+    for s in strands {
         for target in &s.belongs_to_edges {
             if id_set.contains(target.as_str()) {
                 parent_of.entry(s.id.clone()).or_insert_with(|| target.clone());
@@ -321,19 +325,28 @@ fn orient_forest_from_cards(
         }
     }
 
-    let mut node_map: HashMap<String, OrientForestNode> = strand_cards.iter().map(|(s, card)| {
-        (s.id.clone(), OrientForestNode { card: card.clone(), children: Vec::new() })
+    let mut node_map: HashMap<String, OrientForestNode> = strands.iter().map(|s| {
+        (s.id.clone(), OrientForestNode {
+            id: s.id.clone(),
+            strand_type: s.strand_type.clone(),
+            entry_count: s.log_count(),
+            summary: s.first_summary().to_string(),
+            last_entry: s.last_summary().to_string(),
+            last_offset: s.last_offset(),
+            lifecycle: s.state().to_string(),
+            children: Vec::new(),
+        })
     }).collect();
     let child_ids: HashSet<String> = parent_of.keys().cloned().collect();
-    let mut root_ids: Vec<String> = strand_cards.iter()
-        .filter(|(s, _)| !child_ids.contains(&s.id))
-        .map(|(s, _)| s.id.clone())
+    let mut root_ids: Vec<String> = strands.iter()
+        .filter(|s| !child_ids.contains(&s.id))
+        .map(|s| s.id.clone())
         .collect();
 
     let mut children_of: HashMap<String, Vec<(String, usize)>> = HashMap::new();
     for (child_id, parent_id) in &parent_of {
         if let Some(node) = node_map.get(child_id) {
-            children_of.entry(parent_id.clone()).or_default().push((child_id.clone(), node.card.last_offset));
+            children_of.entry(parent_id.clone()).or_default().push((child_id.clone(), node.last_offset));
         }
     }
     for (parent_id, mut kids) in children_of {
@@ -346,18 +359,18 @@ fn orient_forest_from_cards(
         }
     }
     root_ids.sort_by(|a, b| {
-        let oa = node_map.get(a).map(|n| n.card.last_offset).unwrap_or(0);
-        let ob = node_map.get(b).map(|n| n.card.last_offset).unwrap_or(0);
+        let oa = node_map.get(a).map(|n| n.last_offset).unwrap_or(0);
+        let ob = node_map.get(b).map(|n| n.last_offset).unwrap_or(0);
         ob.cmp(&oa)
     });
     root_ids.into_iter().filter_map(|id| node_map.remove(&id)).collect()
 }
-pub(crate) fn build_orient_forest(
-    strand_cards: &[(&ProjectedStrand, OrientStrand)],
-) -> Vec<OrientForestNode> {
-    orient_forest_from_cards(strand_cards)
-}
 
+pub(crate) fn build_orient_forest(
+    strands: &[&ProjectedStrand],
+) -> Vec<OrientForestNode> {
+    orient_forest_from_strands(strands)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +436,6 @@ mod tests {
         assert!(findings.iter().any(|f| f.kind == EdgeFindingKind::DependsOnCycle));
     }
 }
+
 
 

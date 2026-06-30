@@ -1,3 +1,5 @@
+use crate::event::{Event, TimelineEventKind, find_strand};
+use crate::graph;
 /// Query-command family: cmd_list, cmd_show, cmd_search, cmd_timeline,
 /// cmd_orient, cmd_agent_context, cmd_tree (+ print_tree_text helper).
 /// Moved from main.rs (Layer 4b refactor); function bodies are byte-identical to
@@ -6,85 +8,106 @@
 /// Dependency direction: query -> journal, projection, render, tree, output, event (via crate::*)
 /// query <- main.rs (mod commands; pub(crate) use commands::query::*)
 use crate::journal::*;
-use crate::render::*;
-use crate::projection;
-use crate::graph;
-use crate::tree;
+use crate::markers::leading_marker;
 use crate::output;
-use crate::event::{Event, TimelineEventKind, find_strand};
-use crate::util::{truncate, shorten, parse_duration};
+use crate::projection;
+use crate::render::*;
+use crate::tree;
+use crate::util::{parse_duration, shorten, truncate};
 use serde_json::json;
 use std::time::Instant;
 
-pub(crate) fn cmd_list(include_hidden: bool, links: Option<&str>, backlinks: Option<&str>, state: Option<&str>, list_type: Option<&str>, stale: Option<&str>, stale_offset: Option<usize>, since_offset: Option<usize>, format_json: bool) -> Result<(), String> {
-    let started = Instant::now();
-    let path = ensure_journal()?;
-    let (events, skipped) = read_events_lossy(&path);
-    let mut strands = projection::project_strands(&events, include_hidden);
-    // Most recent last-append first
-    strands.sort_by(|a, b| b.last_ts().cmp(&a.last_ts()));
+pub(crate) struct ListRequest<'a> {
+    pub(crate) include_hidden: bool,
+    pub(crate) links: Option<&'a str>,
+    pub(crate) backlinks: Option<&'a str>,
+    pub(crate) state: Option<&'a str>,
+    pub(crate) list_type: Option<&'a str>,
+    pub(crate) stale: Option<&'a str>,
+    pub(crate) stale_offset: Option<usize>,
+    pub(crate) since_offset: Option<usize>,
+}
 
-    // --type: filter by strand_type (from StrandCreated event)
-    if let Some(ref type_filter) = list_type {
+pub(crate) fn list_strands(
+    events: &[(usize, Event)],
+    req: &ListRequest<'_>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<projection::ProjectedStrand>, String> {
+    let mut strands = projection::project_strands(events, req.include_hidden);
+    strands.sort_by(|a, b| b.last_ts().cmp(a.last_ts()));
+
+    if let Some(type_filter) = req.list_type {
         strands.retain(|n| n.strand_type.as_deref() == Some(type_filter));
     }
-
-    // --links: filter strands that source links to
-    if let Some(ref src) = links {
-        let source_edges: Vec<String> = strands.iter()
-            .filter(|n| n.id.starts_with(*src))
+    if let Some(src) = req.links {
+        let source_edges: Vec<String> = strands
+            .iter()
+            .filter(|n| n.id.starts_with(src))
             .flat_map(|n| n.edges.iter().cloned())
             .collect();
         strands.retain(|n| source_edges.iter().any(|e| n.id.starts_with(e)));
     }
-    // --backlinks: filter strands that link to target
-    if let Some(ref tgt) = backlinks {
-        strands.retain(|n| n.edges.iter().any(|e| e.starts_with(*tgt)));
+    if let Some(tgt) = req.backlinks {
+        strands.retain(|n| n.edges.iter().any(|e| e.starts_with(tgt)));
     }
-    // --state: filter by canonical state.
-    // "open" matches registered; disposition names (done/failed/cancelled/merged/verified)
-    // match closed:* strands; "closed" matches any closed strand.
-    if let Some(ref state_filter) = state {
-        strands.retain(|n| {
-            match *state_filter {
-                // "open" is not a canonical state; match default (registered)
-                "open" => n.state() == "registered",
-                // "closed" matches any closed strand regardless of disposition
-                "closed" => n.state().starts_with("closed:"),
-                // disposition shorthand: "done" matches "closed:done", etc.
-                s if projection::CLOSE_DISPOSITIONS.contains(&s) => {
-                    n.state() == format!("closed:{}", s)
-                }
-                _ => n.state() == *state_filter,
+    if let Some(state_filter) = req.state {
+        strands.retain(|n| match state_filter {
+            "open" => n.state() == "registered",
+            "closed" => n.state().starts_with("closed:"),
+            s if projection::CLOSE_DISPOSITIONS.contains(&s) => {
+                n.state() == format!("closed:{}", s)
             }
+            _ => n.state() == state_filter,
         });
     }
-
-    // --stale: filter by silence duration
-    if let Some(dur_str) = stale {
+    if let Some(dur_str) = req.stale {
         let secs = parse_duration(dur_str)?;
-        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(secs as i64);
+        let cutoff = now - chrono::Duration::seconds(secs as i64);
         let cutoff_str = cutoff.to_rfc3339();
         strands.retain(|n| {
             let last_ts = n.last_ts();
-            if last_ts.is_empty() { return false; }
-            last_ts < &cutoff_str
+            !last_ts.is_empty() && last_ts < &cutoff_str
         });
     }
-
-    // --stale-offset: filter by last entry offset (silent)
-    if let Some(so) = stale_offset {
-        strands.retain(|n| n.last_offset() <= so);
+    if let Some(offset) = req.stale_offset {
+        strands.retain(|n| n.last_offset() <= offset);
     }
-
-    // --since-offset: filter by last entry offset (updated since)
-    if let Some(so) = since_offset {
-        strands.retain(|n| n.last_offset() > so);
+    if let Some(offset) = req.since_offset {
+        strands.retain(|n| n.last_offset() > offset);
     }
+    Ok(strands)
+}
+
+pub(crate) fn cmd_list(
+    include_hidden: bool,
+    links: Option<&str>,
+    backlinks: Option<&str>,
+    state: Option<&str>,
+    list_type: Option<&str>,
+    stale: Option<&str>,
+    stale_offset: Option<usize>,
+    since_offset: Option<usize>,
+    format_json: bool,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let path = ensure_journal()?;
+    let (events, skipped) = read_events_lossy(&path);
+    let request = ListRequest {
+        include_hidden,
+        links,
+        backlinks,
+        state,
+        list_type,
+        stale,
+        stale_offset,
+        since_offset,
+    };
+    let strands = list_strands(&events, &request, chrono::Utc::now())?;
 
     if format_json {
         let output = output::StrandListOutput {
-            strands: strands.iter()
+            strands: strands
+                .iter()
                 .filter(|s| !s.hidden || include_hidden)
                 .map(output::StrandListItem::from)
                 .collect(),
@@ -103,7 +126,11 @@ pub(crate) fn cmd_list(include_hidden: bool, links: Option<&str>, backlinks: Opt
             continue;
         }
         let type_str = strand.strand_type.as_deref().unwrap_or("");
-        let type_info = if type_str.is_empty() { String::new() } else { format!(" [{}]", type_str) };
+        let type_info = if type_str.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", type_str)
+        };
         println!(
             "{}  {}  \"{}\"  →  \"{}\"{}",
             shorten(&strand.id),
@@ -124,59 +151,79 @@ pub(crate) fn cmd_list(include_hidden: bool, links: Option<&str>, backlinks: Opt
     Ok(())
 }
 
-pub(crate) fn cmd_search(query: &str, format_json: bool, include_hidden: bool) -> Result<(), String> {
-    let started = Instant::now();
-    let path = ensure_journal()?;
-    let (events, skipped) = read_events_lossy(&path);
-    let q = query.to_lowercase();
-    // Honour the include_hidden flag: when false (default), the strand_map
-    // is built from visible strands only, and the events loop below skips
-    // events belonging to strands not in the map.
-    let strands = projection::project_strands(&events, include_hidden);
+pub(crate) struct SearchRequest<'a> {
+    pub(crate) query: &'a str,
+    pub(crate) include_hidden: bool,
+}
+
+pub(crate) struct SearchResult {
+    pub(crate) output: output::SearchOutput,
+    pub(crate) text_rows: Vec<(String, String)>,
+}
+
+pub(crate) fn search_events(events: &[(usize, Event)], req: &SearchRequest<'_>) -> SearchResult {
+    let q = req.query.to_lowercase();
+    let strands = projection::project_strands(events, req.include_hidden);
     let strand_map: std::collections::HashMap<&str, &projection::ProjectedStrand> =
         strands.iter().map(|s| (s.id.as_str(), s)).collect();
 
-    let mut found = 0;
-    let mut matches: Vec<output::SearchMatch> = Vec::new();
-
-    for (_, event) in &events {
+    let mut matches = Vec::new();
+    let mut text_rows = Vec::new();
+    for (_, event) in events {
         if let Event::LogAppended { content, .. } = event {
             if content.to_lowercase().contains(&q) {
                 let strand_id = event.strand_id().to_string();
-                // Skip matches inside strands the projection filtered out
-                // (i.e. hidden strands when include_hidden is false).
                 if !strand_map.contains_key(strand_id.as_str()) {
                     continue;
                 }
                 let projected = strand_map.get(strand_id.as_str());
-                if format_json {
-                    matches.push(output::SearchMatch {
-                        strand_id,
-                        content: truncate(content, 70),
-                        strand_type: projected.and_then(|s| s.strand_type.clone()),
-                        hidden: projected.map(|s| s.hidden).unwrap_or(false),
-                    });
-                } else {
-                    println!(
-                        "{}  {}",
-                        shorten(&strand_id),
-                        truncate(content, 70)
-                    );
-                }
-                found += 1;
+                let content = truncate(content, 70);
+                text_rows.push((shorten(&strand_id), content.clone()));
+                matches.push(output::SearchMatch {
+                    strand_id,
+                    content,
+                    strand_type: projected.and_then(|s| s.strand_type.clone()),
+                    hidden: projected.map(|s| s.hidden).unwrap_or(false),
+                });
             }
         }
     }
+    let count = matches.len();
+    SearchResult {
+        output: output::SearchOutput {
+            matches,
+            count,
+            query: req.query.to_string(),
+        },
+        text_rows,
+    }
+}
+
+pub(crate) fn cmd_search(
+    query: &str,
+    format_json: bool,
+    include_hidden: bool,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let path = ensure_journal()?;
+    let (events, skipped) = read_events_lossy(&path);
+    let request = SearchRequest {
+        query,
+        include_hidden,
+    };
+    let result = search_events(&events, &request);
 
     if format_json {
-        let output = output::SearchOutput {
-            matches,
-            count: found,
-            query: query.to_string(),
-        };
-        println!("{}", serde_json::to_string(&output).expect("serialize"));
-    } else if found == 0 {
+        println!(
+            "{}",
+            serde_json::to_string(&result.output).expect("serialize")
+        );
+    } else if result.output.count == 0 {
         println!("(no matches for: {})", query);
+    } else {
+        for (id, content) in &result.text_rows {
+            println!("{}  {}", id, content);
+        }
     }
 
     if skipped > 0 {
@@ -186,11 +233,10 @@ pub(crate) fn cmd_search(query: &str, format_json: bool, include_hidden: bool) -
     eprintln!(
         "[tasktree] search: {:.0?}  ({} matches)",
         started.elapsed(),
-        found
+        result.output.count
     );
     Ok(())
 }
-
 pub(crate) fn cmd_timeline(
     since_offset: Option<usize>,
     since_ts: Option<&str>,
@@ -226,11 +272,13 @@ pub(crate) fn cmd_timeline(
 
     // Filter by strand or links
     if let Some(sid) = strand {
-        let full_id = find_strand(&events, sid).ok_or_else(|| format!("strand {} not found", sid))?;
+        let full_id =
+            find_strand(&events, sid).ok_or_else(|| format!("strand {} not found", sid))?;
         entries.retain(|e| e.strand_id == full_id);
     }
     if let Some(lid) = links {
-        let full_id = find_strand(&events, lid).ok_or_else(|| format!("strand {} not found", lid))?;
+        let full_id =
+            find_strand(&events, lid).ok_or_else(|| format!("strand {} not found", lid))?;
         // Collect linked strand IDs
         let mut linked_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         linked_ids.insert(full_id.clone());
@@ -266,22 +314,39 @@ pub(crate) fn cmd_timeline(
     let is_json = format_json == Some("json");
 
     if is_json {
-        println!("{}", json!({
-            "timeline": entries,
-            "truncated": truncated,
-            "count": count,
-            "max_offset": max_offset,
-        }));
+        println!(
+            "{}",
+            json!({
+                "timeline": entries,
+                "truncated": truncated,
+                "count": count,
+                "max_offset": max_offset,
+            })
+        );
     } else if entries.is_empty() {
         // No dead ends (design principle): empty result must say something.
         let mut parts: Vec<String> = Vec::new();
-        if let Some(so) = since_offset { parts.push(format!("since-offset {}", so)); }
-        if let Some(st) = since_ts { parts.push(format!("since-ts {}", st)); }
-        if let Some(uo) = until_offset { parts.push(format!("until-offset {}", uo)); }
-        if let Some(ut) = until_ts { parts.push(format!("until-ts {}", ut)); }
-        if let Some(sid) = strand { parts.push(format!("strand {}", sid)); }
-        if let Some(lid) = links { parts.push(format!("links {}", lid)); }
-        if let Some(root) = tree_root { parts.push(format!("tree {}", root)); }
+        if let Some(so) = since_offset {
+            parts.push(format!("since-offset {}", so));
+        }
+        if let Some(st) = since_ts {
+            parts.push(format!("since-ts {}", st));
+        }
+        if let Some(uo) = until_offset {
+            parts.push(format!("until-offset {}", uo));
+        }
+        if let Some(ut) = until_ts {
+            parts.push(format!("until-ts {}", ut));
+        }
+        if let Some(sid) = strand {
+            parts.push(format!("strand {}", sid));
+        }
+        if let Some(lid) = links {
+            parts.push(format!("links {}", lid));
+        }
+        if let Some(root) = tree_root {
+            parts.push(format!("tree {}", root));
+        }
         if parts.is_empty() {
             println!("(journal is empty)");
         } else {
@@ -307,8 +372,17 @@ pub(crate) fn cmd_timeline(
                 TimelineEventKind::CheckpointCreated { action, .. } => {
                     format!("checkpoint: {}", action)
                 }
-                TimelineEventKind::SubjectBound { subject_type, subject_id, strand_id } => {
-                    format!("bind: {}:{} -> {}", subject_type, subject_id, shorten(strand_id))
+                TimelineEventKind::SubjectBound {
+                    subject_type,
+                    subject_id,
+                    strand_id,
+                } => {
+                    format!(
+                        "bind: {}:{} -> {}",
+                        subject_type,
+                        subject_id,
+                        shorten(strand_id)
+                    )
                 }
                 TimelineEventKind::StrandClosed { disposition } => {
                     format!("closed:{}", disposition)
@@ -322,27 +396,53 @@ pub(crate) fn cmd_timeline(
     Ok(())
 }
 
+pub(crate) struct OrientRequest {
+    pub(crate) include_hidden: bool,
+    pub(crate) limit: usize,
+}
 
-pub(crate) fn cmd_orient(format: Option<&str>, include_hidden: bool, limit: Option<usize>, show_tree: bool) -> Result<(), String> {
+pub(crate) struct OrientPlan {
+    pub(crate) strands: Vec<projection::ProjectedStrand>,
+    pub(crate) output: output::OrientOutput,
+}
+
+pub(crate) fn orient_plan(events: &[(usize, Event)], req: &OrientRequest) -> OrientPlan {
+    let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
+    let strands = projection::project_strands(events, true);
+    let output = build_orient(&strands, req.include_hidden, req.limit, max_offset);
+    OrientPlan { strands, output }
+}
+pub(crate) fn cmd_orient(
+    format: Option<&str>,
+    include_hidden: bool,
+    limit: Option<usize>,
+    show_tree: bool,
+) -> Result<(), String> {
     let started = Instant::now();
     let path = ensure_journal()?;
     let (events, skipped) = read_events_lossy(&path);
-    let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
-    // Always project with include_hidden=true so build_orient can count hidden
-    // strands; the visible/hidden split is done inside build_orient.
-    let strands = projection::project_strands(&events, true);
-    let out = build_orient(&strands, include_hidden, limit.unwrap_or(10), max_offset);
+    let request = OrientRequest {
+        include_hidden,
+        limit: limit.unwrap_or(10),
+    };
+    let plan = orient_plan(&events, &request);
+    let strands = &plan.strands;
+    let out = &plan.output;
 
     if show_tree {
-        // Build the belongs-to forest from the active strand set
-        let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+        // Build the belongs-to forest from the active strand set.
+        // The tree module returns projection nodes; Contract Surface maps them
+        // to the public orient-tree DTO below.
+        let active_strands: Vec<&projection::ProjectedStrand> = out
             .active
             .iter()
-            .filter_map(|card| {
-                strands.iter().find(|s| s.id == card.id).map(|s| (s, card.clone()))
-            })
+            .filter_map(|card| strands.iter().find(|s| s.id == card.id))
             .collect();
-        let roots = tree::build_orient_forest(&strand_cards);
+        let forest = tree::build_orient_forest(&active_strands);
+        let roots: Vec<output::OrientForestNode> = forest
+            .iter()
+            .map(output::OrientForestNode::from)
+            .collect();
         let tree_out = output::OrientTreeOutput {
             max_offset: out.max_offset,
             roots,
@@ -383,7 +483,13 @@ pub(crate) fn cmd_orient(format: Option<&str>, include_hidden: bool, limit: Opti
                 .as_deref()
                 .map(|t| format!(" [{}]", t))
                 .unwrap_or_default();
-            println!("  {}{}  {} entries | last_offset {}", shorten(&s.id), type_info, s.entry_count, s.last_offset);
+            println!(
+                "  {}{}  {} entries | last_offset {}",
+                shorten(&s.id),
+                type_info,
+                s.entry_count,
+                s.last_offset
+            );
             println!("    {}", s.summary);
             if s.entry_count > 1 {
                 println!("    last: {}", s.last_entry);
@@ -404,8 +510,10 @@ pub(crate) fn cmd_orient(format: Option<&str>, include_hidden: bool, limit: Opti
     Ok(())
 }
 
-
-pub(crate) fn cmd_agent_context(format_json: Option<&str>, include_hidden: bool) -> Result<(), String> {
+pub(crate) fn cmd_agent_context(
+    format_json: Option<&str>,
+    include_hidden: bool,
+) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, include_hidden);
@@ -430,34 +538,49 @@ pub(crate) fn cmd_agent_context(format_json: Option<&str>, include_hidden: bool)
 
     let prompt_strand_json: Vec<_> = prompt_strands
         .iter()
-        .map(|s| json!({
-            "id": s.id,
-            "entry_count": s.log_count(),
-            "first_summary": s.first_summary(),
-            "last_summary": s.last_summary(),
-            "last_entry_offset": s.last_offset(),
-            "last_entry_ts": s.last_ts(),
-            "status": s.state(),
-            "hidden": s.hidden,
-        }))
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "entry_count": s.log_count(),
+                "first_summary": s.first_summary(),
+                "last_summary": s.last_summary(),
+                "last_entry_offset": s.last_offset(),
+                "last_entry_ts": s.last_ts(),
+                "status": s.state(),
+                "hidden": s.hidden,
+            })
+        })
         .collect();
 
     if format_json == Some("json") {
-        println!("{}", json!({
-            "prompt_strands": prompt_strand_json,
-            "last_session_offset": last_session_offset,
-            "timeline_since_last_session": timeline_since_last_session,
-        }));
+        println!(
+            "{}",
+            json!({
+                "prompt_strands": prompt_strand_json,
+                "last_session_offset": last_session_offset,
+                "timeline_since_last_session": timeline_since_last_session,
+            })
+        );
     } else {
         println!("prompt_strands: {}", prompt_strands.len());
         println!("last_session_offset: {}", last_session_offset);
-        println!("timeline_since_last_session: {}", timeline_since_last_session.len());
+        println!(
+            "timeline_since_last_session: {}",
+            timeline_since_last_session.len()
+        );
         println!("\nUse JSON for machine startup context:\n  tasktree agent-context --format json");
     }
     Ok(())
 }
 
-pub(crate) fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format_json: bool, locked: bool, digest: bool) -> Result<(), String> {
+pub(crate) fn cmd_show(
+    id: Option<&str>,
+    last: bool,
+    tail: Option<usize>,
+    format_json: bool,
+    locked: bool,
+    digest: bool,
+) -> Result<(), String> {
     let started = Instant::now();
     let path = ensure_journal()?;
     let read = if locked {
@@ -485,8 +608,8 @@ pub(crate) fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format
         sorted.into_iter().next().unwrap()
     } else {
         let id_str = id.ok_or("provide a strand id or use --last")?;
-        let full = find_strand(&events, id_str)
-            .ok_or_else(|| format!("strand {} not found", id_str))?;
+        let full =
+            find_strand(&events, id_str).ok_or_else(|| format!("strand {} not found", id_str))?;
         strands.iter().find(|s| s.id == full).unwrap()
     };
 
@@ -537,7 +660,11 @@ pub(crate) fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format
         if unmarked > 0 {
             parts.push(format!("{} unmarked", unmarked));
         }
-        let census = if parts.is_empty() { "—".to_string() } else { parts.join(", ") };
+        let census = if parts.is_empty() {
+            "—".to_string()
+        } else {
+            parts.join(", ")
+        };
         println!("markers: {}", census);
         eprintln!(
             "[tasktree] show:   {:.0?}  (digest, {} entries)",
@@ -594,20 +721,6 @@ pub(crate) fn cmd_show(id: Option<&str>, last: bool, tail: Option<usize>, format
     Ok(())
 }
 
-/// Extract the leading `[marker]` token from an entry's content, if present.
-/// `"[decision] ..."` -> `Some("decision")`; unmarked content -> `None`.
-pub(crate) fn leading_marker(content: &str) -> Option<&str> {
-    let trimmed = content.trim_start();
-    let rest = trimmed.strip_prefix('[')?;
-    let end = rest.find(']')?;
-    let token = &rest[..end];
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
-    }
-}
-
 // ── Tree projection ─────────────────────────────────────
 
 pub(crate) fn cmd_tree(root_id: &str, format_json: Option<&str>) -> Result<(), String> {
@@ -633,9 +746,15 @@ pub(crate) fn cmd_tree(root_id: &str, format_json: Option<&str>) -> Result<(), S
 
 fn print_tree_text(node: &tree::TreeNode, depth: usize) {
     let indent = "  ".repeat(depth);
-    let marker = if node.children.is_empty() { "  " } else { "└─" };
-    println!("{}{} {} [{}] {}",
-        indent, marker,
+    let marker = if node.children.is_empty() {
+        "  "
+    } else {
+        "└─"
+    };
+    println!(
+        "{}{} {} [{}] {}",
+        indent,
+        marker,
         &node.id[..12.min(node.id.len())],
         node.status,
         node.summary.chars().take(60).collect::<String>()
@@ -669,37 +788,54 @@ pub(crate) fn cmd_depends(id: &str, format_json: Option<&str>) -> Result<(), Str
                 })
             })
             .collect();
-        println!("{}", json!({
-            "id": analysis.id,
-            "summary": analysis.summary,
-            "ready": analysis.ready,
-            "open_blocker_count": analysis.open_blocker_count,
-            "blockers": blocker_objs,
-            "critical_path": analysis.critical_path,
-            "critical_path_len": analysis.critical_path.len(),
-        }));
+        println!(
+            "{}",
+            json!({
+                "id": analysis.id,
+                "summary": analysis.summary,
+                "ready": analysis.ready,
+                "open_blocker_count": analysis.open_blocker_count,
+                "blockers": blocker_objs,
+                "critical_path": analysis.critical_path,
+                "critical_path_len": analysis.critical_path.len(),
+            })
+        );
     } else {
-        println!("depends-on analysis: {}  {}",
+        println!(
+            "depends-on analysis: {}  {}",
             shorten(&analysis.id),
-            analysis.summary.chars().take(50).collect::<String>());
-        println!("  ready: {}  ({} open blocker(s))", if analysis.ready { "yes" } else { "no" }, analysis.open_blocker_count);
+            analysis.summary.chars().take(50).collect::<String>()
+        );
+        println!(
+            "  ready: {}  ({} open blocker(s))",
+            if analysis.ready { "yes" } else { "no" },
+            analysis.open_blocker_count
+        );
         if analysis.blockers.is_empty() {
             println!("  direct blockers: (none)");
         } else {
             println!("  direct blockers:");
             for b in &analysis.blockers {
                 let mark = if b.closed { "closed" } else { "OPEN  " };
-                println!("    [{}] {}  {}", mark, shorten(&b.id), b.summary.chars().take(45).collect::<String>());
+                println!(
+                    "    [{}] {}  {}",
+                    mark,
+                    shorten(&b.id),
+                    b.summary.chars().take(45).collect::<String>()
+                );
             }
         }
         if analysis.critical_path.is_empty() {
             println!("  critical path: (none - no open upstreams)");
         } else {
             let chain: Vec<String> = analysis.critical_path.iter().map(|c| shorten(c)).collect();
-            println!("  critical path (longest open chain, len {}): {}", analysis.critical_path.len(), chain.join(" -> "));
+            println!(
+                "  critical path (longest open chain, len {}): {}",
+                analysis.critical_path.len(),
+                chain.join(" -> ")
+            );
         }
     }
     Ok(())
 }
-
 

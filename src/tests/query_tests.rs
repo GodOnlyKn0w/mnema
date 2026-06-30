@@ -154,25 +154,20 @@ fn orient_tree_nests_belongs_to_child_under_parent() {
     let strands = projection::project_strands(&events, true);
     let out = build_orient(&strands, false, 10, max_offset);
 
-    // Build strand_cards for tree construction (mirror of cmd_orient logic)
-    let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+    // Build active projection strands for tree construction (mirror of cmd_orient logic)
+    let active_strands: Vec<&projection::ProjectedStrand> = out
         .active
         .iter()
-        .filter_map(|card| {
-            strands
-                .iter()
-                .find(|s| s.id == card.id)
-                .map(|s| (s, card.clone()))
-        })
+        .filter_map(|card| strands.iter().find(|s| s.id == card.id))
         .collect();
-    let roots = tree::build_orient_forest(&strand_cards);
+    let roots = tree::build_orient_forest(&active_strands);
 
     // Parent is a root; child is nested under it
     assert_eq!(roots.len(), 1, "orient --tree: only the parent is a root");
-    assert_eq!(roots[0].card.id, parent, "root must be the parent strand");
+    assert_eq!(roots[0].id, parent, "root must be the parent strand");
     assert_eq!(roots[0].children.len(), 1, "parent must have one child");
     assert_eq!(
-        roots[0].children[0].card.id, child,
+        roots[0].children[0].id, child,
         "child must be nested under parent"
     );
 }
@@ -194,20 +189,15 @@ fn orient_tree_parallel_siblings_visible_under_parent() {
     let strands = projection::project_strands(&events, true);
     let out = build_orient(&strands, false, 10, max_offset);
 
-    let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+    let active_strands: Vec<&projection::ProjectedStrand> = out
         .active
         .iter()
-        .filter_map(|card| {
-            strands
-                .iter()
-                .find(|s| s.id == card.id)
-                .map(|s| (s, card.clone()))
-        })
+        .filter_map(|card| strands.iter().find(|s| s.id == card.id))
         .collect();
-    let roots = tree::build_orient_forest(&strand_cards);
+    let roots = tree::build_orient_forest(&active_strands);
 
     assert_eq!(roots.len(), 1, "only parent is a root");
-    assert_eq!(roots[0].card.id, parent, "root is the parent");
+    assert_eq!(roots[0].id, parent, "root is the parent");
     assert_eq!(
         roots[0].children.len(),
         2,
@@ -216,7 +206,7 @@ fn orient_tree_parallel_siblings_visible_under_parent() {
     let child_ids: Vec<&str> = roots[0]
         .children
         .iter()
-        .map(|n| n.card.id.as_str())
+        .map(|n| n.id.as_str())
         .collect();
     assert!(
         child_ids.contains(&sibling_a.as_str()),
@@ -243,20 +233,15 @@ fn orient_tree_orphan_strands_are_roots() {
     let strands = projection::project_strands(&events, true);
     let out = build_orient(&strands, false, 10, max_offset);
 
-    let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+    let active_strands: Vec<&projection::ProjectedStrand> = out
         .active
         .iter()
-        .filter_map(|card| {
-            strands
-                .iter()
-                .find(|s| s.id == card.id)
-                .map(|s| (s, card.clone()))
-        })
+        .filter_map(|card| strands.iter().find(|s| s.id == card.id))
         .collect();
-    let roots = tree::build_orient_forest(&strand_cards);
+    let roots = tree::build_orient_forest(&active_strands);
 
     assert_eq!(roots.len(), 2, "both orphan strands must appear as roots");
-    let root_ids: Vec<&str> = roots.iter().map(|n| n.card.id.as_str()).collect();
+    let root_ids: Vec<&str> = roots.iter().map(|n| n.id.as_str()).collect();
     assert!(
         root_ids.contains(&orphan_a.as_str()),
         "orphan A must be a root"
@@ -290,17 +275,12 @@ fn orient_tree_no_contention_markers() {
     let strands = projection::project_strands(&events, true);
     let out = build_orient(&strands, false, 10, max_offset);
 
-    let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+    let active_strands: Vec<&projection::ProjectedStrand> = out
         .active
         .iter()
-        .filter_map(|card| {
-            strands
-                .iter()
-                .find(|s| s.id == card.id)
-                .map(|s| (s, card.clone()))
-        })
+        .filter_map(|card| strands.iter().find(|s| s.id == card.id))
         .collect();
-    let roots = tree::build_orient_forest(&strand_cards);
+    let roots = tree::build_orient_forest(&active_strands);
 
     // Serialize to JSON and assert no "contention" word appears
     let json_str = serde_json::to_string(&roots).unwrap();
@@ -329,17 +309,16 @@ fn orient_tree_json_shape_is_nested() {
     let strands = projection::project_strands(&events, true);
     let out = build_orient(&strands, false, 10, max_offset);
 
-    let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+    let active_strands: Vec<&projection::ProjectedStrand> = out
         .active
         .iter()
-        .filter_map(|card| {
-            strands
-                .iter()
-                .find(|s| s.id == card.id)
-                .map(|s| (s, card.clone()))
-        })
+        .filter_map(|card| strands.iter().find(|s| s.id == card.id))
         .collect();
-    let roots = tree::build_orient_forest(&strand_cards);
+    let roots = tree::build_orient_forest(&active_strands);
+    let roots: Vec<output::OrientForestNode> = roots
+        .iter()
+        .map(output::OrientForestNode::from)
+        .collect();
     let tree_out = output::OrientTreeOutput {
         max_offset,
         roots,
@@ -462,25 +441,20 @@ fn tree_and_orient_forest_agree_on_nesting() {
 
     // build_orient_forest (orient --tree) view
     let out = build_orient(&strands, false, 10, max_offset);
-    let strand_cards: Vec<(&projection::ProjectedStrand, output::OrientStrand)> = out
+    let active_strands: Vec<&projection::ProjectedStrand> = out
         .active
         .iter()
-        .filter_map(|card| {
-            strands
-                .iter()
-                .find(|s| s.id == card.id)
-                .map(|s| (s, card.clone()))
-        })
+        .filter_map(|card| strands.iter().find(|s| s.id == card.id))
         .collect();
-    let roots = tree::build_orient_forest(&strand_cards);
+    let roots = tree::build_orient_forest(&active_strands);
     let parent_root = roots
         .iter()
-        .find(|n| n.card.id == parent)
+        .find(|n| n.id == parent)
         .expect("parent is a root in the forest");
     let mut forest_child_ids: Vec<String> = parent_root
         .children
         .iter()
-        .map(|c| c.card.id.clone())
+        .map(|c| c.id.clone())
         .collect();
     forest_child_ids.sort();
 
@@ -856,3 +830,5 @@ fn show_tail_works_with_explicit_id() {
 
 // StrandDetailOutput (show --format json) must serialize as "entry_count",
 // not "entries".
+
+
