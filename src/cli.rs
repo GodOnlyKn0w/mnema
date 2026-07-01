@@ -1,4 +1,3 @@
-use crate::commands::context::*;
 use crate::commands::doctor::*;
 use crate::commands::manage::*;
 use crate::commands::query::*;
@@ -33,22 +32,16 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   show          Show one strand (--digest one-glance, --tail N recent)
   timeline      Chronological entries across strands (+linked)
   search        Full-text search across entries
-  find          Resolve a strand id
   tree          Strand forest (belongs-to nesting)
   depends       depends-on analysis: blockers / readiness / critical path
-  current       Latest effective subject binding
-  agent-context Machine-readable active-strand context
-  context       Project a typed context slice
 
 做 / change:
   add           Create a new strand
   append        Append an entry to a strand
   close         Close a strand (StrandClosed event)
   reopen        Reopen a closed strand (StrandReopened event)
-  checkpoint    Record context before an irreversible action
   link          Link strands (belongs-to / depends-on)
   unlink        Remove a link (EdgeUnlinked; read projection drops the edge)
-  bind          Record a subject binding
 
 管 / manage:
   init          Initialize .tasktree/ journal
@@ -132,12 +125,12 @@ Examples:
         #[arg(long = "provenance", value_name = "JSON")]
         provenance: Option<String>,
     },
-    /// Append content to a strand, or create a new strand from content.
+    /// Append content to an existing strand.
     #[command(after_help = "\
 Invocation forms:
-  tasktree append <CONTENT> [LEGACY_ID]
-  tasktree append --stdin [--id <ID> | --new]
-  tasktree append --file <PATH> [--id <ID> | --new]
+  tasktree append <CONTENT> [--id <ID>]
+  tasktree append --stdin [--id <ID>]
+  tasktree append --file <PATH> [--id <ID>]
 
 Content source (choose exactly one):
   CONTENT             Log content
@@ -147,19 +140,14 @@ Content source (choose exactly one):
 Target (choose at most one):
   (none)              Append to most recently active strand
   --id <ID>           Append to a specific strand
-  <ID>                [LEGACY] Strand ID as second positional argument.
-                      Only valid with positional CONTENT.
-  --new               Create a new strand from the content
 
 Rules:
   CONTENT, --stdin, and --file are mutually exclusive.
-  --new, --id, and LEGACY_ID are mutually exclusive.
-  LEGACY_ID is only valid with positional CONTENT.
   Empty content is rejected.
+  To create a new strand, use the add command.
 
 Examples:
   tasktree append \"short note\"
-  tasktree append \"short note\" 0000019dd34b
   tasktree append --id 0000019dd34b \"short note\"
 
   echo \"long note\" | tasktree append --stdin
@@ -168,7 +156,6 @@ Examples:
   tasktree append --file note.md
   tasktree append --file note.md --id 0000019dd34b
 
-  echo \"new strand title\" | tasktree append --stdin --new
   tasktree append --file note.md --id 0000019dd34b --provenance '{\"producer\":\"pi\",\"model\":\"gpt-5\"}'
 
 Markers (optional bracket prefix on the first line):
@@ -183,12 +170,6 @@ Provenance:
     Append {
         /// Log content
         content: Option<String>,
-        /// [LEGACY] Strand ID as second positional argument.
-        /// Only valid with positional CONTENT.
-        id: Option<String>,
-        /// Create a new strand from the content
-        #[arg(short, long)]
-        new: bool,
         /// Read content from standard input
         #[arg(long, verbatim_doc_comment)]
         stdin: bool,
@@ -215,79 +196,8 @@ Provenance:
         #[arg(long = "why", value_name = "REF")]
         why: Option<String>,
     },
-    /// Record context before an irreversible or state-closing action
-    #[command(after_help = "\
-Invocation forms:
-  tasktree checkpoint --action \"<action and reason>\"
-  tasktree checkpoint --id <STRAND_ID> --action \"<action and reason>\"
-  tasktree checkpoint --id <STRAND_ID> --tail 30 --format json --action \"<action and reason>\"
-
-Required:
-  --action <TEXT>    Agent-supplied action and reason. Recorded, not classified.
-
-Target:
-  --id <STRAND_ID>   Use explicit strand. Prefer this for git commits and destructive actions.
-  omitted --id       Resolve to most recently active strand; stdout shows resolved_by.
-
-Output:
-  default            Human-readable stdout + journal append. The strand line
-                     includes entry count and state for at-a-glance confirmation.
-  --format json      Machine-readable stdout + journal append. Includes a
-                     \"result\" field with the updated strand card (OrientStrand).
-
-  staleness          Always printed: age of strand's last entry + journal delta
-                     since that entry. Catch-up command shown when delta > 0.
-  catch-up           tasktree timeline --since-offset <N> --links <STRAND_ID>
-                     (emitted verbatim when journal delta > 0)
-  warnings           W070 (strand moved under you), W071 (closed strand), and
-                     W076 (--seen-offset behind target last_offset) fire as scar
-                     lines in text output; in json output, a \"warnings\" array
-                     is always present.
-                     These warnings are informational — exit is still 0.
-
-Exit codes:
-  0 ok
-  1 strand resolve/show failed
-  2 append failed
-  3 invalid arguments
-
-Rules:
-  --tail only limits displayed output.
-  --tail does not change observed_entries_before_append.
-  checkpoint failed means hard stop.
-JSON shape: tasktree explain json")]
-    Checkpoint {
-        /// Strand ID (prefix match). Prefer explicit --id for commits and destructive actions.
-        #[arg(long = "id", value_name = "STRAND_ID")]
-        id: Option<String>,
-        /// Agent-supplied action and reason. Recorded, not classified.
-        #[arg(long, value_name = "TEXT")]
-        action: String,
-        /// Show only the last N log entries in checkpoint stdout
-        #[arg(long, value_name = "N")]
-        tail: Option<usize>,
-        /// Output format: text (default) or json
-        #[arg(long, value_name = "FORMAT")]
-        format: Option<String>,
-        /// Include hidden strands when resolving the most-recent active strand
-        /// (default: only consider visible strands; passing --include-hidden
-        /// or --all falls back to hidden ones if no visible strand exists)
-        #[arg(long, alias = "all")]
-        include_hidden: bool,
-        /// Optional provenance JSON object. Same shape as
-        /// `append --provenance`.
-        #[arg(long = "provenance", value_name = "JSON")]
-        provenance: Option<String>,
-        /// Caller-declared last observed offset for the target strand.
-        /// If behind the target's current last_offset, emits W076 but still writes.
-        #[arg(long = "seen-offset", value_name = "N")]
-        seen_offset: Option<usize>,
-    },
     /// List all strands (reverse chronological, most recent last)
     List {
-        /// Include hidden strands
-        #[arg(long)]
-        all: bool,
         /// Show strands linked FROM this ID
         #[arg(long, value_name = "ID")]
         links: Option<String>,
@@ -344,14 +254,6 @@ JSON shape: tasktree explain json")]
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
     },
-    /// Resolve a prefix to full strand ID
-    Find {
-        #[command(flatten)]
-        target: IdTarget,
-        /// Output format: text (default) or json
-        #[arg(long, value_name = "FORMAT")]
-        format: Option<String>,
-    },
     /// Create a directed link between two strands
     #[command(after_help = "\
 Direction (read SOURCE first): the edge always points from SOURCE to TARGET.
@@ -378,8 +280,8 @@ JSON shape: tasktree explain json")]
         target: String,
         /// Edge type: belongs-to, depends-on (default: depends-on).
         /// Direction: SOURCE <edge-type> TARGET (e.g. SOURCE belongs-to TARGET
-        /// = source is child of target). [alias: --type (deprecated)]
-        #[arg(long = "edge-type", visible_alias = "type", value_name = "TYPE")]
+        /// = source is child of target).
+        #[arg(long = "edge-type", value_name = "TYPE")]
         edge_type: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -402,7 +304,7 @@ Example:
         /// Target strand ID (prefix match) — same TARGET as the link being removed.
         target: String,
         /// Edge type to remove: belongs-to, depends-on (default: depends-on).
-        #[arg(long = "edge-type", visible_alias = "type", value_name = "TYPE")]
+        #[arg(long = "edge-type", value_name = "TYPE")]
         edge_type: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -475,59 +377,6 @@ Examples:
         /// Strand ID (prefix match)
         #[arg(long = "id", value_name = "ID")]
         id: String,
-        /// Output format: text (default) or json
-        #[arg(long, value_name = "FORMAT")]
-        format: Option<String>,
-    },
-
-    /// Record a subject binding. Append-only. Newer bindings supersede
-    /// older ones for the same (subject-type, subject-id) pair.
-    #[command(after_help = "\
-Examples:
-  tasktree bind --subject-type pi-session --subject-id abc123 --id 0000019dd34b
-  tasktree bind --subject-type ci-run --subject-id run-42 --id 0000019dd34b --format json
-  echo '{\"subject_type\":\"pi-session\",\"subject_id\":\"abc\",\"strand_id\":\"0000019dd34b\"}' | tasktree bind --stdin
-
-Rules:
-  --subject-type and --subject-id are required, non-empty strings.
-  --id is required and must be a strand id (prefix match).
-  --stdin reads the same fields as a JSON object from standard input.")]
-    Bind {
-        /// Subject type discriminator (generic string, e.g. pi-session, ci-run).
-        #[arg(long = "subject-type", value_name = "TYPE")]
-        subject_type: Option<String>,
-        /// Subject id within the chosen type.
-        #[arg(long = "subject-id", value_name = "ID")]
-        subject_id: Option<String>,
-        /// Target strand id (prefix match). Must already exist in the journal.
-        #[arg(long = "id", value_name = "STRAND_ID")]
-        id: Option<String>,
-        /// Read binding from a single JSON object on stdin.
-        /// Schema: { "subject_type": "...", "subject_id": "...", "strand_id": "..." }
-        #[arg(long)]
-        stdin: bool,
-        /// Optional provenance JSON object. Stored on the SubjectBound event.
-        #[arg(long = "provenance", value_name = "JSON")]
-        provenance: Option<String>,
-        /// Output format: text (default) or json
-        #[arg(long, value_name = "FORMAT")]
-        format: Option<String>,
-    },
-    /// Project the latest effective subject binding.
-    #[command(after_help = "\
-Examples:
-  tasktree current --subject-type pi-session --subject-id abc123
-  tasktree current --subject-type pi-session --subject-id abc123 --format json
-
-Rules:
-  --subject-type and --subject-id are required, non-empty strings.
-  Returns the strand_id of the latest SubjectBound event for the pair.
-  No binding -> exit 1 with stderr message, no stdout payload.")]
-    Current {
-        #[arg(long = "subject-type", value_name = "TYPE")]
-        subject_type: Option<String>,
-        #[arg(long = "subject-id", value_name = "ID")]
-        subject_id: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -631,10 +480,11 @@ After orienting:
   matter concluded  tasktree close --id <ID> [--as done|failed|cancelled|merged|verified]
                     (default: done; reopen with tasktree reopen --id <ID>)
   before anything irreversible
-                    tasktree checkpoint --id <ID> --action \"<what and why>\"
+                    pause: name the change you can't take back, then append
+                    your reasoning with tasktree append --id <ID> \"[decision] ...\"
 
 Closed strands are folded to a count; retrieve with tasktree list.
-Hidden strands are folded to a count; retrieve with tasktree list --all.
+Hidden strands are folded to a count; unhide with tasktree unhide --id <ID>.
 
 --tree: render active strands as a belongs-to forest. Strands that declare
   a belongs-to edge to another active strand are indented under their parent;
@@ -657,15 +507,6 @@ JSON shape: tasktree explain json")]
         /// Render active strands as a belongs-to forest (parallel siblings visible under shared parent)
         #[arg(long)]
         tree: bool,
-    },
-    /// Render one-shot startup context for agents.
-    AgentContext {
-        /// Output format: text (default) or json
-        #[arg(long, value_name = "FORMAT")]
-        format: Option<String>,
-        /// Include hidden strands in the result set (default: exclude)
-        #[arg(long)]
-        include_hidden: bool,
     },
     /// Build nested tree projection from strand edges
     Tree {
@@ -692,35 +533,6 @@ Examples:
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
     },
-    /// Render strand context for system prompt injection.
-    /// Projects prompt-strands into text or JSON suitable for APPEND_SYSTEM.md.
-    Context {
-        /// Strand type to project (default: prompt-strand)
-        #[arg(long = "type", value_name = "TYPE")]
-        context_type: Option<String>,
-        /// Filter by [covers] scope (string match on [covers] entries, v1)
-        #[arg(long, value_name = "PATH")]
-        covers: Vec<String>,
-        /// Only include strands with last_entry_offset > N
-        #[arg(long, value_name = "N")]
-        since_offset: Option<usize>,
-        /// Output format: text (default) or json
-        #[arg(long, value_name = "FORMAT")]
-        format: Option<String>,
-        /// Exclude [friction] entries. Default exposes them: an unresolved
-        /// friction still binds future action (exposure axis, scaffolding
-        /// ADR-0002). Hiding is an explicit choice, exposure is the default.
-        #[arg(long)]
-        exclude_friction: bool,
-        /// Include hidden strands in the result set (default: exclude)
-        #[arg(long)]
-        include_hidden: bool,
-        /// Disable observation-class folding: expose [progress]/[observed]/[check]
-        /// entries full-text instead of tail-folding. Folding is the default;
-        /// full exposure is an explicit choice (exposure axis, ADR-0002).
-        #[arg(long)]
-        include_observations: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -730,6 +542,9 @@ enum DoctorTarget {
         /// Treat advisory warnings as blocking issues
         #[arg(long)]
         strict: bool,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
     },
 }
 
@@ -794,45 +609,9 @@ fn apply_chdir(chdir: Option<&str>) {
 }
 
 /// Dispatch a parsed command to its handler. Kept free of `std::process::exit`
-/// (except checkpoint, which owns its codes) so the dispatch table is unit-
-/// testable and the exit-code policy lives solely in `exit_with_error`.
+/// so the dispatch table is unit-testable and the exit-code policy lives solely
+/// in `exit_with_error`.
 fn run(command: &Commands) -> Result<(), String> {
-    // Checkpoint has its own error handling (exit codes 1/2/3, JSON output).
-    // On failure it prints and exits directly; on success it returns Ok(()) so
-    // stdout is flushed by the normal main() return path.
-    if let Commands::Checkpoint {
-        id,
-        action,
-        tail,
-        format,
-        include_hidden,
-        provenance,
-        seen_offset,
-    } = command
-    {
-        let fmt = format.as_deref() == Some("json");
-        match cmd_checkpoint_with_seen_offset(
-            id.as_deref(),
-            action,
-            *tail,
-            fmt,
-            *include_hidden,
-            provenance.as_deref(),
-            *seen_offset,
-        ) {
-            Ok(()) => return Ok(()),
-            Err(failure) => {
-                if fmt {
-                    checkpoint_error_json(&failure);
-                } else {
-                    eprintln!("checkpoint failed: {}", failure.message);
-                    eprintln!("no journal entry written");
-                }
-                std::process::exit(failure.code);
-            }
-        }
-    }
-
     match command {
         Commands::Init => cmd_init(),
         Commands::Add {
@@ -845,20 +624,18 @@ fn run(command: &Commands) -> Result<(), String> {
             provenance,
         } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_add_with_parent(
-                content.as_deref(),
-                *stdin,
-                file.as_deref(),
-                fmt,
-                parent.as_deref(),
-                strand_type.as_deref(),
-                provenance.as_deref(),
-            )
+            cmd_add(AddRequest {
+                content: content.as_deref(),
+                stdin: *stdin,
+                file: file.as_deref(),
+                format_json: fmt,
+                parent: parent.as_deref(),
+                strand_type: strand_type.as_deref(),
+                provenance_raw: provenance.as_deref(),
+            })
         }
         Commands::Append {
             content,
-            id,
-            new,
             stdin,
             file,
             explicit_id,
@@ -868,8 +645,6 @@ fn run(command: &Commands) -> Result<(), String> {
             why,
         } => cmd_append_with_seen_offset(
             content.as_deref(),
-            id.as_deref(),
-            *new,
             *stdin,
             file.as_deref(),
             explicit_id.as_deref(),
@@ -879,7 +654,6 @@ fn run(command: &Commands) -> Result<(), String> {
             why.as_deref(),
         ),
         Commands::List {
-            all,
             links,
             backlinks,
             state,
@@ -891,7 +665,7 @@ fn run(command: &Commands) -> Result<(), String> {
         } => {
             let fmt = format.as_deref() == Some("json");
             cmd_list(
-                *all,
+                false,
                 links.as_deref(),
                 backlinks.as_deref(),
                 state.as_deref(),
@@ -921,10 +695,6 @@ fn run(command: &Commands) -> Result<(), String> {
             let fmt = format.as_deref() == Some("json");
             cmd_search(query, fmt, *include_hidden)
         }
-        Commands::Find { target, format } => match target.get() {
-            Some(id) => cmd_find(id, format.as_deref() == Some("json")),
-            None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
-        },
         Commands::Link {
             source,
             target,
@@ -1026,7 +796,9 @@ fn run(command: &Commands) -> Result<(), String> {
         }
         Commands::Doctor { target } => {
             let result = match target {
-                DoctorTarget::Journal { strict } => cmd_doctor_journal(*strict),
+                DoctorTarget::Journal { strict, format } => {
+                    cmd_doctor_journal(*strict, format.as_deref() == Some("json"))
+                }
             };
             match result {
                 Ok(true) => Err("journal issues detected".to_string()),
@@ -1053,58 +825,6 @@ fn run(command: &Commands) -> Result<(), String> {
             limit,
             tree,
         } => cmd_orient(format.as_deref(), *include_hidden, *limit, *tree),
-
-        Commands::AgentContext {
-            format,
-            include_hidden,
-        } => cmd_agent_context(format.as_deref(), *include_hidden),
-
-        Commands::Context {
-            context_type,
-            covers,
-            since_offset,
-            format,
-            exclude_friction,
-            include_hidden,
-            include_observations,
-        } => cmd_context(
-            context_type.as_deref(),
-            &covers,
-            *since_offset,
-            format.as_deref(),
-            *exclude_friction,
-            *include_hidden,
-            *include_observations,
-        ),
-
-        Commands::Bind {
-            subject_type,
-            subject_id,
-            id,
-            stdin,
-            format,
-            provenance,
-        } => {
-            let fmt = format.as_deref() == Some("json");
-            cmd_bind_with_provenance(
-                subject_type.as_deref(),
-                subject_id.as_deref(),
-                id.as_deref(),
-                *stdin,
-                fmt,
-                provenance.as_deref(),
-            )
-        }
-        Commands::Current {
-            subject_type,
-            subject_id,
-            format,
-        } => {
-            let fmt = format.as_deref() == Some("json");
-            cmd_current(subject_type.as_deref(), subject_id.as_deref(), fmt)
-        }
-
-        Commands::Checkpoint { .. } => unreachable!(),
     }
 }
 

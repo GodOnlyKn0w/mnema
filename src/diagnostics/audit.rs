@@ -320,8 +320,6 @@ pub struct DoctorJournalReport {
     pub total_strands: usize,
     pub strands_with_events_count: usize,
     pub noise_strands_count: usize,
-    pub git_head_count: usize,
-    pub git_context_event_count: usize,
     pub timeline_status: String,
     pub timeline_warning: bool,
     pub audit: JournalAudit,
@@ -341,8 +339,6 @@ pub fn build_doctor_journal_report(
     events: &[crate::event::Event],
     total_lines: usize,
     corrupted: usize,
-    git_head_count: usize,
-    git_context_event_count: usize,
     previous_state: DoctorPreviousState,
     now: chrono::DateTime<chrono::Utc>,
 ) -> DoctorJournalReport {
@@ -408,8 +404,6 @@ pub fn build_doctor_journal_report(
             .iter()
             .filter(|id| !strand_event_counts.contains_key(*id))
             .count(),
-        git_head_count,
-        git_context_event_count,
         timeline_status,
         timeline_warning,
         audit: audit_journal(events, now),

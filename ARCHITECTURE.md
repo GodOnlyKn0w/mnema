@@ -69,9 +69,9 @@ flowchart LR
     CLI --> CS
 ```
 
-Journal Core owns durable facts. It defines the event schema, constructs valid events, and persists the append-only journal. It hides event construction, journal discovery, locking, lossy/strict reads, ID/timestamp/append_id generation, provenance/git metadata capture, and append mechanics. Its interface to the rest of the system is an event stream with journal offsets.
+Journal Core owns durable facts. It defines the event schema, constructs valid events, and persists the append-only journal. It hides event construction, journal discovery, locking, lossy/strict reads, ID/timestamp/append_id generation, provenance metadata capture, and append mechanics. Its interface to the rest of the system is an event stream with journal offsets.
 
-Projection Core owns derived meaning. It folds event streams into read models such as strands, timelines, graphs, trees, context slices, and audit findings. Base Projection mechanically folds events into current read state; Derived Views organize read use cases; Review Projections emit findings and evidence for agent/human review. Projection Core consumes events, does not own the event schema, does not write the journal, and does not decide process exit behavior.
+Projection Core owns derived meaning. It folds event streams into read models such as strands, timelines, graphs, trees, and audit findings. Base Projection mechanically folds events into current read state; Derived Views organize read use cases; Review Projections emit findings and evidence for agent/human review. Projection Core consumes events, does not own the event schema, does not write the journal, and does not decide process exit behavior.
 
 Contract Surface owns the public machine-readable contract. It maps projection outputs into JSON DTOs and defines field names, compatibility fields, deprecated-but-preserved fields, and the local contract index exposed to users. DTOs are external contract, not internal projection models.
 

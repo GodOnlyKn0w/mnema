@@ -66,7 +66,7 @@ pub(in crate::tests) fn with_tasktree_home<F: FnOnce() -> R, R>(
 }
 
 pub(in crate::tests) fn create_strand(content: &str) -> String {
-    let (created, appended) = event::make_strand_created(content, None);
+    let (created, appended) = event::make_strand_created(content, None, None);
     let id = created.strand_id().to_string();
     with_journal_write_lock(|journal| {
         append_event_unlocked(journal, &created)?;
@@ -78,7 +78,7 @@ pub(in crate::tests) fn create_strand(content: &str) -> String {
 }
 
 pub(in crate::tests) fn create_prompt_strand(content: &str) -> String {
-    let (created, appended) = event::make_strand_created(content, Some("prompt-strand"));
+    let (created, appended) = event::make_strand_created(content, Some("prompt-strand"), None);
     let id = created.strand_id().to_string();
     with_journal_write_lock(|journal| {
         append_event_unlocked(journal, &created)?;

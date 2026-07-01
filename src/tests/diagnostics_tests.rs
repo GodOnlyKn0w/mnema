@@ -6,8 +6,6 @@ fn w068_fires_on_overdue_deadline_and_respects_closing() {
     let id = create_strand("ship the feature");
     cmd_append(
         Some("[deadline] finish rollout by=2000-01-01"),
-        None,
-        false,
         false,
         None,
         Some(&id),
@@ -39,8 +37,6 @@ fn w068_future_deadline_is_silent() {
     let id = create_strand("future work");
     cmd_append(
         Some("[deadline] finish by=2999-01-01"),
-        None,
-        false,
         false,
         None,
         Some(&id),
@@ -65,8 +61,6 @@ fn w069_fires_on_two_producers_same_marker() {
     let id = create_strand("contested task");
     cmd_append(
         Some("[done] finished it"),
-        None,
-        false,
         false,
         None,
         Some(&id),
@@ -76,8 +70,6 @@ fn w069_fires_on_two_producers_same_marker() {
     .unwrap();
     cmd_append(
         Some("[done] also finished it"),
-        None,
-        false,
         false,
         None,
         Some(&id),
@@ -100,8 +92,6 @@ fn w069_single_producer_is_silent() {
     let id = create_strand("solo task");
     cmd_append(
         Some("[done] finished"),
-        None,
-        false,
         false,
         None,
         Some(&id),
@@ -111,8 +101,6 @@ fn w069_single_producer_is_silent() {
     .unwrap();
     cmd_append(
         Some("[verified] checked"),
-        None,
-        false,
         false,
         None,
         Some(&id),
@@ -134,8 +122,6 @@ fn w062_fires_on_cross_strand_keyword_within_window() {
     let b = create_strand("policy work");
     cmd_append(
         Some("[decision] adopt sqlite for local persistence"),
-        None,
-        false,
         false,
         None,
         Some(&a),
@@ -145,8 +131,6 @@ fn w062_fires_on_cross_strand_keyword_within_window() {
     .unwrap();
     cmd_append(
         Some("[constraint] sqlite writes are forbidden in production"),
-        None,
-        false,
         false,
         None,
         Some(&b),
@@ -169,8 +153,6 @@ fn w062_same_strand_or_no_shared_keyword_is_silent() {
     let a = create_strand("one line");
     cmd_append(
         Some("[decision] adopt sqlite here"),
-        None,
-        false,
         false,
         None,
         Some(&a),
@@ -180,8 +162,6 @@ fn w062_same_strand_or_no_shared_keyword_is_silent() {
     .unwrap();
     cmd_append(
         Some("[constraint] sqlite writes forbidden"),
-        None,
-        false,
         false,
         None,
         Some(&a),
@@ -192,8 +172,6 @@ fn w062_same_strand_or_no_shared_keyword_is_silent() {
     let b = create_strand("other line");
     cmd_append(
         Some("[constraint] postgres only in staging"),
-        None,
-        false,
         false,
         None,
         Some(&b),
@@ -216,149 +194,6 @@ fn w062_same_strand_or_no_shared_keyword_is_silent() {
 
 // Extract bracket markers of the form `[a-z][a-z0-9_:-]*]` from a string.
 // Hand-rolled to avoid a regex dependency.
-
-#[test]
-fn w070_fires_when_checkpoint_producer_differs_from_last_entry_producer() {
-    let _env = setup();
-    let id = create_strand("contested work");
-    // Write a log entry with producer "alpha".
-    cmd_append(
-        Some("progress note"),
-        None,
-        false,
-        false,
-        None,
-        Some(&id),
-        None,
-        Some(r#"{"producer":"alpha"}"#),
-    )
-    .unwrap();
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    // Checkpoint as "beta" — should fire W070.
-    let result = diagnostics::check_w070_strand_moved(&events, &id, Some("beta"));
-    assert!(result.is_some(), "W070 must fire when producers differ");
-    let (code, detail) = result.unwrap();
-    assert_eq!(code, "W070");
-    assert!(
-        detail.contains("alpha"),
-        "detail must mention last producer: {}",
-        detail
-    );
-    assert!(
-        detail.contains("beta"),
-        "detail must mention checkpoint producer: {}",
-        detail
-    );
-}
-
-#[test]
-fn w070_silent_when_same_producer() {
-    let _env = setup();
-    let id = create_strand("solo work");
-    cmd_append(
-        Some("note"),
-        None,
-        false,
-        false,
-        None,
-        Some(&id),
-        None,
-        Some(r#"{"producer":"alpha"}"#),
-    )
-    .unwrap();
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    let result = diagnostics::check_w070_strand_moved(&events, &id, Some("alpha"));
-    assert!(result.is_none(), "W070 must not fire when same producer");
-}
-
-#[test]
-fn w070_silent_when_checkpoint_producer_absent() {
-    let _env = setup();
-    let id = create_strand("no prov work");
-    cmd_append(
-        Some("note"),
-        None,
-        false,
-        false,
-        None,
-        Some(&id),
-        None,
-        Some(r#"{"producer":"alpha"}"#),
-    )
-    .unwrap();
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    // No checkpoint producer → silent.
-    let result = diagnostics::check_w070_strand_moved(&events, &id, None);
-    assert!(
-        result.is_none(),
-        "W070 must not fire when checkpoint producer absent"
-    );
-}
-
-#[test]
-fn w070_silent_when_last_entry_producer_absent() {
-    let _env = setup();
-    let id = create_strand("no prov work");
-    // Append without provenance.
-    cmd_append(
-        Some("note"),
-        None,
-        false,
-        false,
-        None,
-        Some(&id),
-        None,
-        None,
-    )
-    .unwrap();
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    // Last entry has no producer → silent.
-    let result = diagnostics::check_w070_strand_moved(&events, &id, Some("beta"));
-    assert!(
-        result.is_none(),
-        "W070 must not fire when last entry has no producer"
-    );
-}
-
-// ── W071: checkpoint on closed strand ──────────────────────────────────
-
-#[test]
-fn w071_fires_on_closed_strand() {
-    let _env = setup();
-    let id = create_strand("closed work");
-    cmd_close(&id, Some("done"), false).unwrap();
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    let strands = projection::project_strands(&events, true);
-    let strand = strands.iter().find(|s| s.id == id).unwrap();
-    let result = diagnostics::check_w071_closed_strand(strand);
-    assert!(result.is_some(), "W071 must fire on closed strand");
-    let (code, detail) = result.unwrap();
-    assert_eq!(code, "W071");
-    assert!(
-        detail.contains("done"),
-        "detail must mention state: {}",
-        detail
-    );
-}
-
-#[test]
-fn w071_silent_on_open_strand() {
-    let _env = setup();
-    let id = create_strand("open work");
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    let strands = projection::project_strands(&events, true);
-    let strand = strands.iter().find(|s| s.id == id).unwrap();
-    let result = diagnostics::check_w071_closed_strand(strand);
-    assert!(result.is_none(), "W071 must not fire on registered strand");
-}
-
-// ── checkpoint + W071 end-to-end: writes succeed (exit 0) ─────────────
 
 #[test]
 fn append_help_markers_are_writable() {
@@ -468,8 +303,6 @@ fn w073_append_typo_succeeds_and_suggest_fires() {
     let id = create_strand("w073 test strand");
     let result = cmd_append(
         Some("[freiction] this is a typo marker"),
-        None,
-        false,
         false,
         None,
         Some(&id),

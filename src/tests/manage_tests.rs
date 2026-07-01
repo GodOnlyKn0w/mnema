@@ -40,150 +40,6 @@ fn unhide_is_idempotent() {
     );
 }
 
-// Without --id, cmd_checkpoint picks the most-recent VISIBLE strand by
-// default. When the most-recent strand is hidden, the visible one is chosen.
-
-#[test]
-fn bind_creates_subject_bound_event() {
-    let _env = setup();
-    let id = create_strand("target");
-    let result = cmd_bind(Some("pi-session"), Some("abc"), Some(&id), false, false);
-    assert!(result.is_ok());
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    let has_binding = events.iter().any(|(_, e)| {
-        matches!(e, Event::SubjectBound { subject_type, subject_id, strand_id, .. }
-                if subject_type == "pi-session" && subject_id == "abc" && strand_id == &id)
-    });
-    assert!(has_binding, "bind must write a SubjectBound event");
-}
-
-#[test]
-fn bind_provenance_stored_on_subject_bound_event() {
-    let _env = setup();
-    let id = create_strand("bind provenance target");
-    cmd_bind_with_provenance(
-        Some("pi-session"),
-        Some("prov"),
-        Some(&id),
-        false,
-        false,
-        Some(r#"{"producer":"tester"}"#),
-    )
-    .unwrap();
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    let found = events.iter().any(|(_, e)| {
-        if let Event::SubjectBound {
-            subject_type,
-            subject_id,
-            provenance,
-            ..
-        } = e
-        {
-            subject_type == "pi-session"
-                && subject_id == "prov"
-                && provenance
-                    .as_ref()
-                    .and_then(|p| p.get("producer"))
-                    .and_then(|p| p.as_str())
-                    == Some("tester")
-        } else {
-            false
-        }
-    });
-    assert!(found, "bind --provenance must persist on SubjectBound");
-}
-
-#[test]
-fn bind_resolves_prefix_id() {
-    let _env = setup();
-    let id = create_strand("target strand");
-    let short = &id[..12];
-    let result = cmd_bind(Some("ci-run"), Some("run-42"), Some(short), false, false);
-    assert!(
-        result.is_ok(),
-        "prefix strand id should resolve: {:?}",
-        result
-    );
-}
-
-#[test]
-fn bind_missing_strand_fails() {
-    let _env = setup();
-    let result = cmd_bind(
-        Some("pi-session"),
-        Some("x"),
-        Some("000000000000"),
-        false,
-        false,
-    );
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("not found"));
-}
-
-#[test]
-fn current_returns_latest_binding() {
-    let _env = setup();
-    let id_a = create_strand("first");
-    let id_b = create_strand("second");
-    // Bind subject to strand a
-    cmd_bind(Some("pi-session"), Some("user1"), Some(&id_a), false, false).unwrap();
-    // Re-bind to strand b (latest should win)
-    cmd_bind(Some("pi-session"), Some("user1"), Some(&id_b), false, false).unwrap();
-    let result = cmd_current(Some("pi-session"), Some("user1"), false);
-    assert!(result.is_ok());
-    // We can't easily capture stdout here, so we test via the projection
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    let mut latest: Option<String> = None;
-    for (_, e) in &events {
-        if let Event::SubjectBound {
-            subject_type: t,
-            subject_id: i,
-            strand_id: s,
-            ..
-        } = e
-        {
-            if t == "pi-session" && i == "user1" {
-                latest = Some(s.clone());
-            }
-        }
-    }
-    assert_eq!(latest, Some(id_b), "latest binding must point to id_b");
-}
-
-#[test]
-fn current_no_binding_returns_error() {
-    let _env = setup();
-    create_strand("orphan");
-    let result = cmd_current(Some("pi-session"), Some("no-such"), false);
-    assert!(result.is_err());
-}
-
-#[test]
-fn current_requires_non_empty_args() {
-    let _env = setup();
-    let r1 = cmd_current(None, Some("x"), false);
-    assert!(r1.is_err());
-    let r2 = cmd_current(Some("x"), None, false);
-    assert!(r2.is_err());
-    let r3 = cmd_current(Some(""), Some("x"), false);
-    assert!(r3.is_err());
-}
-
-#[test]
-fn bind_requires_non_empty_args() {
-    let _env = setup();
-    let id = create_strand("t");
-    let r1 = cmd_bind(None, Some("x"), Some(&id), false, false);
-    assert!(r1.is_err());
-    let r2 = cmd_bind(Some("x"), None, Some(&id), false, false);
-    assert!(r2.is_err());
-    let r3 = cmd_bind(Some("x"), Some("y"), None, false, false);
-    assert!(r3.is_err());
-}
-
 // ── Provenance tests (pi-strand V1 contract) ─────────────────────
 
 #[test]
@@ -407,8 +263,6 @@ fn append_subtask_done_leaves_strand_open() {
     // Simulate what an operator agent would do: record a sub-task completion.
     cmd_append(
         Some("[done] subtask A completed"),
-        None,
-        false,
         false,
         None,
         Some(&id),
@@ -541,8 +395,6 @@ fn w074_fires_on_closing_annotation_marker() {
     );
     let result = cmd_append(
         Some("[done] sub-step done"),
-        None,
-        false,
         false,
         None,
         Some(&id),

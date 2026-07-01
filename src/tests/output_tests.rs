@@ -6,8 +6,6 @@ fn show_json_exposes_per_entry_provenance() {
     let id = create_strand("provenance projection test");
     cmd_append(
         Some("[observed] tagged"),
-        Some(&id),
-        false,
         false,
         None,
         None,
@@ -54,45 +52,15 @@ fn normalize_preserves_multiple_trailing_newlines_except_one() {
     assert_eq!(normalize_content("hello\n\n"), "hello\n");
 }
 
-// ── checkpoint ──
-
-#[test]
-fn humanize_duration_just_now() {
-    assert_eq!(humanize_duration(0), "just now");
-    assert_eq!(humanize_duration(59), "just now");
-}
-
-#[test]
-fn humanize_duration_minutes() {
-    assert_eq!(humanize_duration(60), "1m");
-    assert_eq!(humanize_duration(61), "1m");
-    assert_eq!(humanize_duration(3599), "59m");
-}
-
-#[test]
-fn humanize_duration_hours() {
-    assert_eq!(humanize_duration(3600), "1h");
-    assert_eq!(humanize_duration(7200), "2h");
-    assert_eq!(humanize_duration(86399), "23h");
-}
-
-#[test]
-fn humanize_duration_days() {
-    assert_eq!(humanize_duration(86400), "1d");
-    assert_eq!(humanize_duration(86400 * 25), "25d");
-}
-
-// ── W070: strand moved under you ───────────────────────────────────────
+// ── show / search smoke ────────────────────────────────────────────────
 
 #[test]
 fn show_search_context_unchanged() {
-    // Smoke test that existing cmd_show, cmd_search, cmd_context still work.
+    // Smoke test that existing cmd_show, cmd_search still work.
     let _env = setup();
     let id = create_strand("show me");
     cmd_append(
         Some("entry"),
-        Some(&id),
-        false,
         false,
         None,
         None,
@@ -106,9 +74,6 @@ fn show_search_context_unchanged() {
     // search
     let r = cmd_search("entry", false, false);
     assert!(r.is_ok());
-    // context
-    let r = cmd_context(None, &[], None, None, false, false, false);
-    assert!(r.is_ok());
 }
 
 // ── orient card DTO ──
@@ -119,8 +84,6 @@ fn orient_strand_fields_match_projected_strand() {
     let id = create_strand("summary text for the card");
     cmd_append(
         Some("second entry"),
-        Some(&id),
-        false,
         false,
         None,
         None,
@@ -190,8 +153,6 @@ fn append_explicit_id_card_fresh_has_new_entry() {
     let id = create_strand("target");
     cmd_append(
         Some("[lesson] learned something"),
-        Some(&id),
-        false,
         false,
         None,
         None,
@@ -210,8 +171,6 @@ fn append_default_most_recent_card_fresh_reflects_write() {
     let id2 = create_strand("newer");
     cmd_append(
         Some("default route entry"),
-        None,
-        false,
         false,
         None,
         None,
@@ -221,34 +180,6 @@ fn append_default_most_recent_card_fresh_reflects_write() {
     .unwrap();
     let (card, _state) = strand_card_fresh_with_state(&id2).expect("card must exist");
     assert_eq!(card.last_entry, "default route entry");
-}
-
-#[test]
-fn append_new_path_card_id_matches_new_strand() {
-    let _env = setup();
-    // Pre-populate so --new is not the only strand
-    create_strand("existing");
-    cmd_append(
-        Some("brand new via --new"),
-        None,
-        true,
-        false,
-        None,
-        None,
-        None,
-        None,
-    )
-    .unwrap();
-    // The new strand has the content as first_summary
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    let strands = projection::project_strands(&events, true);
-    let new_s = strands
-        .iter()
-        .find(|s| s.first_summary() == "brand new via --new")
-        .expect("new strand must exist");
-    let card = strand_card_fresh(&new_s.id).expect("card must be retrievable");
-    assert_eq!(card.id, new_s.id);
 }
 
 // ── card echo: hide leaves strand retrievable via include_hidden=true ──
@@ -417,8 +348,6 @@ fn handles_list_search_ids_intact() {
     let long_content = "unique_search_token_xyz ".to_string() + &"w".repeat(80);
     cmd_append(
         Some(&long_content),
-        Some(&id),
-        false,
         false,
         None,
         None,
@@ -502,7 +431,6 @@ fn handles_list_search_ids_intact() {
 
 // run_journal_diagnostics: detail strings for W068/W069/W062 use shorten(id)
 // (12-char prefix), which is a legal parameter. No '…' in detail strings.
-// W070/W071 details contain no commands, so try_parse_example is N/A for them.
 
 #[test]
 fn handles_diag_details_parse() {
@@ -511,8 +439,6 @@ fn handles_diag_details_parse() {
     let id_a = create_strand("deadline strand for diag test");
     cmd_append(
         Some("[deadline] finish by=2000-01-01"),
-        None,
-        false,
         false,
         None,
         Some(&id_a),
@@ -526,8 +452,6 @@ fn handles_diag_details_parse() {
     let id_c = create_strand("constraint strand");
     cmd_append(
         Some("[decision] adopt postgres for persistence"),
-        None,
-        false,
         false,
         None,
         Some(&id_b),
@@ -537,8 +461,6 @@ fn handles_diag_details_parse() {
     .unwrap();
     cmd_append(
         Some("[constraint] postgres writes forbidden in staging"),
-        None,
-        false,
         false,
         None,
         Some(&id_c),
@@ -580,17 +502,6 @@ fn handles_diag_details_parse() {
                 }
             }
         }
-
-        // W070/W071: details contain no tasktree commands (catalog confirms
-        // their recovery.executable is false). We verify no false-positive parse attempt.
-        // (No try_parse_example call here — the detail strings are prose, not commands.)
-        if *code == "W070" || *code == "W071" {
-            assert!(
-                !detail.contains("tasktree "),
-                "W070/W071 detail must not embed a tasktree command: '{}'",
-                detail
-            );
-        }
     }
 }
 
@@ -616,8 +527,6 @@ fn handles_truncate_never_applied_to_ids() {
     let searchable = "unique_audit_token_abc123 ".to_string() + &"z".repeat(80);
     cmd_append(
         Some(&searchable),
-        Some(&id),
-        false,
         false,
         None,
         None,
@@ -702,133 +611,6 @@ fn handles_truncate_never_applied_to_ids() {
     );
 }
 
-// ── Test 6 ────────────────────────────────────────────────────────────
-
-// cmd_checkpoint text output: the staleness line contains the integer offset
-// (no truncation), and the catch-up command (when emitted) embeds the
-// 12-char strand id handle without '…'.
-//
-// Note: cmd_checkpoint prints directly to stdout/stderr rather than returning
-// a structured value, so we verify the *journal entry* written by checkpoint
-// contains the structured fields, and we verify the OrientStrand card it
-// creates matches the handle-integrity rules.
-
-#[test]
-fn handles_checkpoint_handle_fields() {
-    let _env = setup();
-    // Create two strands so there is a journal delta when we checkpoint strand A.
-    let id_a = create_strand("checkpoint handle test strand");
-    let id_b = create_strand("another strand to create journal delta");
-    cmd_append(
-        Some("delta entry one"),
-        Some(&id_b),
-        false,
-        false,
-        None,
-        None,
-        None,
-        None,
-    )
-    .unwrap();
-    cmd_append(
-        Some("delta entry two"),
-        Some(&id_b),
-        false,
-        false,
-        None,
-        None,
-        None,
-        None,
-    )
-    .unwrap();
-
-    // Run checkpoint on strand A — journal delta > 0 so catch-up will be emitted.
-    let result = cmd_checkpoint(
-        Some(&id_a),
-        "handle integrity check",
-        None,
-        false,
-        false,
-        None,
-    );
-    assert!(result.is_ok(), "checkpoint must succeed: {:?}", result);
-
-    // The [checkpoint] journal entry contains observed_entries_before_append=N
-    // where N is the integer entry count. Verify the stored entry has no '…'.
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    let cp_entry = events
-        .iter()
-        .find(|(_, e)| {
-            if let Event::LogAppended { id, content, .. } = e {
-                id == &id_a && content.contains("[checkpoint] ok")
-            } else {
-                false
-            }
-        })
-        .expect("checkpoint entry must exist in journal");
-    let content = match &cp_entry.1 {
-        Event::LogAppended { content, .. } => content,
-        _ => unreachable!(),
-    };
-    assert!(
-        !content.contains('\u{2026}') && !content.contains("..."),
-        "checkpoint journal entry must not contain truncation marker: '{}'",
-        content
-    );
-    assert!(
-        content.contains("observed_entries_before_append="),
-        "checkpoint entry must contain integer observed count"
-    );
-
-    // The card produced for strand A must satisfy handle-integrity rules.
-    let strands = projection::project_strands(&events, true);
-    let s = strands
-        .iter()
-        .find(|s| s.id == id_a)
-        .expect("strand A must exist");
-    let card = output::OrientStrand::from(s);
-    assert_eq!(card.id, id_a, "post-checkpoint card id must be the full id");
-    assert!(
-        !card.catch_up.contains('\u{2026}') && !card.catch_up.contains("..."),
-        "post-checkpoint catch_up must not be truncated"
-    );
-    try_parse_example(&card.catch_up).expect("post-checkpoint catch_up must parse");
-
-    // JSON checkpoint output via cmd_checkpoint --format json:
-    // The catch_up field in JSON uses shorten(strand_id) — verify via the
-    // format string in cmd_checkpoint (the JSON path). We build the expected
-    // value directly from the same logic.
-    let strand_last_offset = s.last_offset();
-    // After the checkpoint write, s.last_offset() includes the checkpoint entry.
-    // The JSON catch_up is built *before* the write from strand_last_offset;
-    // here we use the pre-checkpoint offset of strand A.
-    // Find strand A's pre-checkpoint last_offset (last entry before checkpoint):
-    let pre_cp_offset = {
-        let mut last = 0usize;
-        for (offset, e) in &events {
-            if let Event::LogAppended { id, content, .. } = e {
-                if id == &id_a && !content.contains("[checkpoint] ok") {
-                    last = *offset;
-                }
-            }
-        }
-        last
-    };
-    let expected_catch_up = format!(
-        "tasktree timeline --since-offset {} --links {}",
-        pre_cp_offset,
-        shorten(&id_a)
-    );
-    try_parse_example(&expected_catch_up).expect("expected checkpoint JSON catch_up must parse");
-    assert!(
-        !expected_catch_up.contains('\u{2026}') && !expected_catch_up.contains("..."),
-        "checkpoint JSON catch_up must not be truncated"
-    );
-
-    let _ = (id_b, strand_last_offset);
-}
-
 // ── Task B: IdTarget tests ─────────────────────────────────────────────
 
 // Positional <ID> and --id <ID> parse identically for show, find, hide,
@@ -861,36 +643,6 @@ fn show_json_has_entry_count_not_entries() {
 // ════════════════════════════════════════════════════════════════════════
 // Batch-2: JSON twins / provenance / --edge-type / add --stdin/--file
 // ════════════════════════════════════════════════════════════════════════
-
-// ── ① JSON twins: find --format json ─────────────────────────────────
-
-#[test]
-fn find_json_returns_id_object() {
-    let _env = setup();
-    let id = create_strand("find-json target");
-    // find with full id — text mode returns plain id
-    cmd_find(&id, false).unwrap();
-    // find with format json — must return {"id": <full_id>}
-    // Capture via direct call; actual stdout capture not needed for contract test.
-    // We verify that the json serialization path is exercised without error.
-    let result = cmd_find(&id, true);
-    assert!(
-        result.is_ok(),
-        "find --format json must succeed: {:?}",
-        result
-    );
-}
-
-#[test]
-fn find_json_unknown_strand_errors() {
-    let _env = setup();
-    create_strand("irrelevant");
-    let result = cmd_find("000000000000", true);
-    assert!(
-        result.is_err(),
-        "find on unknown id must error in json mode too"
-    );
-}
 
 // ── ① JSON twins: hide --format json ─────────────────────────────────
 
@@ -926,8 +678,6 @@ fn show_digest_returns_ok_without_dumping_log() {
     let id = create_strand("digest target");
     cmd_append(
         Some("[decision] one"),
-        Some(&id),
-        false,
         false,
         None,
         None,
@@ -937,8 +687,6 @@ fn show_digest_returns_ok_without_dumping_log() {
     .unwrap();
     cmd_append(
         Some("[friction] two"),
-        Some(&id),
-        false,
         false,
         None,
         None,
@@ -976,4 +724,174 @@ fn orient_catch_up_shows_content_not_empty_delta() {
         "catch_up must not use the empty-prone since-offset form: {}",
         card.catch_up
     );
+}
+
+// ── W5: marker as first-class JSON field ───────────────────────────────
+
+#[test]
+fn show_json_events_expose_marker_additive() {
+    let _env = setup();
+    let id = create_strand("[decision] marker projection test");
+    cmd_append(Some("[decision] chose plan A"), false, None, None, None, None).unwrap();
+    cmd_append(Some("plain content no marker"), false, None, None, None, None).unwrap();
+    cmd_append(Some("[freiction] misspelled marker"), false, None, None, None, None).unwrap();
+
+    let (events, _) = read_events_lossy(&ensure_journal().unwrap());
+    let strands = projection::project_strands(&events, true);
+    let s = strands.iter().find(|s| s.id == id).unwrap();
+    let dto = output::StrandDetailOutput::from(s);
+
+    // marker key is present on every event (additive; never null).
+    for e in &dto.events {
+        let v = serde_json::to_value(e).unwrap();
+        assert!(
+            v.as_object().unwrap().contains_key("marker"),
+            "every event must carry a marker key"
+        );
+    }
+
+    let decision = dto
+        .events
+        .iter()
+        .find(|e| e.entry.contains("chose plan A"))
+        .unwrap();
+    assert_eq!(decision.marker, "[decision]", "marker split from entry");
+    assert!(
+        decision.entry.contains("[decision] chose plan A"),
+        "entry must still carry the full original line (additive)"
+    );
+
+    let plain = dto
+        .events
+        .iter()
+        .find(|e| e.entry.contains("plain content"))
+        .unwrap();
+    assert_eq!(plain.marker, "", "no-marker line yields empty string, not null");
+
+    let misspelled = dto
+        .events
+        .iter()
+        .find(|e| e.entry.contains("misspelled marker"))
+        .unwrap();
+    assert_eq!(
+        misspelled.marker, "[freiction]",
+        "unknown/misspelled marker passes through verbatim (no vocabulary lookup)"
+    );
+}
+
+#[test]
+fn timeline_json_log_appended_exposes_marker() {
+    let _env = setup();
+    let id = create_strand("timeline marker test");
+    cmd_append(Some("[metric] win_count=26"), false, None, None, None, None).unwrap();
+
+    let (events, _) = read_events_lossy(&ensure_journal().unwrap());
+    let timeline = projection::project_timeline(&events);
+    let dtos: Vec<output::TimelineEntryOutput> =
+        timeline.iter().map(output::TimelineEntryOutput::from).collect();
+
+    let val = serde_json::to_value(&dtos).unwrap();
+    let metric = val
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| {
+            e["kind"]["kind"] == "log_appended"
+                && e["strand_id"] == id.as_str()
+                && e["kind"]["content"]
+                    .as_str()
+                    .map(|c| c.contains("win_count"))
+                    .unwrap_or(false)
+        })
+        .expect("metric log_appended must be present");
+    assert_eq!(
+        metric["kind"]["marker"], "[metric]",
+        "log_appended kind must carry a marker field"
+    );
+    assert!(
+        metric["kind"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("[metric] win_count=26"),
+        "content must still carry the full original line (additive)"
+    );
+}
+
+#[test]
+fn list_json_exposes_first_and_last_marker() {
+    let _env = setup();
+    let id = create_strand("[task] first summary carries a marker");
+    cmd_append(Some("[done] last summary carries a marker"), false, None, None, None, None)
+        .unwrap();
+
+    let (events, _) = read_events_lossy(&ensure_journal().unwrap());
+    let strands = projection::project_strands(&events, true);
+    let s = strands.iter().find(|s| s.id == id).unwrap();
+    let item = output::StrandListItem::from(s);
+
+    assert_eq!(item.first_marker, "[task]");
+    assert_eq!(item.last_marker, "[done]");
+    // summary fields still carry the full original line (additive).
+    assert!(item.first_summary.contains("[task]"));
+    assert!(item.last_summary.contains("[done]"));
+}
+
+// ── W5: doctor journal --format json ───────────────────────────────────
+
+#[test]
+fn doctor_report_output_is_valid_json_with_top_level_fields() {
+    let _env = setup();
+    let _id = create_strand("[task] doctor json test");
+    cmd_append(Some("[decision] a decision"), false, None, None, None, None).unwrap();
+
+    let (events, _) = read_events_lossy(&ensure_journal().unwrap());
+    let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+    let report = diagnostics::build_doctor_journal_report(
+        &raw,
+        raw.len(),
+        0,
+        diagnostics::DoctorPreviousState::FirstRun,
+        chrono::Utc::now(),
+    );
+    let out = output::DoctorReportOutput::from_report("journal.jsonl".to_string(), &report);
+    let v = serde_json::to_value(&out).expect("doctor report must serialize");
+    let obj = v.as_object().unwrap();
+
+    for key in [
+        "journal",
+        "total_lines",
+        "corrupted",
+        "orphans",
+        "total_strands",
+        "strands_with_events",
+        "noise_strands",
+        "timeline_status",
+        "timeline_warning",
+        "lint_sections",
+        "lint_count",
+        "diagnostics",
+        "has_errors",
+        "has_advisories",
+    ] {
+        assert!(
+            obj.contains_key(key),
+            "doctor JSON must have top-level key '{}'",
+            key
+        );
+    }
+
+    // diagnostics are jq-friendly {code, detail} objects, not nested arrays.
+    assert!(
+        v["diagnostics"].is_array(),
+        "diagnostics must be an array"
+    );
+    for d in v["diagnostics"].as_array().unwrap() {
+        assert!(d.get("code").is_some() && d.get("detail").is_some());
+    }
+    // lint_sections are structured objects.
+    for sec in v["lint_sections"].as_array().unwrap() {
+        for k in ["name", "summary_label", "count", "findings"] {
+            assert!(sec.get(k).is_some(), "lint section must have '{}'", k);
+        }
+    }
 }

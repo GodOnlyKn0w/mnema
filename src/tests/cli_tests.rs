@@ -63,64 +63,6 @@ fn chdir_nonexistent_dir_errors() {
     assert!(result.is_err(), "set_current_dir to missing path must fail");
 }
 
-#[test]
-fn target_conflict_new_and_id() {
-    let _env = setup();
-    create_strand("first strand");
-    let result = cmd_append(
-        Some("content"),
-        None,
-        true,
-        false,
-        None,
-        Some("0000019dd34b"),
-        None,
-        None,
-    );
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("only one target"));
-}
-
-#[test]
-fn target_conflict_new_and_legacy_id() {
-    let _env = setup();
-    let id = create_strand("first strand");
-    let result = cmd_append(
-        Some("content"),
-        Some(&id),
-        true,
-        false,
-        None,
-        None,
-        None,
-        None,
-    );
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("only one target"));
-}
-
-#[test]
-fn reversed_positional_append_gets_helpful_error() {
-    let _env = setup();
-    let id = create_strand("first strand");
-    let result = cmd_append(
-        Some(&id),
-        Some("[observed] finding"),
-        false,
-        false,
-        None,
-        None,
-        None,
-        None,
-    );
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.contains("arguments look reversed"));
-    assert!(err.contains("tasktree append --id"));
-    // The suggested command must carry the actual content, not echo the id
-    assert!(err.contains(&format!("--id {} \"[observed] finding\"", id)));
-}
-
 // ── orient ──
 
 #[test]
@@ -430,30 +372,6 @@ fn grammar_content_position_write_commands_accept_id_flag() {
     let id = "0000019dd34b";
     let append = Cli::command().try_get_matches_from(["tasktree", "append", "--id", id, "note"]);
     assert!(append.is_ok(), "append --id must parse: {:?}", append);
-    let checkpoint = Cli::command().try_get_matches_from([
-        "tasktree",
-        "checkpoint",
-        "--id",
-        id,
-        "--action",
-        "before change",
-    ]);
-    assert!(
-        checkpoint.is_ok(),
-        "checkpoint --id must parse: {:?}",
-        checkpoint
-    );
-    let bind = Cli::command().try_get_matches_from([
-        "tasktree",
-        "bind",
-        "--subject-type",
-        "pi-session",
-        "--subject-id",
-        "abc",
-        "--id",
-        id,
-    ]);
-    assert!(bind.is_ok(), "bind --id must parse: {:?}", bind);
 }
 
 #[test]
@@ -464,19 +382,6 @@ fn grammar_tail_commands_do_not_require_target() {
         show.is_ok(),
         "show --tail without target must parse: {:?}",
         show
-    );
-    let checkpoint = Cli::command().try_get_matches_from([
-        "tasktree",
-        "checkpoint",
-        "--tail",
-        "5",
-        "--action",
-        "before change",
-    ]);
-    assert!(
-        checkpoint.is_ok(),
-        "checkpoint --tail without --id must parse: {:?}",
-        checkpoint
     );
 }
 
@@ -495,28 +400,6 @@ fn grammar_write_commands_accept_provenance() {
             "--provenance",
             provenance,
             "note",
-        ],
-        vec![
-            "tasktree",
-            "checkpoint",
-            "--id",
-            id,
-            "--action",
-            "before",
-            "--provenance",
-            provenance,
-        ],
-        vec![
-            "tasktree",
-            "bind",
-            "--subject-type",
-            "pi-session",
-            "--subject-id",
-            "abc",
-            "--id",
-            id,
-            "--provenance",
-            provenance,
         ],
         vec![
             "tasktree",
@@ -561,7 +444,7 @@ fn grammar_flag_vocabulary_conformance() {
     // (flag, exclusively allowed on). Compat aliases are pinned to their
     // historical host; appearing anywhere else is a new violation.
     let exclusive: &[(&str, &str)] =
-        &[("all", "list"), ("json", "explain"), ("strand", "timeline")];
+        &[("json", "explain"), ("strand", "timeline")];
     for sub in Cli::command().get_subcommands() {
         for arg in sub.get_arguments() {
             if let Some(long) = arg.get_long() {
@@ -582,7 +465,7 @@ fn grammar_flag_vocabulary_conformance() {
 #[test]
 fn grammar_single_id_commands_accept_id_flag() {
     use clap::CommandFactory;
-    for cmd in ["show", "find", "tree", "hide", "unhide"] {
+    for cmd in ["show", "tree", "hide", "unhide"] {
         let r = Cli::command().try_get_matches_from(["tasktree", cmd, "--id", "0000019dd34b"]);
         assert!(
             r.is_ok(),
@@ -613,22 +496,6 @@ fn seen_offset_flag_parses_on_write_commands() {
         "append --seen-offset must parse: {:?}",
         append.err()
     );
-
-    let checkpoint = Cli::command().try_get_matches_from([
-        "tasktree",
-        "checkpoint",
-        "--id",
-        "0000019dd34b",
-        "--seen-offset",
-        "2",
-        "--action",
-        "before commit",
-    ]);
-    assert!(
-        checkpoint.is_ok(),
-        "checkpoint --seen-offset must parse: {:?}",
-        checkpoint.err()
-    );
 }
 
 #[test]
@@ -637,8 +504,6 @@ fn grammar_json_field_naming() {
     let id = create_strand("naming probe");
     cmd_append(
         Some("second entry"),
-        None,
-        false,
         false,
         None,
         Some(&id),
@@ -749,102 +614,6 @@ fn grammar_format_json_coverage() {
     }
 }
 
-#[test]
-fn target_conflict_new_legacy_and_explicit() {
-    let _env = setup();
-    let id = create_strand("first strand");
-    let result = cmd_append(
-        Some("content"),
-        Some(&id),
-        true,
-        false,
-        None,
-        Some(&id),
-        None,
-        None,
-    );
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("only one target"));
-}
-
-#[test]
-fn target_conflict_explicit_and_legacy() {
-    let _env = setup();
-    let id = create_strand("first strand");
-    // --id <id> "content" <id> — both explicit and legacy ID provided
-    let result = cmd_append(
-        Some("content"),
-        Some(&id),
-        false,
-        false,
-        None,
-        Some(&id),
-        None,
-        None,
-    );
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("only one target"));
-}
-
-#[test]
-fn legacy_id_rejected_with_stdin() {
-    let _env = setup();
-    let id = create_strand("first strand");
-    // legacy positional id with --stdin (not positional content)
-    let file_path = _env.path().join("note.md");
-    fs::write(&file_path, "stdin content here").unwrap();
-    // We use --file as a proxy for --stdin since we can't pipe in tests
-    let result = cmd_append(
-        None,
-        Some(&id),
-        false,
-        false,
-        Some(file_path.to_str().unwrap()),
-        None,
-        None,
-        None,
-    );
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("positional strand id"));
-}
-
-// ── --new strand creation ──
-
-#[test]
-fn new_with_positional_content() {
-    let _env = setup();
-    let result = cmd_append(
-        Some("brand new strand"),
-        None,
-        true,
-        false,
-        None,
-        None,
-        None,
-        None,
-    );
-    assert!(result.is_ok());
-}
-
-#[test]
-fn new_with_file_content() {
-    let dir = tempfile::tempdir().unwrap();
-    let file_path = dir.path().join("new_strand.md");
-    fs::write(&file_path, "new strand from file").unwrap();
-    let _env = setup();
-    let result = cmd_append(
-        None,
-        None,
-        true,
-        false,
-        Some(file_path.to_str().unwrap()),
-        None,
-        None,
-        None,
-    );
-    assert!(result.is_ok());
-}
-
 // ── normalize_content ──
 
 #[test]
@@ -863,7 +632,7 @@ fn exit_code_for_generic_and_warn_are_1() {
     assert_eq!(exit_code_for("journal issues detected"), 1);
 }
 
-// ── humanize_duration ──────────────────────────────────────────────────
+// ── id target: flag and positional equivalence ─────────────────────────
 
 #[test]
 fn id_target_flag_and_positional_equivalent() {
@@ -871,7 +640,6 @@ fn id_target_flag_and_positional_equivalent() {
     // For each command, parse both forms and verify they succeed.
     let cases: &[(&str, &str)] = &[
         ("show", "0000019dd34b"),
-        ("find", "0000019dd34b"),
         ("hide", "0000019dd34b"),
         ("unhide", "0000019dd34b"),
         ("tree", "0000019dd34b"),

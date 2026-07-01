@@ -161,8 +161,6 @@ fn journal_delta_reflects_other_strand_entries() {
     // Add two entries to B after A was last touched.
     cmd_append(
         Some("b-entry-1"),
-        None,
-        false,
         false,
         None,
         Some(&id_b),
@@ -172,8 +170,6 @@ fn journal_delta_reflects_other_strand_entries() {
     .unwrap();
     cmd_append(
         Some("b-entry-2"),
-        None,
-        false,
         false,
         None,
         Some(&id_b),

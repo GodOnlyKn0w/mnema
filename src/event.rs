@@ -1,52 +1,9 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::process::Command;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 static ID_COUNTER: AtomicU16 = AtomicU16::new(0);
-
-/// Git context captured at append time — optional, never blocks append.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitContext {
-    pub head: String,
-    pub branch: String,
-    pub status: String,
-}
-
-pub fn get_git_context() -> Option<GitContext> {
-    let head = run_cmd(&["git", "rev-parse", "--short", "HEAD"]);
-    let branch =
-        run_cmd(&["git", "branch", "--show-current"]).unwrap_or_else(|_| "detached".to_string());
-    let status = run_cmd(&["git", "status", "--porcelain"])
-        .map(|s| {
-            if s.trim().is_empty() {
-                "clean".to_string()
-            } else {
-                "dirty".to_string()
-            }
-        })
-        .unwrap_or_else(|_| "unknown".to_string());
-    head.map(|h| GitContext {
-        head: h,
-        branch,
-        status,
-    })
-    .ok()
-}
-
-fn run_cmd(args: &[&str]) -> Result<String, String> {
-    let output = Command::new(args[0])
-        .args(&args[1..])
-        .output()
-        .map_err(|e| format!("cannot run git: {}", e))?;
-    if !output.status.success() {
-        return Err("git command failed".to_string());
-    }
-    String::from_utf8(output.stdout)
-        .map(|s| s.trim().to_string())
-        .map_err(|e| format!("invalid utf-8: {}", e))
-}
 
 /// Event types for the append-only journal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,8 +25,6 @@ pub enum Event {
         ref_: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         append_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        git: Option<GitContext>,
         /// Optional structured provenance attached to the entry.
         /// Persists alongside the entry as metadata, not content. New
         /// in this schema; older journals and entries simply omit the
@@ -142,7 +97,8 @@ pub enum Event {
     },
     /// Subject binding fact. Generic record of `subject_type + subject_id -> strand_id`.
     /// Consumers (e.g. `pi-strand`) decide what subject types mean; this crate only
-    /// stores the binding, indexes it, and exposes it through `bind` / `current`.
+    /// stores the binding and renders it in the timeline. Retained for append-only
+    /// compatibility with historic journals; no command currently emits it.
     #[serde(rename = "subject_bound")]
     SubjectBound {
         /// Binding's own event id (24 hex). Distinct from the bound strand id.
@@ -210,11 +166,14 @@ pub fn compute_append_id(strand_id: &str, ts: &str, content: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-pub fn make_strand_created(content: &str, strand_type: Option<&str>) -> (Event, Event) {
+pub fn make_strand_created(
+    content: &str,
+    strand_type: Option<&str>,
+    provenance: Option<serde_json::Value>,
+) -> (Event, Event) {
     let ts = now();
     let id = generate_id();
     let append_id = compute_append_id(&id, &ts, content);
-    let git = get_git_context();
     let created = Event::StrandCreated {
         id: id.clone(),
         ts: ts.clone(),
@@ -226,8 +185,7 @@ pub fn make_strand_created(content: &str, strand_type: Option<&str>) -> (Event, 
         content: content.to_string(),
         ref_: None,
         append_id: Some(append_id),
-        git,
-        provenance: None,
+        provenance,
     };
     (created, appended)
 }
@@ -251,34 +209,11 @@ pub fn make_log_appended_with_ref(
 ) -> Event {
     let ts = now();
     let append_id = compute_append_id(id, &ts, content);
-    let git = get_git_context();
     Event::LogAppended {
         id: id.to_string(),
         ts,
         content: content.to_string(),
         ref_: ref_.map(|s| s.to_string()),
-        append_id: Some(append_id),
-        git,
-        provenance,
-    }
-}
-
-/// Build a `CheckpointCreated` event. `provenance` follows the same
-/// contract as on `LogAppended`; pass `None` for the original behaviour.
-pub fn make_checkpoint(
-    id: &str,
-    observed: &str,
-    action: &str,
-    provenance: Option<serde_json::Value>,
-) -> Event {
-    let ts = now();
-    let content = format!("observed={} action={}", observed, action);
-    let append_id = compute_append_id(id, &ts, &content);
-    Event::CheckpointCreated {
-        id: id.to_string(),
-        ts,
-        observed: observed.to_string(),
-        action: action.to_string(),
         append_id: Some(append_id),
         provenance,
     }
@@ -351,26 +286,6 @@ pub fn make_strand_unhidden(id: &str) -> Event {
     Event::StrandUnhidden {
         id: id.to_string(),
         ts: now(),
-    }
-}
-
-/// Build a `SubjectBound` event. The `id` is the binding's own event id;
-/// `strand_id` is the target strand the subject is bound to. `bind` is
-/// append-only — newer bindings supersede older ones for the same
-/// `(subject_type, subject_id)` pair; there is no unbind event in v1.
-pub fn make_subject_bound(
-    subject_type: &str,
-    subject_id: &str,
-    strand_id: &str,
-    provenance: Option<serde_json::Value>,
-) -> Event {
-    Event::SubjectBound {
-        id: generate_id(),
-        ts: now(),
-        subject_type: subject_type.to_string(),
-        subject_id: subject_id.to_string(),
-        strand_id: strand_id.to_string(),
-        provenance,
     }
 }
 

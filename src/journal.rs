@@ -252,7 +252,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.jsonl");
         let mut file = std::fs::File::create(&path).unwrap();
-        let (created, appended) = crate::event::make_strand_created("journal read test", None);
+        let (created, appended) = crate::event::make_strand_created("journal read test", None, None);
         writeln!(file, "{}", serde_json::to_string(&created).unwrap()).unwrap();
         writeln!(file, "not json").unwrap();
         writeln!(file, "{}", serde_json::to_string(&appended).unwrap()).unwrap();

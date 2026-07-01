@@ -42,7 +42,7 @@ static TOPICS: &[TopicInfo] = &[
   把手行   <id> [type] | <n> entries | <state>
   首条     <summary>（第一条日志，概述这条线的主题）
   last:    <last_entry>（最近一条日志；entries>1 时出现）
-  疤痕行   仅当命令产生 W 码时追加（如 W070、W071、W076）
+  疤痕行   仅当命令产生 W 码时追加（如 W076）
            （W 码=写时瞬态诊断：骑写回显，不入账/不成疤/show 不复显，须当场捕证。ADR-0003）
 
 把手行中的 <state> 显示生命周期（lifecycle），格式：
@@ -52,7 +52,7 @@ static TOPICS: &[TopicInfo] = &[
 
 语义：
   回显即预付的验证——写后输出卡片，调用方无需再跑 show/orient 确认。
-  所有写命令（append/add/checkpoint/bind/hide/unhide/link/close/reopen）
+  所有写命令（append/add/hide/unhide/link/close/reopen）
   都在写后回显受影响线的卡片。
 
 JSON 形态（OrientStrand，写命令 result 字段 / orient active[]）：
@@ -95,7 +95,6 @@ Marker 语义（一行一条）：
                 可被 jq capture 抽成序列，见 tasktree explain jq
   [deadline]    截止日期（by= 字段必须是日期或 RFC3339）
   [done]        完成注解（仅注解，不关闭线；关闭用 close --id <ID>）
-  [checkpoint]  由 tasktree checkpoint 命令写入，勿手动添加
 
 未知方括号前缀一律透传（不拒写）；拼错收 W073；
 追加关闭类 marker 后收 W074 提醒改用 close 命令。"#,
@@ -111,14 +110,9 @@ Marker 语义（一行一条）：
   init     已存在时跳过文件创建；总是打印初始化消息；目录幂等
 
 不可盲目重试（有副作用）：
-  bind     append-only；重复调用写入新的 SubjectBound 事件；
-           后绑定对 current 投影生效（覆盖语义在投影层，
-           不在写入层）；超时后先 current 查账再决定
   append   重复写入新的 LogAppended 事件；
            超时后先 show/orient 查账再决定
   add      每次创建新 strand；不检查内容重复
-  checkpoint  重复写入新的 checkpoint 条目；
-              超时后先 timeline 查账再决定
   link     重复写入新的 EdgeLinked 事件；投影去重与否取决于下游
 
 通用原则：超时后先查账（show/orient/timeline），
@@ -127,36 +121,35 @@ Marker 语义（一行一条）：
     TopicInfo {
         name: "json",
         title: "JSON 形态索引——各读命令 --format json 的顶层字段",
-        body: r#"show（StrandDetailOutput）：
-  id / hidden / summary / entry_count / status / state_marker / state_offset / last_entry_offset /
-  edges / belongs_to_edges / depends_on_edges / strand_branch / events
-  ※ events[].entry=日志行；last_entry_offset=下次 --seen-offset；belongs_to_edges=父 / depends_on_edges=阻塞者(F3)
+        body: r#"show（StrandDetailOutput）：id / hidden / summary / entry_count /
+  status / state_marker / state_offset / last_entry_offset / edges /
+  belongs_to_edges / depends_on_edges / strand_branch / events
+  ※ events[]：entry=日志行；marker=entry 的 marker 前缀([decision] 等，无则
+    ""，可直接 select)。last_entry_offset=下次 --seen-offset；belongs_to_edges=父
+    / depends_on_edges=阻塞者(F3)
 
-list（StrandListOutput.strands[]，StrandListItem）：
-  id / entry_count / first_summary / last_summary / hidden / strand_type /
-  edges / belongs_to_edges / depends_on_edges / status / state_marker /
-  state_offset / last_entry_ts / last_entry_offset
-
-orient（OrientOutput）：
-  max_offset / active / closed_count / hidden_count / remind
-  ※ active[] 是卡片数组（OrientStrand）见 tasktree explain card
-
-search（SearchOutput）：
-  matches / count / query
-  ※ matches[] 每元素：strand_id / content / strand_type / hidden
-
-timeline（TimelineOutput）：
-  timeline / truncated / count / max_offset
-  ※ timeline[] 每元素：journal_offset / ts / strand_id /
-    strand_type / kind / ts_skew
-
-append/checkpoint: seen_offset / seen_gap / warnings / result；add/find: id / status / result
-hide / unhide: strand_id / status / noop /
-  active_count / closed_count / hidden_count / result（卡片）
-link: source_id / target_id / edge_type / status /
-  result.source / result.target（卡片）
-卡片/result 形态见 tasktree explain card
-jq 整型（切 JSON 成你要的形）见 tasktree explain jq"#,
+list（StrandListOutput.strands[]，StrandListItem）：id / entry_count /
+  first_summary / last_summary / first_marker / last_marker / hidden /
+  strand_type / edges / belongs_to_edges / depends_on_edges / status /
+  state_marker / state_offset / last_entry_ts / last_entry_offset
+  ※ first_marker/last_marker=对应 summary 的 marker 前缀（无则 ""）
+orient（OrientOutput）：max_offset / active / closed_count / hidden_count /
+  remind ※ active[] 卡片数组（OrientStrand）见 tasktree explain card
+search（SearchOutput）：matches / count / query
+  ※ matches[]：strand_id / content / strand_type / hidden
+timeline（TimelineOutput）：timeline / truncated / count / max_offset
+  ※ timeline[]：journal_offset / ts / strand_id / strand_type / kind /
+    ts_skew。kind=log_appended 含 marker（无则 ""）
+doctor journal --format json（DoctorReportOutput）：journal / total_lines /
+  corrupted / orphans / total_strands / strands_with_events / noise_strands /
+  timeline_status / timeline_warning / lint_sections / lint_count /
+  diagnostics / has_errors / has_advisories
+  ※ diagnostics[]：code / detail；lint_sections[]：name / summary_label / count / findings
+append: seen_offset / seen_gap / warnings / result；add: id / status / result
+hide / unhide: strand_id / status / noop / active_count / closed_count /
+  hidden_count / result（卡片）
+link: source_id / target_id / edge_type / status / result.source /
+  result.target（卡片）。卡片形态见 tasktree explain card；塑形见 explain jq"#,
     },
     TopicInfo {
         name: "jq",
@@ -194,15 +187,15 @@ jq 整型（切 JSON 成你要的形）见 tasktree explain jq"#,
         name: "grammar",
         title: "文法契约——全 CLI 一致的参数与命名规则",
         body: r#"目标线：主对象用位置参数；位置被 content 占用的命令
-（append/checkpoint/bind）用 --id；单 id 命令两种写法等价
+（append）用 --id；单 id 命令两种写法等价
 （<ID> 与 --id <ID>）；timeline 的 --id 等价 --strand。
 
 旗标词表（同一概念只有一个名字）：
-  --include-hidden  含隐藏线（list 的 --all 是兼容别名）
+  --include-hidden  含隐藏线（search / orient）
   --format json     机器输出唯一正典（explain --json 是兼容快捷）
   --provenance / --seen-offset <N>  写命令出处 / 上次看到的目标线 offset
   --tail <N>        只限显示、不改账，对任何目标可用
-  --edge-type       link 的边类型（--type 是 deprecated 别名）
+  --edge-type       link 的边类型
 
 JSON 命名法：
   复数名词 = 数组（events / matches / strands / active / timeline）
@@ -221,8 +214,7 @@ exit code：0 成功 / 1 解析失败 / 2 写入失败 / 3 参数非法。
 
 永久豁免（点名豁免，防"看起来漏了"的二次猜测）：
   doctor 子命令风格（doctor journal）
-  export --out <PATH>（主对象用旗标）
-  append [CONTENT] [ID] 的 LEGACY 第二位置参数"#,
+  export --out <PATH>（主对象用旗标）"#,
     },
 ];
 
@@ -334,36 +326,6 @@ static CATALOG: &[DiagnosticInfo] = &[
         },
         producer: "lifecycle",
     },
-    DiagnosticInfo {
-        code: "W070",
-        severity: Severity::Warning,
-        category: "lifecycle",
-        title: "strand moved under you",
-        finding: "The checkpoint's provenance.producer differs from the producer of the last LogAppended entry on the target strand. Both producers must be present and non-empty for this check to fire; if either is absent the check is silently skipped.",
-        impact: "You may be checkpointing a strand that was last touched by a different agent — your view of the strand's state may be stale.",
-        recovery: RecoveryInfo {
-            kind: RecoveryKind::Manual,
-            command_str: "tasktree timeline --since-offset <OFFSET> --links <STRAND_ID>",
-            executable: false,
-            requires_human: true,
-        },
-        producer: "lifecycle",
-    },
-    DiagnosticInfo {
-        code: "W071",
-        severity: Severity::Warning,
-        category: "lifecycle",
-        title: "checkpoint on closed strand",
-        finding: "The checkpoint target strand is not in the registered state — it has already been closed with a marker such as [done], [cancelled], or [failed].",
-        impact: "The checkpoint is almost certainly targeting the wrong strand — irreversible actions should be anchored to an open strand.",
-        recovery: RecoveryInfo {
-            kind: RecoveryKind::Manual,
-            command_str: "confirm the target with tasktree list; the checkpoint may belong on a successor strand",
-            executable: false,
-            requires_human: true,
-        },
-        producer: "lifecycle",
-    },
     // ── Health (W062) ───────────────────────────────────
     DiagnosticInfo {
         code: "W062",
@@ -411,27 +373,12 @@ static CATALOG: &[DiagnosticInfo] = &[
         producer: "append",
     },
     DiagnosticInfo {
-        code: "W075",
-        severity: Severity::Warning,
-        category: "lifecycle",
-        title: "dangling fix reference — fixes= prefix unmatched",
-        finding: "A [fixed] entry carries a fixes=<prefix> token (prefix >= 8 hex chars) that does not match any [friction] entry's append_id in the same strand. The prefix either points to a nonexistent entry or to an entry that is not a [friction].",
-        impact: "The [fixed] entry is not folded and its intended friction target remains exposed as an unresolved live debt. The pairing was silently skipped.",
-        recovery: RecoveryInfo {
-            kind: RecoveryKind::Edit,
-            command_str: "check the fixes= prefix against tasktree show --id <STRAND_ID> and correct it",
-            executable: false,
-            requires_human: true,
-        },
-        producer: "context",
-    },
-    DiagnosticInfo {
         code: "W076",
         severity: Severity::Warning,
         category: "lifecycle",
         title: "seen offset behind strand",
         finding: "A write command was passed --seen-offset <N>, and N is behind the target strand's current last_offset before the write.",
-        impact: "The caller is writing after the strand changed behind its last observed position; its local view may be stale. W076 is a transient write-time signal (rides the append/checkpoint echo on stderr + JSON warnings[]/seen_gap, exit 0). By design it is NOT persisted as a scar and will NOT reappear in a later `show` — scars are lifecycle state (close/reopen), not diagnostics, and recording a read cursor would violate ADR-0003. Capture the evidence on the spot from the write echo; do not audit it via show.",
+        impact: "The caller is writing after the strand changed behind its last observed position; its local view may be stale. W076 is a transient write-time signal (rides the write echo on stderr + JSON warnings[]/seen_gap, exit 0). By design it is NOT persisted as a scar and will NOT reappear in a later `show` — scars are lifecycle state (close/reopen), not diagnostics, and recording a read cursor would violate ADR-0003. Capture the evidence on the spot from the write echo; do not audit it via show.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
             command_str: "tasktree timeline --since-offset <N> --links <STRAND_ID>",
@@ -559,7 +506,6 @@ mod tests {
                 content: "task summary".to_string(),
                 ref_: None,
                 append_id: None,
-                git: None,
                 provenance: None,
             },
             Event::StrandCreated {
@@ -573,7 +519,6 @@ mod tests {
                 content: "parent a".to_string(),
                 ref_: None,
                 append_id: None,
-                git: None,
                 provenance: None,
             },
             Event::StrandCreated {
@@ -587,7 +532,6 @@ mod tests {
                 content: "parent b".to_string(),
                 ref_: None,
                 append_id: None,
-                git: None,
                 provenance: None,
             },
             Event::EdgeLinked {
@@ -820,6 +764,8 @@ mod tests {
             entry_count: 0,
             first_summary: "s".to_string(),
             last_summary: "s".to_string(),
+            first_marker: String::new(),
+            last_marker: String::new(),
             hidden: false,
             strand_type: None,
             edges: vec![],
@@ -895,15 +841,12 @@ mod tests {
         assert!(codes.contains(&"W062"));
         assert!(codes.contains(&"W068"));
         assert!(codes.contains(&"W069"));
-        assert!(codes.contains(&"W070"));
-        assert!(codes.contains(&"W071"));
         assert!(codes.contains(&"W073"));
         assert!(codes.contains(&"W074"));
-        assert!(codes.contains(&"W075"));
         assert!(codes.contains(&"W076"));
         assert_eq!(
             codes.len(),
-            9,
+            6,
             "catalog size changed — update this test deliberately"
         );
     }
@@ -917,13 +860,15 @@ mod tests {
         //   W066 (v0 migration finished — journal scan found no residue).
         // E053/E056 are NOT in this list: reserved (commented out in the
         // catalog) for completion-pair semantics once markers stabilise.
-        // W070/W071 were previously in this list as removed external-workflow
-        // codes; they have been revived with new lifecycle semantics for the
-        // checkpoint command (strand-moved and closed-strand guards) — see
-        // git history for the old meanings.
+        // W070/W071 were the checkpoint-command lifecycle guards (strand-moved
+        // and closed-strand); removed 2026-07 with the checkpoint command. Their
+        // numbers must never be reused — see git history for the old meanings.
+        // W075 was the dangling-fix-reference guard, produced by the `context`
+        // command; removed 2026-07 with that command (producer gone, never
+        // emitted). Its number must never be reused.
         for code in [
-            "E047", "W058", "W065", "W067", "W072", "E081", "W081", "E082", "W082", "E083", "W083",
-            "E084", "W085", "E055", "E057", "E058", "W066",
+            "E047", "W058", "W065", "W067", "W070", "W071", "W072", "W075", "E081", "W081", "E082",
+            "W082", "E083", "W083", "E084", "W085", "E055", "E057", "E058", "W066",
         ] {
             assert!(lookup(code).is_none(), "removed code {} reappeared", code);
         }
@@ -970,25 +915,6 @@ mod tests {
     }
 
     #[test]
-    fn test_w075_can_explain() {
-        let info = lookup("W075").expect("W075 should be in catalog");
-        assert_eq!(info.code, "W075");
-        assert_eq!(
-            info.title,
-            "dangling fix reference — fixes= prefix unmatched"
-        );
-        assert!(matches!(info.severity, Severity::Warning));
-        assert_eq!(info.category, "lifecycle");
-        assert_eq!(info.producer, "context");
-        let output = cmd_explain("W075", true);
-        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
-        assert_eq!(v["ok"], true);
-        assert_eq!(v["code"], "W075");
-        assert_eq!(v["recovery"]["executable"], false);
-        assert_eq!(v["recovery"]["requires_human"], true);
-    }
-
-    #[test]
     fn test_no_duplicate_codes() {
         use std::collections::HashSet;
         let codes: Vec<&str> = CATALOG.iter().map(|d| d.code).collect();
@@ -998,36 +924,6 @@ mod tests {
             unique.len(),
             "duplicate diagnostic codes found"
         );
-    }
-
-    #[test]
-    fn test_w070_can_explain() {
-        let info = lookup("W070").expect("W070 should be in catalog");
-        assert_eq!(info.code, "W070");
-        assert_eq!(info.title, "strand moved under you");
-        assert!(matches!(info.severity, Severity::Warning));
-        assert_eq!(info.category, "lifecycle");
-        let output = cmd_explain("W070", true);
-        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
-        assert_eq!(v["ok"], true);
-        assert_eq!(v["code"], "W070");
-        assert_eq!(v["recovery"]["executable"], false);
-        assert_eq!(v["recovery"]["requires_human"], true);
-    }
-
-    #[test]
-    fn test_w071_can_explain() {
-        let info = lookup("W071").expect("W071 should be in catalog");
-        assert_eq!(info.code, "W071");
-        assert_eq!(info.title, "checkpoint on closed strand");
-        assert!(matches!(info.severity, Severity::Warning));
-        assert_eq!(info.category, "lifecycle");
-        let output = cmd_explain("W071", true);
-        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
-        assert_eq!(v["ok"], true);
-        assert_eq!(v["code"], "W071");
-        assert_eq!(v["recovery"]["executable"], false);
-        assert_eq!(v["recovery"]["requires_human"], true);
     }
 
     #[test]

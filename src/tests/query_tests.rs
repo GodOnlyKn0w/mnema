@@ -27,7 +27,10 @@ fn orient_menu_shows_active_folds_closed() {
         entry.catch_up,
         format!("tasktree show --id {} --tail 8", open_id)
     );
-    assert!(out.remind.contains("checkpoint"));
+    assert!(
+        out.remind.contains("pause") && out.remind.contains("改不回"),
+        "remind must carry the pause self-reflection block"
+    );
     assert!(
         out.remind.contains("matter concluded"),
         "remind must carry the closing segment"
@@ -87,8 +90,6 @@ fn orient_limit_keeps_most_recent() {
     let newer = create_strand("newer line");
     cmd_append(
         Some("touched again"),
-        None,
-        false,
         false,
         None,
         Some(&older),
@@ -700,7 +701,7 @@ fn list_default_excludes_hidden() {
     );
 }
 
-// list --all (or the include_hidden flag in cmd_list) returns hidden strands too.
+// The include_hidden projection flag returns hidden strands too.
 
 #[test]
 fn list_with_include_hidden_returns_all() {
@@ -727,8 +728,6 @@ fn search_default_excludes_hidden() {
     let id = create_strand("anchor");
     cmd_append(
         Some("needle-haystack"),
-        Some(&id),
-        false,
         false,
         None,
         None,
@@ -751,8 +750,6 @@ fn search_include_hidden_projection_reports_hidden() {
     let id = create_strand("anchor");
     cmd_append(
         Some("needle-haystack"),
-        Some(&id),
-        false,
         false,
         None,
         None,
@@ -774,16 +771,12 @@ fn search_include_hidden_projection_reports_hidden() {
     assert!(cmd_search("needle", false, true).is_ok());
 }
 
-// cmd_agent_context default does not surface hidden prompt-strands.
-
 #[test]
 fn show_tail_works_with_explicit_id() {
     let _env = setup();
     let id = create_strand("tail decoupling test");
     cmd_append(
         Some("entry two"),
-        Some(&id),
-        false,
         false,
         None,
         None,
@@ -793,8 +786,6 @@ fn show_tail_works_with_explicit_id() {
     .unwrap();
     cmd_append(
         Some("entry three"),
-        Some(&id),
-        false,
         false,
         None,
         None,

@@ -93,21 +93,6 @@ pub(crate) fn looks_like_strand_id(value: &str) -> bool {
     (6..=32).contains(&len) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Render a duration in seconds as a human-readable string.
-/// < 60s → "just now"; < 3600s → "<N>m"; < 86400s → "<N>h"; else "<N>d".
-/// No external dependencies — purely arithmetic.
-pub(crate) fn humanize_duration(secs: i64) -> String {
-    if secs < 60 {
-        "just now".to_string()
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86400)
-    }
-}
-
 pub(crate) fn parse_duration(s: &str) -> Result<usize, String> {
     if s.is_empty() {
         return Err("empty duration".to_string());

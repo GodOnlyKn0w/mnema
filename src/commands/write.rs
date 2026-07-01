@@ -1,4 +1,4 @@
-/// Write-command family: cmd_add, cmd_append, cmd_close, cmd_reopen, cmd_checkpoint.
+/// Write-command family: cmd_add, cmd_append, cmd_close, cmd_reopen.
 /// Moved from main.rs (Layer 4a refactor); function bodies are byte-identical to
 /// the originals (only cross-module path qualification added where required).
 ///
@@ -16,8 +16,7 @@ use crate::markers::{
 use crate::output::{self, OrientStrand};
 use crate::projection;
 use crate::util::{
-    humanize_duration, looks_like_strand_id, parse_event_ts, parse_provenance_arg,
-    read_file_content, read_stdin_content, shorten,
+    looks_like_strand_id, parse_provenance_arg, read_file_content, read_stdin_content, shorten,
 };
 use crate::{
     print_card_with_state, print_handle_line, strand_card_fresh, strand_card_fresh_with_state,
@@ -35,35 +34,29 @@ pub(crate) fn normalize_content(raw: &str) -> String {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn cmd_add(
-    content: Option<&str>,
-    stdin: bool,
-    file: Option<&str>,
-    format_json: bool,
-    strand_type: Option<&str>,
-    provenance_raw: Option<&str>,
-) -> Result<(), String> {
-    cmd_add_with_parent(
+/// Parsed inputs for `tasktree add`, sitting between CLI grammar and the
+/// command workflow (see ARCHITECTURE.md Conventions).
+#[derive(Default)]
+pub(crate) struct AddRequest<'a> {
+    pub(crate) content: Option<&'a str>,
+    pub(crate) stdin: bool,
+    pub(crate) file: Option<&'a str>,
+    pub(crate) format_json: bool,
+    pub(crate) parent: Option<&'a str>,
+    pub(crate) strand_type: Option<&'a str>,
+    pub(crate) provenance_raw: Option<&'a str>,
+}
+
+pub(crate) fn cmd_add(req: AddRequest<'_>) -> Result<(), String> {
+    let AddRequest {
         content,
         stdin,
         file,
         format_json,
-        None,
+        parent,
         strand_type,
         provenance_raw,
-    )
-}
-
-pub(crate) fn cmd_add_with_parent(
-    content: Option<&str>,
-    stdin: bool,
-    file: Option<&str>,
-    format_json: bool,
-    parent: Option<&str>,
-    strand_type: Option<&str>,
-    provenance_raw: Option<&str>,
-) -> Result<(), String> {
+    } = req;
     // ---- Content Source Resolution (mirrors append) ----
     let source_kind = match (content.is_some(), stdin, file.is_some()) {
         (false, false, false) => {
@@ -147,15 +140,8 @@ pub(crate) fn cmd_add_with_parent(
 
     // acquire lock once, write all events atomically
     let result = with_journal_write_lock(|journal| {
-        let (created, mut appended) = event::make_strand_created(&stored, resolved_type);
-        // Attach provenance to the initial LogAppended event
-        if let Event::LogAppended {
-            provenance: ref mut prov_field,
-            ..
-        } = appended
-        {
-            *prov_field = provenance.clone();
-        }
+        let (created, appended) =
+            event::make_strand_created(&stored, resolved_type, provenance.clone());
         let id = created.strand_id().to_string();
         append_event_unlocked(journal, &created)?;
         append_event_unlocked(journal, &appended)?;
@@ -191,20 +177,12 @@ pub(crate) fn cmd_add_with_parent(
 
 pub(crate) struct AppendRequest<'a> {
     pub(crate) content: Option<&'a str>,
-    pub(crate) legacy_id: Option<&'a str>,
-    pub(crate) new: bool,
     pub(crate) stdin: bool,
     pub(crate) file: Option<&'a str>,
     pub(crate) explicit_id: Option<&'a str>,
     pub(crate) provenance_raw: Option<&'a str>,
     pub(crate) seen_offset: Option<usize>,
     pub(crate) why: Option<&'a str>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AppendOutcomeKind {
-    CreatedNew,
-    AppendedExisting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,7 +193,6 @@ pub(crate) struct AppendMarkerWarning {
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppendOutcome {
-    pub(crate) kind: AppendOutcomeKind,
     pub(crate) strand_id: String,
     pub(crate) append_id: Option<String>,
     pub(crate) stored_content: String,
@@ -229,8 +206,6 @@ pub(crate) struct AppendOutcome {
 #[cfg(test)]
 pub(crate) fn cmd_append(
     content: Option<&str>,
-    legacy_id: Option<&str>,
-    new: bool,
     stdin: bool,
     file: Option<&str>,
     explicit_id: Option<&str>,
@@ -239,8 +214,6 @@ pub(crate) fn cmd_append(
 ) -> Result<(), String> {
     cmd_append_with_seen_offset(
         content,
-        legacy_id,
-        new,
         stdin,
         file,
         explicit_id,
@@ -253,8 +226,6 @@ pub(crate) fn cmd_append(
 
 pub(crate) fn cmd_append_with_seen_offset(
     content: Option<&str>,
-    legacy_id: Option<&str>,
-    new: bool,
     stdin: bool,
     file: Option<&str>,
     explicit_id: Option<&str>,
@@ -265,8 +236,6 @@ pub(crate) fn cmd_append_with_seen_offset(
 ) -> Result<(), String> {
     let outcome = execute_append(AppendRequest {
         content,
-        legacy_id,
-        new,
         stdin,
         file,
         explicit_id,
@@ -280,7 +249,6 @@ pub(crate) fn cmd_append_with_seen_offset(
 
 pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, String> {
     if (req.stdin || req.file.is_some())
-        && req.legacy_id.is_none()
         && req.content.map(looks_like_strand_id).unwrap_or(false)
     {
         return Err(
@@ -338,68 +306,13 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
     let path = ensure_journal()?;
     let (events, _) = read_events_lossy(&path);
 
-    if let (Some(first), Some(second)) = (req.content, req.legacy_id) {
-        if find_strand(&events, first).is_some() && find_strand(&events, second).is_none() {
-            return Err(format!(
-                "positional append arguments look reversed. Use:\n  tasktree append --id {} \"{}\"",
-                first,
-                second.replace('"', "\\\"")
-            ));
-        }
-    }
-
     if req.explicit_id.map_or(false, |id| id.trim().is_empty()) {
         return Err("explicit --id cannot be empty".to_string());
     }
 
-    let target_count = [req.new, req.explicit_id.is_some(), req.legacy_id.is_some()]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-
-    if target_count > 1 {
-        return Err("choose only one target: --new, --id, or positional strand id".to_string());
-    }
-
-    if req.legacy_id.is_some() && source_kind != "positional" {
-        return Err(
-            "warn: stdin and --file require --id to specify target; positional strand id is not supported with this content source".to_string()
-        );
-    }
-
     let provenance = parse_provenance_arg(req.provenance_raw)?;
 
-    if req.new {
-        let (created, mut appended) = event::make_strand_created(&stored, Some("session"));
-        if let Event::LogAppended {
-            provenance: ref mut prov_field,
-            ..
-        } = appended
-        {
-            *prov_field = provenance.clone();
-        }
-        let new_id = created.strand_id().to_string();
-        with_journal_write_lock(|journal| {
-            append_event_unlocked(journal, &created)?;
-            append_event_unlocked(journal, &appended)?;
-            Ok(())
-        })?;
-        return Ok(AppendOutcome {
-            kind: AppendOutcomeKind::CreatedNew,
-            strand_id: new_id.clone(),
-            append_id: None,
-            stored_content: stored,
-            provenance: provenance.clone(),
-            seen_offset: req.seen_offset,
-            seen_warning: None,
-            marker_warning: None,
-            closing_marker_warning: false,
-            card_state: strand_card_fresh_with_state(&new_id),
-        });
-    }
-
-    let target_id = req.explicit_id.or(req.legacy_id);
-    let full_id = if let Some(id) = target_id {
+    let full_id = if let Some(id) = req.explicit_id {
         find_strand(&events, id).ok_or_else(|| {
             let mut msg = format!("strand {} not found", id);
             if id == "-" {
@@ -415,7 +328,7 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         sorted.sort_by(|a, b| b.last_ts().cmp(&a.last_ts()));
         let recent = sorted
             .first()
-            .ok_or("no strands found — use 'add' or 'append --new' first")?;
+            .ok_or("no strands found — use 'add' to create a strand first")?;
         recent.id.clone()
     };
 
@@ -456,7 +369,6 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
     let card_state = strand_card_fresh_with_state(&full_id);
 
     Ok(AppendOutcome {
-        kind: AppendOutcomeKind::AppendedExisting,
         strand_id: full_id,
         append_id,
         stored_content: stored,
@@ -486,14 +398,6 @@ fn possible_marker_warning(stored: &str) -> Option<AppendMarkerWarning> {
 }
 
 fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
-    if outcome.kind == AppendOutcomeKind::CreatedNew {
-        println!("{}", outcome.strand_id);
-        if let Some((card, state)) = &outcome.card_state {
-            print_card_with_state(card, state);
-        }
-        return;
-    }
-
     if let Some(warning) = &outcome.marker_warning {
         eprintln!(
             "W073: unknown marker {} — did you mean {}? (tasktree explain markers)",
@@ -636,435 +540,6 @@ pub(crate) fn cmd_reopen(id: &str, format_json: bool) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug)]
-pub(crate) struct CheckpointFailure {
-    pub(crate) code: i32,
-    pub(crate) message: String,
-    pub(crate) requested_strand: Option<String>,
-    pub(crate) resolved_strand: Option<String>,
-    pub(crate) journal_appended: bool,
-}
-
-pub(crate) fn checkpoint_error_json(failure: &CheckpointFailure) {
-    let output = output::CheckpointErrorOutput {
-        ok: false,
-        error: &failure.message,
-        requested_strand: &failure.requested_strand,
-        resolved_strand: &failure.resolved_strand,
-        journal_appended: failure.journal_appended,
-    };
-    println!("{}", serde_json::to_string(&output).unwrap());
-}
-
-pub(crate) fn resolve_most_recent_strand(
-    strands: &[projection::ProjectedStrand],
-) -> Option<&projection::ProjectedStrand> {
-    let mut sorted: Vec<_> = strands.iter().collect();
-    sorted.sort_by(|a, b| b.last_ts().cmp(a.last_ts()));
-    sorted.into_iter().next()
-}
-
-pub(crate) fn escape_checkpoint_value(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-pub(crate) struct CheckpointRequest<'a> {
-    pub(crate) requested_id: Option<&'a str>,
-    pub(crate) action: &'a str,
-    pub(crate) tail: Option<usize>,
-    pub(crate) include_hidden: bool,
-    pub(crate) provenance_raw: Option<&'a str>,
-    pub(crate) seen_offset: Option<usize>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CheckpointShownEntry {
-    pub(crate) ts: String,
-    pub(crate) content: String,
-    pub(crate) append_id: Option<String>,
-}
-
-#[derive(Debug)]
-pub(crate) struct CheckpointPlan {
-    pub(crate) requested_strand: Option<String>,
-    pub(crate) strand_id: String,
-    pub(crate) strand_state: String,
-    pub(crate) resolved_by: &'static str,
-    pub(crate) action: String,
-    pub(crate) event: Event,
-    pub(crate) append_id: Option<String>,
-    pub(crate) observed_entries_before_append: usize,
-    pub(crate) shown_entries: Vec<CheckpointShownEntry>,
-    pub(crate) staleness_seconds: Option<i64>,
-    pub(crate) journal_delta: usize,
-    pub(crate) strand_last_offset: usize,
-    pub(crate) max_offset_before: usize,
-    pub(crate) seen_offset: Option<usize>,
-    pub(crate) seen_gap: Option<usize>,
-    pub(crate) catch_up: Option<String>,
-    pub(crate) warnings: Vec<output::CheckpointWarningOutput>,
-    pub(crate) warning_lines: Vec<(&'static str, String)>,
-    pub(crate) diagnostics_count: usize,
-}
-
-pub(crate) struct CheckpointOutcome {
-    pub(crate) plan: CheckpointPlan,
-    pub(crate) card: Option<OrientStrand>,
-}
-
-fn checkpoint_failure(
-    code: i32,
-    message: String,
-    requested_strand: Option<String>,
-    resolved_strand: Option<String>,
-    journal_appended: bool,
-) -> CheckpointFailure {
-    CheckpointFailure {
-        code,
-        message,
-        requested_strand,
-        resolved_strand,
-        journal_appended,
-    }
-}
-
-pub(crate) fn plan_checkpoint(
-    events: &[(usize, Event)],
-    req: CheckpointRequest<'_>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<CheckpointPlan, CheckpointFailure> {
-    if req.action.trim().is_empty() {
-        return Err(checkpoint_failure(
-            3,
-            "invalid arguments: --action cannot be empty".to_string(),
-            req.requested_id.map(str::to_string),
-            None,
-            false,
-        ));
-    }
-
-    let all_strands = projection::project_strands(events, true);
-    let visible_strands = projection::project_strands(events, req.include_hidden);
-
-    let (strand, resolved_by) = if let Some(id) = req.requested_id {
-        let full = find_strand(events, id).ok_or_else(|| {
-            checkpoint_failure(
-                1,
-                format!("strand resolve/show failed: strand {} not found", id),
-                Some(id.to_string()),
-                None,
-                false,
-            )
-        })?;
-        let strand = all_strands.iter().find(|s| s.id == full).ok_or_else(|| {
-            checkpoint_failure(
-                1,
-                format!("strand resolve/show failed: strand {} not found", id),
-                Some(id.to_string()),
-                None,
-                false,
-            )
-        })?;
-        (strand, "explicit --id")
-    } else {
-        let strand = resolve_most_recent_strand(&visible_strands).ok_or_else(|| {
-            checkpoint_failure(
-                1,
-                "strand resolve/show failed: no strands found".to_string(),
-                None,
-                None,
-                false,
-            )
-        })?;
-        (strand, "most_recent_active_strand")
-    };
-
-    let strand_last_offset = strand.last_offset();
-    let max_offset_before = events.last().map(|(o, _)| *o).unwrap_or(0);
-    let journal_delta = max_offset_before.saturating_sub(strand_last_offset);
-    let staleness_seconds = if strand.last_ts().is_empty() {
-        None
-    } else {
-        parse_event_ts(strand.last_ts()).map(|ts| (now - ts).num_seconds())
-    };
-
-    let provenance_val = parse_provenance_arg(req.provenance_raw).map_err(|message| {
-        checkpoint_failure(
-            3,
-            message,
-            req.requested_id.map(str::to_string),
-            Some(strand.id.clone()),
-            false,
-        )
-    })?;
-    let checkpoint_producer = provenance_val
-        .as_ref()
-        .and_then(|p| p.get("producer"))
-        .and_then(|v| v.as_str());
-    let w070 = diagnostics::check_w070_strand_moved(events, &strand.id, checkpoint_producer);
-    let w071 = diagnostics::check_w071_closed_strand(strand);
-    let w076 = diagnostics::check_w076_seen_offset(&strand.id, req.seen_offset, strand_last_offset);
-
-    let observed_entries_before_append = strand.log_count();
-    let escaped_action = escape_checkpoint_value(req.action);
-    let content = format!(
-        "[checkpoint] ok resolved_by=\"{}\" observed_entries_before_append={} action=\"{}\"",
-        resolved_by, observed_entries_before_append, escaped_action
-    );
-    let event = event::make_log_appended(&strand.id, &content, provenance_val);
-    let append_id = match &event {
-        Event::LogAppended { append_id, .. } => append_id.clone(),
-        _ => None,
-    };
-
-    let shown_entries: Vec<CheckpointShownEntry> = if let Some(n) = req.tail {
-        let skip = strand.log.len().saturating_sub(n);
-        strand.log[skip..].iter().collect::<Vec<_>>()
-    } else {
-        strand.log.iter().collect::<Vec<_>>()
-    }
-    .into_iter()
-    .map(|entry| CheckpointShownEntry {
-        ts: entry.ts.clone(),
-        content: entry.content.clone(),
-        append_id: entry.append_id.clone(),
-    })
-    .collect();
-
-    let raw_events: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
-    let diagnostics_count = diagnostics::run_journal_diagnostics(&raw_events, now).len();
-
-    let mut warnings = Vec::new();
-    let mut warning_lines = Vec::new();
-    if let Some((code, detail)) = w070 {
-        warnings.push(output::CheckpointWarningOutput {
-            code: code.to_string(),
-            detail: detail.clone(),
-            seen_offset: None,
-            strand_last_offset: None,
-            seen_gap: None,
-            catch_up: None,
-        });
-        warning_lines.push((code, detail));
-    }
-    if let Some((code, detail)) = w071 {
-        warnings.push(output::CheckpointWarningOutput {
-            code: code.to_string(),
-            detail: detail.clone(),
-            seen_offset: None,
-            strand_last_offset: None,
-            seen_gap: None,
-            catch_up: None,
-        });
-        warning_lines.push((code, detail));
-    }
-    if let Some(w) = &w076 {
-        warnings.push(output::CheckpointWarningOutput {
-            code: w.code.to_string(),
-            detail: w.detail.clone(),
-            seen_offset: Some(w.seen_offset),
-            strand_last_offset: Some(w.strand_last_offset),
-            seen_gap: Some(w.seen_gap),
-            catch_up: Some(w.catch_up.clone()),
-        });
-        warning_lines.push((w.code, w.detail.clone()));
-    }
-
-    let catch_up = if journal_delta > 0 {
-        Some(format!(
-            "tasktree timeline --since-offset {} --links {}",
-            strand_last_offset,
-            shorten(&strand.id)
-        ))
-    } else {
-        None
-    };
-
-    Ok(CheckpointPlan {
-        requested_strand: req.requested_id.map(str::to_string),
-        strand_id: strand.id.clone(),
-        strand_state: strand.state().to_string(),
-        resolved_by,
-        action: req.action.to_string(),
-        event,
-        append_id,
-        observed_entries_before_append,
-        shown_entries,
-        staleness_seconds,
-        journal_delta,
-        strand_last_offset,
-        max_offset_before,
-        seen_offset: req.seen_offset,
-        seen_gap: w076.as_ref().map(|w| w.seen_gap),
-        catch_up,
-        warnings,
-        warning_lines,
-        diagnostics_count,
-    })
-}
-
-pub(crate) fn commit_checkpoint(plan: &CheckpointPlan) -> Result<(), CheckpointFailure> {
-    with_journal_write_lock(|journal| append_event_unlocked(journal, &plan.event)).map_err(|e| {
-        checkpoint_failure(
-            2,
-            format!("journal append failed: {}", e),
-            plan.requested_strand.clone(),
-            Some(plan.strand_id.clone()),
-            false,
-        )
-    })
-}
-
-pub(crate) fn checkpoint_outcome(plan: CheckpointPlan) -> CheckpointOutcome {
-    let card = strand_card_fresh(&plan.strand_id);
-    CheckpointOutcome { plan, card }
-}
-
-pub(crate) fn render_checkpoint_outcome(outcome: &CheckpointOutcome, format_json: bool) {
-    let plan = &outcome.plan;
-    if format_json {
-        let output = output::CheckpointOutput {
-            ok: true,
-            strand: shorten(&plan.strand_id),
-            resolved_strand: &plan.strand_id,
-            resolved_by: plan.resolved_by,
-            observed_entries_before_append: plan.observed_entries_before_append,
-            shown_entries: plan.shown_entries.len(),
-            action: &plan.action,
-            append_id: &plan.append_id,
-            journal_appended: true,
-            diagnostics_count: plan.diagnostics_count,
-            result: outcome.card.clone(),
-            staleness_seconds: plan.staleness_seconds,
-            journal_delta: plan.journal_delta,
-            seen_offset: plan.seen_offset,
-            seen_gap: plan.seen_gap,
-            catch_up: plan.catch_up.as_deref(),
-            warnings: &plan.warnings,
-        };
-        println!("{}", serde_json::to_string(&output).unwrap());
-        return;
-    }
-
-    println!("checkpoint ok");
-    println!(
-        "  strand: {} | {} entries | {}",
-        shorten(&plan.strand_id),
-        plan.observed_entries_before_append + 1,
-        plan.strand_state
-    );
-    println!("  resolved_by: {}", plan.resolved_by);
-
-    let staleness_part = plan
-        .staleness_seconds
-        .map(|s| {
-            let d = humanize_duration(s);
-            if d == "just now" {
-                "last touched just now | ".to_string()
-            } else {
-                format!("last touched {} ago | ", d)
-            }
-        })
-        .unwrap_or_default();
-    println!(
-        "  staleness: {}journal +{} entries since (offset {} → {})",
-        staleness_part, plan.journal_delta, plan.strand_last_offset, plan.max_offset_before
-    );
-
-    if let Some(catch_up) = &plan.catch_up {
-        println!("  catch-up: {}", catch_up);
-    }
-
-    println!(
-        "  observed_entries_before_append: {}",
-        plan.observed_entries_before_append
-    );
-    println!("  action: {}", plan.action);
-    if let Some(id) = &plan.append_id {
-        println!("  append_id: {}", id);
-    }
-    println!("  appended to journal");
-    println!("log:");
-    for entry in &plan.shown_entries {
-        let id_str = entry
-            .append_id
-            .as_ref()
-            .map(|a| format!(" [{}]", &a[..12]))
-            .unwrap_or_default();
-        println!("  [{}]{} {}", &entry.ts[..19], id_str, entry.content);
-    }
-    for (code, detail) in &plan.warning_lines {
-        println!("  {} {}  (tasktree explain {})", code, detail, code);
-    }
-    if plan.diagnostics_count > 0 {
-        println!(
-            "diagnostics: {} warning(s) — run tasktree doctor journal",
-            plan.diagnostics_count
-        );
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn cmd_checkpoint(
-    requested_id: Option<&str>,
-    action: &str,
-    tail: Option<usize>,
-    format_json: bool,
-    include_hidden: bool,
-    provenance_raw: Option<&str>,
-) -> Result<(), CheckpointFailure> {
-    cmd_checkpoint_with_seen_offset(
-        requested_id,
-        action,
-        tail,
-        format_json,
-        include_hidden,
-        provenance_raw,
-        None,
-    )
-}
-
-pub(crate) fn cmd_checkpoint_with_seen_offset(
-    requested_id: Option<&str>,
-    action: &str,
-    tail: Option<usize>,
-    format_json: bool,
-    include_hidden: bool,
-    provenance_raw: Option<&str>,
-    seen_offset: Option<usize>,
-) -> Result<(), CheckpointFailure> {
-    let path = ensure_journal().map_err(|e| {
-        checkpoint_failure(
-            1,
-            format!("strand resolve/show failed: {}", e),
-            requested_id.map(str::to_string),
-            None,
-            false,
-        )
-    })?;
-    let events = read_events_strict(&path).map_err(|e| {
-        checkpoint_failure(
-            1,
-            format!("strand resolve/show failed: {}", e),
-            requested_id.map(str::to_string),
-            None,
-            false,
-        )
-    })?;
-    let request = CheckpointRequest {
-        requested_id,
-        action,
-        tail,
-        include_hidden,
-        provenance_raw,
-        seen_offset,
-    };
-    let plan = plan_checkpoint(&events, request, chrono::Utc::now())?;
-    commit_checkpoint(&plan)?;
-    let outcome = checkpoint_outcome(plan);
-    render_checkpoint_outcome(&outcome, format_json);
-    Ok(())
-}
 #[cfg(test)]
 mod tests {
     use super::*;

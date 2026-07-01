@@ -124,7 +124,7 @@ impl<'a> ExplainUnknownOutput<'a> {
 // ── orient --format json ───────────────────────────────────
 
 /// Orient remind line: the operating loop surfaced by orient outputs.
-pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | read/extract → --format json | jq（id/offset/status，非文本切割）| more → tasktree --help";
+pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | read/extract → --format json | jq（id/offset/status，非文本切割）| more → tasktree --help\npause（行动前自省，然后自愿 append 你的推理）：\n  这一步会在世界上留下改不回的后果——你别的一切都还在 journal 里可复看可重判，这一个一旦发生就收不回，而发生前这一刻是唯一能介入的点。平实说出：它做下哪个改不回的改动？（改动本身，具体地，不是\"我打算做X\"）这正是你此刻想要的那个改动吗？若不完全是——停下重想，这是你唯一能改主意的点。写下来，再去做。";
 
 /// One active strand in the orient menu.
 #[derive(Debug, Serialize, Clone)]
@@ -229,40 +229,6 @@ pub struct OrientTreeOutput {
 }
 
 // ── query JSON DTOs ────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub(crate) struct AgentContextPromptStrandOutput {
-    pub(crate) id: String,
-    pub(crate) entry_count: usize,
-    pub(crate) first_summary: String,
-    pub(crate) last_summary: String,
-    pub(crate) last_entry_offset: usize,
-    pub(crate) last_entry_ts: String,
-    pub(crate) status: String,
-    pub(crate) hidden: bool,
-}
-
-impl From<&ProjectedStrand> for AgentContextPromptStrandOutput {
-    fn from(strand: &ProjectedStrand) -> Self {
-        AgentContextPromptStrandOutput {
-            id: strand.id.clone(),
-            entry_count: strand.log_count(),
-            first_summary: strand.first_summary().to_string(),
-            last_summary: strand.last_summary().to_string(),
-            last_entry_offset: strand.last_offset(),
-            last_entry_ts: strand.last_ts().to_string(),
-            status: strand.state().to_string(),
-            hidden: strand.hidden,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct AgentContextOutput {
-    pub(crate) prompt_strands: Vec<AgentContextPromptStrandOutput>,
-    pub(crate) last_session_offset: usize,
-    pub(crate) timeline_since_last_session: Vec<TimelineEntryOutput>,
-}
 
 #[derive(Debug, Serialize)]
 pub(crate) struct TreeOutput {
@@ -409,54 +375,6 @@ pub(crate) struct LifecycleOutput {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct CheckpointErrorOutput<'a> {
-    pub(crate) ok: bool,
-    pub(crate) error: &'a str,
-    pub(crate) requested_strand: &'a Option<String>,
-    pub(crate) resolved_strand: &'a Option<String>,
-    pub(crate) journal_appended: bool,
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub(crate) struct CheckpointWarningOutput {
-    pub(crate) code: String,
-    pub(crate) detail: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) seen_offset: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) strand_last_offset: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) seen_gap: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) catch_up: Option<String>,
-}
-#[derive(Debug, Serialize)]
-pub(crate) struct CheckpointOutput<'a> {
-    pub(crate) ok: bool,
-    pub(crate) strand: String,
-    pub(crate) resolved_strand: &'a str,
-    pub(crate) resolved_by: &'a str,
-    pub(crate) observed_entries_before_append: usize,
-    pub(crate) shown_entries: usize,
-    pub(crate) action: &'a str,
-    pub(crate) append_id: &'a Option<String>,
-    pub(crate) journal_appended: bool,
-    pub(crate) diagnostics_count: usize,
-    pub(crate) result: Option<OrientStrand>,
-    pub(crate) staleness_seconds: Option<i64>,
-    pub(crate) journal_delta: usize,
-    pub(crate) seen_offset: Option<usize>,
-    pub(crate) seen_gap: Option<usize>,
-    pub(crate) catch_up: Option<&'a str>,
-    pub(crate) warnings: &'a [CheckpointWarningOutput],
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct FindOutput {
-    pub(crate) id: String,
-}
-
-#[derive(Debug, Serialize)]
 pub(crate) struct LinkOutput {
     pub(crate) source_id: String,
     pub(crate) target_id: String,
@@ -491,100 +409,6 @@ pub(crate) struct VisibilityLedgerOutput {
     pub(crate) result: Option<OrientStrand>,
 }
 
-#[derive(Debug, Serialize)]
-pub(crate) struct BindOutput {
-    pub(crate) binding_id: String,
-    pub(crate) subject_type: String,
-    pub(crate) subject_id: String,
-    pub(crate) strand_id: String,
-    pub(crate) result: Option<OrientStrand>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct CurrentOutput {
-    pub(crate) binding_id: String,
-    pub(crate) subject_type: String,
-    pub(crate) subject_id: String,
-    pub(crate) strand_id: String,
-    pub(crate) ts: String,
-}
-// ── context --format json ──────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub(crate) struct ContextOutput {
-    pub(crate) strands: Vec<ContextStrandOutput>,
-}
-
-impl From<&crate::projection::ContextView> for ContextOutput {
-    fn from(view: &crate::projection::ContextView) -> Self {
-        ContextOutput {
-            strands: view.strands.iter().map(ContextStrandOutput::from).collect(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct FoldedCountsOutput {
-    pub(crate) progress: usize,
-    pub(crate) observed: usize,
-    pub(crate) check: usize,
-}
-
-impl From<&crate::projection::FoldedCounts> for FoldedCountsOutput {
-    fn from(counts: &crate::projection::FoldedCounts) -> Self {
-        FoldedCountsOutput {
-            progress: counts.progress,
-            observed: counts.observed,
-            check: counts.check,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct ContextStrandOutput {
-    pub(crate) id: String,
-    pub(crate) covers: Vec<String>,
-    pub(crate) entries: Vec<ContextEntryOutput>,
-    pub(crate) friction_folded: usize,
-    pub(crate) friction_paired: usize,
-    pub(crate) folded_counts: FoldedCountsOutput,
-}
-
-impl From<&crate::projection::ContextStrand> for ContextStrandOutput {
-    fn from(strand: &crate::projection::ContextStrand) -> Self {
-        ContextStrandOutput {
-            id: strand.id.clone(),
-            covers: strand.covers.clone(),
-            entries: strand
-                .entries
-                .iter()
-                .map(ContextEntryOutput::from)
-                .collect(),
-            friction_folded: strand.friction_folded,
-            friction_paired: strand.friction_paired,
-            folded_counts: FoldedCountsOutput::from(&strand.folded_counts),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct ContextEntryOutput {
-    pub(crate) marker: String,
-    pub(crate) content: String,
-    pub(crate) offset: usize,
-    pub(crate) ts: String,
-}
-
-impl From<&crate::projection::ContextEntry> for ContextEntryOutput {
-    fn from(entry: &crate::projection::ContextEntry) -> Self {
-        ContextEntryOutput {
-            marker: entry.marker.clone(),
-            content: entry.content.clone(),
-            offset: entry.offset,
-            ts: entry.ts.clone(),
-        }
-    }
-}
 // ── list --format json ─────────────────────────────────────
 
 /// External contract for `list --format json`. One element in the `strands` array.
@@ -594,6 +418,11 @@ pub struct StrandListItem {
     pub entry_count: usize,
     pub first_summary: String,
     pub last_summary: String,
+    /// Structured marker prefixes of `first_summary`/`last_summary` (additive, W5).
+    /// The summary fields still carry the full original line. Empty string when
+    /// the summary has no marker.
+    pub first_marker: String,
+    pub last_marker: String,
     pub hidden: bool,
     pub strand_type: Option<String>,
     pub edges: Vec<String>,
@@ -623,6 +452,12 @@ pub struct EventOutput {
     pub ts: String,
     pub append_id: Option<String>,
     pub entry: String,
+    /// Structured marker prefix of `entry` (e.g. `"[decision]"`), split out so
+    /// consumers can `select`/`group_by` on it without parsing the raw line.
+    /// Additive (W5): `entry` still carries the full original line. Empty string
+    /// (never null) when the entry has no marker; unknown/misspelled markers pass
+    /// through verbatim (no vocabulary lookup).
+    pub marker: String,
     /// Per-entry provenance (e.g. {"producer":"codex"}). Always serialised —
     /// `null` when absent — per the show JSON contract (see module header).
     pub provenance: Option<serde_json::Value>,
@@ -674,6 +509,89 @@ pub struct SearchOutput {
     pub query: String,
 }
 
+// ── doctor journal --format json ───────────────────────────
+
+/// One lint section in the doctor JSON report.
+#[derive(Debug, Serialize)]
+pub struct DoctorLintSectionOutput {
+    pub name: String,
+    pub summary_label: String,
+    pub count: usize,
+    pub findings: Vec<String>,
+}
+
+/// One diagnostic in the doctor JSON report. Projects the internal
+/// `(code, detail)` tuple into a jq-friendly `{code, detail}` object.
+#[derive(Debug, Serialize)]
+pub struct DoctorDiagnosticOutput {
+    pub code: String,
+    pub detail: String,
+}
+
+/// External contract for `doctor journal --format json` (W5, additive command
+/// surface). A projection of the internal `DoctorJournalReport` — the tuple-typed
+/// `diagnostics` are reshaped into `{code, detail}` objects so jq consumers see
+/// structured fields rather than nested arrays.
+#[derive(Debug, Serialize)]
+pub struct DoctorReportOutput {
+    pub journal: String,
+    pub total_lines: usize,
+    pub corrupted: usize,
+    pub orphans: Vec<String>,
+    pub total_strands: usize,
+    pub strands_with_events: usize,
+    pub noise_strands: usize,
+    pub timeline_status: String,
+    pub timeline_warning: bool,
+    pub lint_sections: Vec<DoctorLintSectionOutput>,
+    pub lint_count: usize,
+    pub diagnostics: Vec<DoctorDiagnosticOutput>,
+    pub has_errors: bool,
+    pub has_advisories: bool,
+}
+
+impl DoctorReportOutput {
+    pub fn from_report(
+        journal: String,
+        report: &crate::diagnostics::DoctorJournalReport,
+    ) -> Self {
+        DoctorReportOutput {
+            journal,
+            total_lines: report.total_lines,
+            corrupted: report.corrupted,
+            orphans: report.orphans.clone(),
+            total_strands: report.total_strands,
+            strands_with_events: report.strands_with_events_count,
+            noise_strands: report.noise_strands_count,
+            timeline_status: report.timeline_status.clone(),
+            timeline_warning: report.timeline_warning,
+            lint_sections: report
+                .audit
+                .lint_sections
+                .iter()
+                .map(|s| DoctorLintSectionOutput {
+                    name: s.name.to_string(),
+                    summary_label: s.summary_label.to_string(),
+                    count: s.count(),
+                    findings: s.findings.clone(),
+                })
+                .collect(),
+            lint_count: report.audit.lint_count(),
+            diagnostics: report
+                .audit
+                .diagnostics
+                .iter()
+                .map(|(code, detail)| DoctorDiagnosticOutput {
+                    code: code.clone(),
+                    detail: detail.clone(),
+                })
+                .collect(),
+            has_errors: report.has_errors(),
+            has_advisories: report.has_advisories(),
+        }
+    }
+}
+
 // ── From impls: projection → DTO ───────────────────────────
 
 impl From<&ProjectedStrand> for StrandListItem {
@@ -683,6 +601,8 @@ impl From<&ProjectedStrand> for StrandListItem {
             entry_count: s.log_count(),
             first_summary: s.first_summary().to_string(),
             last_summary: s.last_summary().to_string(),
+            first_marker: crate::markers::split_marker(s.first_summary()).0.to_string(),
+            last_marker: crate::markers::split_marker(s.last_summary()).0.to_string(),
             hidden: s.hidden,
             strand_type: s.strand_type.clone(),
             edges: s.edges.clone(),
@@ -719,6 +639,7 @@ impl From<&ProjectedStrand> for StrandDetailOutput {
                     ts: e.ts.clone(),
                     append_id: e.append_id.clone(),
                     entry: e.content.clone(),
+                    marker: crate::markers::split_marker(&e.content).0.to_string(),
                     provenance: e.provenance.clone(),
                     ref_field: e.ref_.clone(),
                 })
@@ -741,6 +662,9 @@ pub enum TimelineEventKindOutput {
     #[serde(rename = "log_appended")]
     LogAppended {
         content: String,
+        /// Structured marker prefix of `content` (additive, W5). `content` still
+        /// carries the full original line. Empty string when no marker.
+        marker: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         append_id: Option<String>,
     },
@@ -817,6 +741,7 @@ impl From<&crate::projection::TimelineEntry> for TimelineEntryOutput {
                 crate::projection::TimelineEventKind::LogAppended { content, append_id } => {
                     TimelineEventKindOutput::LogAppended {
                         content: content.clone(),
+                        marker: crate::markers::split_marker(content).0.to_string(),
                         append_id: append_id.clone(),
                     }
                 }

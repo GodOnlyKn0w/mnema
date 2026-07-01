@@ -7,7 +7,7 @@ use crate::journal::*;
 use crate::{diagnostics, projection};
 use std::time::Instant;
 
-pub(crate) fn cmd_doctor_journal(strict: bool) -> Result<bool, String> {
+pub(crate) fn cmd_doctor_journal(strict: bool, json: bool) -> Result<bool, String> {
     let journal_dir = resolve_journal_dir()?;
     let path = journal_dir.join("journal.jsonl");
 
@@ -16,7 +16,6 @@ pub(crate) fn cmd_doctor_journal(strict: bool) -> Result<bool, String> {
     let lines: Vec<&str> = raw.lines().collect();
     let total_lines = lines.len();
     let (events, corrupted) = parse_journal_lines(&lines);
-    let (git_head_count, git_context_event_count) = count_git_context_events(&events);
 
     let state_path = journal_dir.join("doctor-state.json");
     let previous_state = read_previous_state(&state_path);
@@ -26,23 +25,29 @@ pub(crate) fn cmd_doctor_journal(strict: bool) -> Result<bool, String> {
         &events,
         total_lines,
         corrupted,
-        git_head_count,
-        git_context_event_count,
         previous_state,
         chrono::Utc::now(),
     );
 
-    render_doctor_report(&path, &report);
+    if json {
+        let out = crate::output::DoctorReportOutput::from_report(path.display().to_string(), &report);
+        match serde_json::to_string_pretty(&out) {
+            Ok(s) => println!("{}", s),
+            Err(e) => return Err(format!("cannot serialize doctor report: {}", e)),
+        }
+    } else {
+        render_doctor_report(&path, &report);
 
-    // Measure fresh projection timing.
-    let projection_start = Instant::now();
-    let (journal_events, _) = read_events_lossy(&path);
-    let _strands = projection::project_strands(&journal_events, true);
-    let projection_ms = projection_start.elapsed().as_millis();
-    println!();
-    println!("  projection_ms: {}", projection_ms);
-    println!("  total_lines: {}", total_lines);
-    println!("  total_events: {}", journal_events.len());
+        // Measure fresh projection timing.
+        let projection_start = Instant::now();
+        let (journal_events, _) = read_events_lossy(&path);
+        let _strands = projection::project_strands(&journal_events, true);
+        let projection_ms = projection_start.elapsed().as_millis();
+        println!();
+        println!("  projection_ms: {}", projection_ms);
+        println!("  total_lines: {}", total_lines);
+        println!("  total_events: {}", journal_events.len());
+    }
 
     Ok(report.has_errors() || (strict && report.has_advisories()))
 }
@@ -60,20 +65,6 @@ fn parse_journal_lines(lines: &[&str]) -> (Vec<Event>, usize) {
         }
     }
     (events, corrupted)
-}
-
-fn count_git_context_events(events: &[Event]) -> (usize, usize) {
-    let mut capable = 0usize;
-    let mut with_head = 0usize;
-    for event in events {
-        if let Event::LogAppended { git, .. } = event {
-            capable += 1;
-            if git.as_ref().map_or(false, |g| !g.head.trim().is_empty()) {
-                with_head += 1;
-            }
-        }
-    }
-    (with_head, capable)
 }
 
 fn read_previous_state(path: &std::path::Path) -> diagnostics::DoctorPreviousState {
@@ -125,17 +116,6 @@ fn render_doctor_report(path: &std::path::Path, report: &diagnostics::DoctorJour
     println!(
         "    noise strands (no events): {}",
         report.noise_strands_count
-    );
-    println!();
-    println!("  git context:");
-    let pct = if report.git_context_event_count > 0 {
-        (report.git_head_count as f64 / report.git_context_event_count as f64) * 100.0
-    } else {
-        0.0
-    };
-    println!(
-        "    entries with git.head: {}/{} ({:.0}%)",
-        report.git_head_count, report.git_context_event_count, pct
     );
     println!();
     println!("  timeline:");
