@@ -6,6 +6,8 @@ tasktree is a local Rust CLI for durable work memory. All durable changes are ap
 
 The target architecture has four modules. Dependencies point outward from durable facts to derived views to public contracts to CLI orchestration.
 
+概念模型与 v2 演化方向（entry 统一实体、哈希链身份、link/ref 两层关系、生命周期折叠、stdin 单通道）见 [CORPUS.md](CORPUS.md)。本文档只管当前代码的模块结构。
+
 ```mermaid
 flowchart BT
     JC[Journal Core<br/>durable facts]
