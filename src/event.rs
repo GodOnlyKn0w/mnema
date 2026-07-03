@@ -293,56 +293,119 @@ pub fn compute_entry_id(
     hex::encode(hasher.finalize())
 }
 
-/// Effective identity for retained v1 rows that predate `entry_id`.
-/// New appends can chain from this value without rewriting old journal lines.
-pub(crate) fn effective_entry_id(
-    stored_entry_id: Option<&str>,
-    prev_entry_id: Option<&str>,
-    ts: &str,
-    content: &str,
-    refs: &[String],
-    effect: Option<&EntryEffect>,
-    provenance: Option<&serde_json::Value>,
-    git: Option<&GitContext>,
-) -> String {
-    stored_entry_id.map(str::to_string).unwrap_or_else(|| {
-        compute_entry_id(prev_entry_id, ts, content, refs, effect, provenance, git)
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryChainMode {
+    /// Read-side identity: stored v2 entry_id wins, retained v1 rows get virtual ids.
+    Effective,
+    /// Anchor identity: replay canonical heads from journal contents.
+    Anchor,
+    /// Audit identity: expose expected prev while hashing stored v2 rows by their declared prev.
+    Integrity,
 }
-pub fn journal_anchor_heads(events: &[Event]) -> Vec<JournalAnchorHead> {
-    let mut heads: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    for event in events {
-        if let Event::LogAppended {
+
+#[derive(Debug, Clone)]
+pub(crate) struct EntryChainStep {
+    pub(crate) strand_id: String,
+    pub(crate) expected_prev_entry_id: Option<String>,
+    pub(crate) prev_entry_id: Option<String>,
+    pub(crate) stored_entry_id: Option<String>,
+    pub(crate) computed_entry_id: String,
+    pub(crate) folded_entry_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EntryChainFold {
+    mode: EntryChainMode,
+    heads: std::collections::BTreeMap<String, String>,
+}
+
+impl EntryChainFold {
+    pub(crate) fn new(mode: EntryChainMode) -> Self {
+        Self {
+            mode,
+            heads: std::collections::BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn apply(&mut self, event: &Event) -> Option<EntryChainStep> {
+        let Event::LogAppended {
             id,
             ts,
             content,
+            prev_entry_id,
+            entry_id,
             refs,
             effect,
             provenance,
             git,
             ..
         } = event
-        {
-            let prev = heads.get(id).map(|s| s.as_str());
-            let entry_id = compute_entry_id(
-                prev,
-                ts,
-                content,
-                refs,
-                effect.as_ref(),
-                provenance.as_ref(),
-                git.as_ref(),
-            );
-            heads.insert(id.clone(), entry_id);
-        }
-    }
-    heads
-        .into_iter()
-        .map(|(strand_id, entry_id)| JournalAnchorHead {
-            strand_id,
-            entry_id,
+        else {
+            return None;
+        };
+
+        let expected_prev_entry_id = self.heads.get(id).cloned();
+        let prev_entry_id = match self.mode {
+            EntryChainMode::Effective => prev_entry_id
+                .clone()
+                .or_else(|| expected_prev_entry_id.clone()),
+            EntryChainMode::Anchor => expected_prev_entry_id.clone(),
+            EntryChainMode::Integrity => {
+                if entry_id.is_some() {
+                    prev_entry_id.clone()
+                } else {
+                    expected_prev_entry_id.clone()
+                }
+            }
+        };
+        let computed_entry_id = compute_entry_id(
+            prev_entry_id.as_deref(),
+            ts,
+            content,
+            refs,
+            effect.as_ref(),
+            provenance.as_ref(),
+            git.as_ref(),
+        );
+        let folded_entry_id = match self.mode {
+            EntryChainMode::Effective => entry_id
+                .clone()
+                .unwrap_or_else(|| computed_entry_id.clone()),
+            EntryChainMode::Anchor | EntryChainMode::Integrity => computed_entry_id.clone(),
+        };
+        self.heads.insert(id.clone(), folded_entry_id.clone());
+
+        Some(EntryChainStep {
+            strand_id: id.clone(),
+            expected_prev_entry_id,
+            prev_entry_id,
+            stored_entry_id: entry_id.clone(),
+            computed_entry_id,
+            folded_entry_id,
         })
-        .collect()
+    }
+
+    pub(crate) fn head(&self, strand_id: &str) -> Option<String> {
+        self.heads.get(strand_id).cloned()
+    }
+
+    pub(crate) fn anchor_heads(&self) -> Vec<JournalAnchorHead> {
+        self.heads
+            .iter()
+            .map(|(strand_id, entry_id)| JournalAnchorHead {
+                strand_id: strand_id.clone(),
+                entry_id: entry_id.clone(),
+            })
+            .collect()
+    }
+}
+
+pub fn journal_anchor_heads(events: &[Event]) -> Vec<JournalAnchorHead> {
+    let mut fold = EntryChainFold::new(EntryChainMode::Anchor);
+    for event in events {
+        fold.apply(event);
+    }
+    fold.anchor_heads()
 }
 
 pub fn compute_journal_anchor_digest(

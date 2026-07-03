@@ -242,39 +242,13 @@ pub(crate) fn append_events(events: &[Event]) -> Result<(), String> {
 }
 
 pub(crate) fn current_entry_head(events: &[(usize, Event)], strand_id: &str) -> Option<String> {
-    let mut previous: Option<String> = None;
+    let mut fold = crate::event::EntryChainFold::new(crate::event::EntryChainMode::Effective);
     for (_, event) in events {
-        if let Event::LogAppended {
-            id,
-            ts,
-            content,
-            prev_entry_id,
-            entry_id,
-            refs,
-            effect,
-            provenance,
-            git,
-            ..
-        } = event
-        {
-            if id != strand_id {
-                continue;
-            }
-            let effective_prev = prev_entry_id.clone().or_else(|| previous.clone());
-            let effective = crate::event::effective_entry_id(
-                entry_id.as_deref(),
-                effective_prev.as_deref(),
-                ts,
-                content,
-                refs,
-                effect.as_ref(),
-                provenance.as_ref(),
-                git.as_ref(),
-            );
-            previous = Some(effective);
+        if matches!(event, Event::LogAppended { id, .. } if id == strand_id) {
+            fold.apply(event);
         }
     }
-    previous
+    fold.head(strand_id)
 }
 
 pub(crate) fn append_entry_to_strand_unlocked(

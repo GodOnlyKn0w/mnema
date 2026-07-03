@@ -312,10 +312,10 @@ pub fn audit_journal(
 }
 
 pub fn verify_journal_integrity(events: &[crate::event::Event]) -> IntegrityReport {
-    use crate::event::{Event, JournalAnchorHead, compute_entry_id, compute_journal_anchor_digest};
-    use std::collections::{BTreeMap, HashMap};
+    use crate::event::{EntryChainFold, EntryChainMode, Event, compute_journal_anchor_digest};
+    use std::collections::HashMap;
 
-    let mut heads: BTreeMap<String, String> = BTreeMap::new();
+    let mut entry_chain = EntryChainFold::new(EntryChainMode::Integrity);
     let mut log_counts: HashMap<String, usize> = HashMap::new();
     let mut previous_anchor: Option<String> = None;
     let mut last_anchor_index: Option<usize> = None;
@@ -323,61 +323,38 @@ pub fn verify_journal_integrity(events: &[crate::event::Event]) -> IntegrityRepo
 
     for (idx, event) in events.iter().enumerate() {
         match event {
-            Event::LogAppended {
-                id,
-                ts,
-                content,
-                effect,
-                prev_entry_id,
-                entry_id,
-                refs,
-                provenance,
-                git,
-                ..
-            } => {
-                let expected_prev = heads.get(id).cloned();
-                if entry_id.is_some() && prev_entry_id.as_deref() != expected_prev.as_deref() {
+            Event::LogAppended { .. } => {
+                let chain_step = entry_chain.apply(event).expect("log event folds");
+                if chain_step.stored_entry_id.is_some()
+                    && chain_step.prev_entry_id.as_deref()
+                        != chain_step.expected_prev_entry_id.as_deref()
+                {
                     report.chain_errors.push(format!(
                         "hash-chain: event {} strand {} prev_entry_id {:?} expected {:?}",
                         idx,
-                        id,
-                        prev_entry_id.as_deref(),
-                        expected_prev.as_deref()
+                        chain_step.strand_id,
+                        chain_step.prev_entry_id.as_deref(),
+                        chain_step.expected_prev_entry_id.as_deref()
                     ));
                 }
-                let prev_for_hash = if entry_id.is_some() {
-                    prev_entry_id.as_deref()
-                } else {
-                    expected_prev.as_deref()
-                };
-                let computed = compute_entry_id(
-                    prev_for_hash,
-                    ts,
-                    content,
-                    refs,
-                    effect.as_ref(),
-                    provenance.as_ref(),
-                    git.as_ref(),
-                );
-                if let Some(stored) = entry_id {
-                    if stored != &computed {
+                if let Some(stored) = &chain_step.stored_entry_id {
+                    if stored != &chain_step.computed_entry_id {
                         report.chain_errors.push(format!(
                             "hash-chain: event {} strand {} entry_id {} expected {}",
-                            idx, id, stored, computed
+                            idx, chain_step.strand_id, stored, chain_step.computed_entry_id
                         ));
                     }
-                    let count = log_counts.entry(id.clone()).or_insert(0);
-                    if *count == 0 && stored != id {
+                    let count = log_counts.entry(chain_step.strand_id.clone()).or_insert(0);
+                    if *count == 0 && stored != &chain_step.strand_id {
                         report.chain_errors.push(format!(
                             "hash-chain: strand {} first entry_id {} does not equal strand id",
-                            id, stored
+                            chain_step.strand_id, stored
                         ));
                     }
                     *count += 1;
                 } else {
-                    *log_counts.entry(id.clone()).or_insert(0) += 1;
+                    *log_counts.entry(chain_step.strand_id).or_insert(0) += 1;
                 }
-                heads.insert(id.clone(), computed);
             }
             Event::JournalAnchored {
                 covered_event_count,
@@ -387,13 +364,7 @@ pub fn verify_journal_integrity(events: &[crate::event::Event]) -> IntegrityRepo
                 ..
             } => {
                 report.anchor_count += 1;
-                let expected_heads: Vec<JournalAnchorHead> = heads
-                    .iter()
-                    .map(|(strand_id, entry_id)| JournalAnchorHead {
-                        strand_id: strand_id.clone(),
-                        entry_id: entry_id.clone(),
-                    })
-                    .collect();
+                let expected_heads = entry_chain.anchor_heads();
                 if *covered_event_count != idx {
                     report.anchor_errors.push(format!(
                         "anchor: event {} covers {} events, expected {}",

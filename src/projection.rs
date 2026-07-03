@@ -781,48 +781,33 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
         // v1 rows have no stored entry_id, so the projection gives them a
         // deterministic virtual identity and lets new entries chain forward.
         let mut logs: Vec<LogEntry> = Vec::new();
-        let mut previous_effective_entry_id: Option<String> = None;
+        let mut entry_chain =
+            crate::event::EntryChainFold::new(crate::event::EntryChainMode::Effective);
         for (offset, e) in node_events.iter() {
             if let Event::LogAppended {
                 ts,
                 content,
-                prev_entry_id,
-                entry_id,
                 refs,
                 ref_,
                 append_id,
                 effect,
-                git,
                 provenance,
                 ..
             } = e
             {
-                let effective_prev = prev_entry_id
-                    .clone()
-                    .or_else(|| previous_effective_entry_id.clone());
-                let effective_entry_id = crate::event::effective_entry_id(
-                    entry_id.as_deref(),
-                    effective_prev.as_deref(),
-                    ts,
-                    content,
-                    refs,
-                    effect.as_ref(),
-                    provenance.as_ref(),
-                    git.as_ref(),
-                );
+                let chain_step = entry_chain.apply(e).expect("log event folds");
                 logs.push(LogEntry {
                     offset: *offset,
                     ts: ts.clone(),
                     content: content.clone(),
                     effect: effect.clone(),
-                    prev_entry_id: effective_prev,
-                    entry_id: Some(effective_entry_id.clone()),
+                    prev_entry_id: chain_step.prev_entry_id,
+                    entry_id: Some(chain_step.folded_entry_id),
                     refs: refs.clone(),
                     ref_: ref_.clone(),
                     append_id: append_id.clone(),
                     provenance: provenance.clone(),
                 });
-                previous_effective_entry_id = Some(effective_entry_id);
             }
         }
         // Fold legacy edge events and v2 link/unlink effects into the live edge set (F5).

@@ -76,40 +76,26 @@ pub(crate) fn run_journal_diagnostics(
         }
     }
 
-    // Build closed-strand set from legacy lifecycle events and v2 close/reopen effects.
+    // Build closed-strand set from canonical lifecycle effects.
     // Legacy CLOSING markers in log content are no longer authoritative.
     let mut closed_strands: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut reopened_strands: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for event in events {
-        match event {
-            Event::StrandClosed { id, .. } => {
-                closed_strands.insert(id.as_str());
-                reopened_strands.remove(id.as_str());
+        let Some(id) = event.strand_id() else {
+            continue;
+        };
+        match crate::projection::lifecycle_effect(event) {
+            Some(EntryEffect::Close { .. }) => {
+                closed_strands.insert(id);
+                reopened_strands.remove(id);
             }
-            Event::StrandReopened { id, .. } => {
-                reopened_strands.insert(id.as_str());
-                closed_strands.remove(id.as_str());
-            }
-            Event::LogAppended {
-                id,
-                effect: Some(EntryEffect::Close { .. }),
-                ..
-            } => {
-                closed_strands.insert(id.as_str());
-                reopened_strands.remove(id.as_str());
-            }
-            Event::LogAppended {
-                id,
-                effect: Some(EntryEffect::Reopen),
-                ..
-            } => {
-                reopened_strands.insert(id.as_str());
-                closed_strands.remove(id.as_str());
+            Some(EntryEffect::Reopen) => {
+                reopened_strands.insert(id);
+                closed_strands.remove(id);
             }
             _ => {}
         }
     }
-
     // ── W068: deadline overdue ──
     for (id, entries) in &per_strand {
         let closed = closed_strands.contains(id);
