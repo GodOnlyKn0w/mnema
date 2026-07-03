@@ -119,6 +119,22 @@ pub(crate) fn journal_lock_path() -> Result<PathBuf, String> {
     Ok(resolve_journal_dir()?.join("journal.lock"))
 }
 
+/// Write-path warnings leave Journal Core through this injected sink; the
+/// core never writes to stderr itself (ARCHITECTURE.md: core modules do not
+/// depend on stdout/stderr behaviour). The CLI installs its presenter in
+/// main(); with no sink installed (unit tests) warnings are dropped.
+static JOURNAL_WARNING_SINK: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+pub(crate) fn set_journal_warning_sink(sink: fn(&str)) {
+    let _ = JOURNAL_WARNING_SINK.set(sink);
+}
+
+fn emit_journal_warning(message: &str) {
+    if let Some(sink) = JOURNAL_WARNING_SINK.get() {
+        sink(message);
+    }
+}
+
 /// Acquire exclusive lock on journal.lock, open journal.jsonl, run closure, flush, unlock.
 /// Lock file opened with .create(true).read(true).write(true) — no append.
 pub(crate) fn with_journal_write_lock<T>(
@@ -170,10 +186,10 @@ pub(crate) fn with_journal_write_lock<T>(
     match (result, anchor_result) {
         (Ok(value), Ok(())) => Ok(value),
         (Ok(value), Err(e)) => {
-            eprintln!(
-                "[tasktree] warning: domain append succeeded but journal anchor append failed: {}",
+            emit_journal_warning(&format!(
+                "domain append succeeded but journal anchor append failed: {}",
                 e
-            );
+            ));
             Ok(value)
         }
         (Err(e), _) => Err(e),

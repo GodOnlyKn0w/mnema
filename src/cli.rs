@@ -1,5 +1,6 @@
 use crate::commands::context::*;
 use crate::commands::doctor::*;
+use crate::commands::explain::cmd_explain;
 use crate::commands::manage::*;
 use crate::commands::query::*;
 use crate::commands::write::*;
@@ -734,6 +735,11 @@ fn cmd_init() -> Result<(), String> {
 // Commands return typed-by-prefix error strings; this adapter is the single
 // place that turns them into process output and exit codes.
 pub(crate) fn main() {
+    // Journal Core surfaces write-path warnings through an injected sink; the
+    // CLI is the presentation layer, so it installs the stderr presenter here.
+    crate::journal::set_journal_warning_sink(|message| {
+        eprintln!("[tasktree] warning: {}", message);
+    });
     let cli = parse_cli_or_exit();
     apply_chdir(cli.chdir.as_deref());
     if let Err(e) = run(&cli.command) {
@@ -979,7 +985,7 @@ fn run(command: &Commands) -> Result<(), String> {
         ),
         Commands::Explain { code, format, json } => {
             let is_json = *json || format.as_deref() == Some("json");
-            let output = diagnostics::cmd_explain(code, is_json);
+            let output = cmd_explain(code, is_json);
             println!("{}", output);
             // Exit 0 when code or topic resolves; exit 1 otherwise.
             let lowered = code.to_lowercase();
