@@ -566,13 +566,14 @@ pub(crate) fn cmd_close(
     }
     let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
     let validate_id = strand_id.clone();
+    let (content, effect) = event::close_entry_parts(disp);
     append_entry_to_strand_checked(
         JournalEntryAppendRequest {
             strand_id: strand_id.clone(),
-            content: format!("close disposition={}", disp),
+            content,
             refs: Vec::new(),
             legacy_ref: None,
-            effect: Some(event::EntryEffect::close(disp)),
+            effect: Some(effect),
             provenance: None,
         },
         move |events| {
@@ -612,13 +613,14 @@ pub(crate) fn cmd_close(
 pub(crate) fn cmd_reopen(id: &str, format_json: bool) -> Result<(), String> {
     let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
     let validate_id = strand_id.clone();
+    let (content, effect) = event::reopen_entry_parts();
     append_entry_to_strand_checked(
         JournalEntryAppendRequest {
             strand_id: strand_id.clone(),
-            content: "reopen erroneous close".to_string(),
+            content,
             refs: Vec::new(),
             legacy_ref: None,
-            effect: Some(event::EntryEffect::Reopen),
+            effect: Some(effect),
             provenance: None,
         },
         move |events| {

@@ -68,12 +68,13 @@ pub(crate) fn cmd_link(
     let src_id = resolve_id(&events, source)?;
     let tgt_id = resolve_id(&events, target)?;
     let provenance = parse_provenance_arg(provenance_raw)?;
+    let (content, effect) = event::link_entry_parts(&tgt_id, etype);
     append_entry_to_strand(JournalEntryAppendRequest {
         strand_id: src_id.clone(),
-        content: format!("link {} {}", etype, tgt_id),
+        content,
         refs: Vec::new(),
         legacy_ref: None,
-        effect: Some(event::EntryEffect::link(&tgt_id, etype)),
+        effect: Some(effect),
         provenance,
     })?;
     if format_json {
@@ -136,12 +137,13 @@ pub(crate) fn cmd_unlink(
     let src_id = resolve_id(&events, source)?;
     let tgt_id = resolve_id(&events, target)?;
     let provenance = parse_provenance_arg(provenance_raw)?;
+    let (content, effect) = event::unlink_entry_parts(&tgt_id, etype);
     append_entry_to_strand(JournalEntryAppendRequest {
         strand_id: src_id.clone(),
-        content: format!("unlink {} {}", etype, tgt_id),
+        content,
         refs: Vec::new(),
         legacy_ref: None,
-        effect: Some(event::EntryEffect::unlink(&tgt_id, etype)),
+        effect: Some(effect),
         provenance,
     })?;
     if format_json {
@@ -179,9 +181,7 @@ pub(crate) fn cmd_hide(
 ) -> Result<(), String> {
     let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
     let provenance = parse_provenance_arg(provenance_raw)?;
-    let content = reason
-        .map(|r| format!("[hidden] {}", r))
-        .unwrap_or_else(|| "hide".to_string());
+    let (content, effect) = event::hide_entry_parts(reason);
     // The gate reads current state and the append happens under the same
     // journal write lock, so concurrent hide/unhide calls are serialised.
     let outcome = append_entry_to_strand_gated(
@@ -190,7 +190,7 @@ pub(crate) fn cmd_hide(
             content,
             refs: Vec::new(),
             legacy_ref: None,
-            effect: Some(event::EntryEffect::Hide),
+            effect: Some(effect),
             provenance,
         },
         |events| {
@@ -224,13 +224,14 @@ pub(crate) fn cmd_hide(
 /// same journal write lock so concurrent hide/unhide calls are serialised.
 pub(crate) fn cmd_unhide(id: &str, format_json: bool) -> Result<(), String> {
     let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
+    let (content, effect) = event::unhide_entry_parts();
     let outcome = append_entry_to_strand_gated(
         JournalEntryAppendRequest {
             strand_id: strand_id.clone(),
-            content: "unhide".to_string(),
+            content,
             refs: Vec::new(),
             legacy_ref: None,
-            effect: Some(event::EntryEffect::Unhide),
+            effect: Some(effect),
             provenance: None,
         },
         |events| {

@@ -459,6 +459,11 @@ fn source_events_digest(source: &[(usize, Event)]) -> Result<String, String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+// Migration translator: the effect entry content templates spelled below
+// ("close disposition=...", "link <type> <target>", ...) intentionally mirror
+// the canonical pairs in `event::*_entry_parts`. This is v1→v2 translation of
+// historical events, kept literal on purpose; new writes must go through the
+// event factory constructors, never copy these strings.
 pub(crate) fn build_cutover_v2_plan(source: &[(usize, Event)]) -> Result<CutoverV2Plan, String> {
     let mut strand_meta: std::collections::BTreeMap<String, (String, Option<String>)> =
         std::collections::BTreeMap::new();

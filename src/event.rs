@@ -587,6 +587,55 @@ pub fn make_checkpoint(
     }
 }
 
+// ── effect entry content/effect pairs ──────────────────────
+// An effect entry's durable content mirrors its machine effect ("link
+// belongs-to <id>", "close disposition=done", ...). That pairing is event
+// construction knowledge with a single owner: these constructors. Both the
+// Event factories below and command-layer append requests must go through
+// them; nothing else spells the content templates.
+
+/// Valid close dispositions accepted by `tasktree close --as <DISPOSITION>`.
+pub const CLOSE_DISPOSITIONS: &[&str] = &["done", "failed", "cancelled", "merged", "verified"];
+
+pub(crate) fn link_entry_parts(target_id: &str, edge_type: &str) -> (String, EntryEffect) {
+    (
+        format!("link {} {}", edge_type, target_id),
+        EntryEffect::link(target_id, edge_type),
+    )
+}
+
+pub(crate) fn unlink_entry_parts(target_id: &str, edge_type: &str) -> (String, EntryEffect) {
+    (
+        format!("unlink {} {}", edge_type, target_id),
+        EntryEffect::unlink(target_id, edge_type),
+    )
+}
+
+/// `disposition` must be in `CLOSE_DISPOSITIONS`; callers validate before building.
+pub(crate) fn close_entry_parts(disposition: &str) -> (String, EntryEffect) {
+    (
+        format!("close disposition={}", disposition),
+        EntryEffect::close(disposition),
+    )
+}
+
+pub(crate) fn reopen_entry_parts() -> (String, EntryEffect) {
+    ("reopen erroneous close".to_string(), EntryEffect::Reopen)
+}
+
+pub(crate) fn hide_entry_parts(reason: Option<&str>) -> (String, EntryEffect) {
+    (
+        reason
+            .map(|r| format!("[hidden] {}", r))
+            .unwrap_or_else(|| "hide".to_string()),
+        EntryEffect::Hide,
+    )
+}
+
+pub(crate) fn unhide_entry_parts() -> (String, EntryEffect) {
+    ("unhide".to_string(), EntryEffect::Unhide)
+}
+
 pub fn make_edge_linked(
     source_id: &str,
     prev_entry_id: Option<&str>,
@@ -595,13 +644,14 @@ pub fn make_edge_linked(
     provenance: Option<serde_json::Value>,
 ) -> Event {
     let edge_type = edge_type.unwrap_or("depends-on");
+    let (content, effect) = link_entry_parts(target_id, edge_type);
     make_log_appended_entry_with_effect(
         source_id,
         prev_entry_id,
-        &format!("link {} {}", edge_type, target_id),
+        &content,
         Vec::new(),
         None,
-        Some(EntryEffect::link(target_id, edge_type)),
+        Some(effect),
         provenance,
     )
 }
@@ -616,32 +666,34 @@ pub fn make_edge_unlinked(
     provenance: Option<serde_json::Value>,
 ) -> Event {
     let edge_type = edge_type.unwrap_or("depends-on");
+    let (content, effect) = unlink_entry_parts(target_id, edge_type);
     make_log_appended_entry_with_effect(
         source_id,
         prev_entry_id,
-        &format!("unlink {} {}", edge_type, target_id),
+        &content,
         Vec::new(),
         None,
-        Some(EntryEffect::unlink(target_id, edge_type)),
+        Some(effect),
         provenance,
     )
 }
 
 /// Build a close effect entry.
-/// `disposition` must be one of: done, failed, cancelled, merged, verified.
+/// `disposition` must be in `CLOSE_DISPOSITIONS`.
 pub fn make_strand_closed(
     id: &str,
     prev_entry_id: Option<&str>,
     disposition: &str,
     provenance: Option<serde_json::Value>,
 ) -> Event {
+    let (content, effect) = close_entry_parts(disposition);
     make_log_appended_entry_with_effect(
         id,
         prev_entry_id,
-        &format!("close disposition={}", disposition),
+        &content,
         Vec::new(),
         None,
-        Some(EntryEffect::close(disposition)),
+        Some(effect),
         provenance,
     )
 }
@@ -652,13 +704,14 @@ pub fn make_strand_reopened(
     prev_entry_id: Option<&str>,
     provenance: Option<serde_json::Value>,
 ) -> Event {
+    let (content, effect) = reopen_entry_parts();
     make_log_appended_entry_with_effect(
         id,
         prev_entry_id,
-        "reopen erroneous close",
+        &content,
         Vec::new(),
         None,
-        Some(EntryEffect::Reopen),
+        Some(effect),
         provenance,
     )
 }
@@ -669,16 +722,14 @@ pub fn make_strand_hidden(
     reason: Option<&str>,
     provenance: Option<serde_json::Value>,
 ) -> Event {
-    let content = reason
-        .map(|r| format!("[hidden] {}", r))
-        .unwrap_or_else(|| "hide".to_string());
+    let (content, effect) = hide_entry_parts(reason);
     make_log_appended_entry_with_effect(
         id,
         prev_entry_id,
         &content,
         Vec::new(),
         None,
-        Some(EntryEffect::Hide),
+        Some(effect),
         provenance,
     )
 }
@@ -688,13 +739,14 @@ pub fn make_strand_unhidden(
     prev_entry_id: Option<&str>,
     provenance: Option<serde_json::Value>,
 ) -> Event {
+    let (content, effect) = unhide_entry_parts();
     make_log_appended_entry_with_effect(
         id,
         prev_entry_id,
-        "unhide",
+        &content,
         Vec::new(),
         None,
-        Some(EntryEffect::Unhide),
+        Some(effect),
         provenance,
     )
 }

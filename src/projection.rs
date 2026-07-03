@@ -101,8 +101,9 @@ pub const STATE_MARKERS: &[&str] = &[
     "[registered]",
 ];
 
-/// Valid close dispositions accepted by `tasktree close --as <DISPOSITION>`.
-pub const CLOSE_DISPOSITIONS: &[&str] = &["done", "failed", "cancelled", "merged", "verified"];
+/// Valid close dispositions — owned by the event factory alongside the
+/// close effect constructor; re-exported here for read-side callers.
+pub use crate::event::CLOSE_DISPOSITIONS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EdgeDelta {
