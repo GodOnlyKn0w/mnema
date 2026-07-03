@@ -152,7 +152,10 @@ impl From<&ProjectedStrand> for OrientStrand {
             summary: truncate(s.first_summary(), 70),
             last_entry: truncate(s.last_summary(), 70),
             last_offset: s.last_offset(),
-            catch_up: format!("tasktree show --id {} --tail 8", s.id),
+            catch_up: format!(
+                "tasktree show --id {} --tail 8",
+                crate::util::shorten(&s.id)
+            ),
             lifecycle: s.state().to_string(),
         }
     }
@@ -176,7 +179,10 @@ impl From<&crate::graph::OrientForestNode> for OrientForestNode {
                 summary: truncate(&node.summary, 70),
                 last_entry: truncate(&node.last_entry, 70),
                 last_offset: node.last_offset,
-                catch_up: format!("tasktree show --id {} --tail 8", node.id),
+                catch_up: format!(
+                    "tasktree show --id {} --tail 8",
+                    crate::util::shorten(&node.id)
+                ),
                 lifecycle: node.lifecycle.clone(),
             },
             children: node.children.iter().map(OrientForestNode::from).collect(),

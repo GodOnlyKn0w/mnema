@@ -131,6 +131,18 @@ pub(crate) fn shorten(id: &str) -> String {
     }
 }
 
+/// Compact display form of an RFC3339 timestamp: "MM-DD HH:MM".
+/// Display-layer only — storage keeps the full timestamp (CORPUS §8:
+/// raw high-precision timestamps are machine fields, not reader fields).
+/// Falls back to the raw string when it is too short to slice.
+pub(crate) fn compact_ts(ts: &str) -> String {
+    if ts.len() >= 16 && ts.is_char_boundary(5) && ts.is_char_boundary(16) {
+        format!("{} {}", &ts[5..10], &ts[11..16])
+    } else {
+        ts.to_string()
+    }
+}
+
 /// Collapse prose to a single-line preview, char-bounded by `max`.
 ///
 /// 散文预览统一走这里：先在首个换行处截断（多行 entry/brief 只露首行，

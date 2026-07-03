@@ -23,9 +23,14 @@ fn orient_menu_shows_active_folds_closed() {
     assert_eq!(entry.summary, "open line of work");
     // Catch-up is copy-paste runnable and shows the strand's recent
     // content (show --tail), never the empty-prone since-offset delta.
+    // It carries the short prefix handle: human-facing views never spend
+    // a full 64-hex hash where a resolvable prefix works.
     assert_eq!(
         entry.catch_up,
-        format!("tasktree show --id {} --tail 8", open_id)
+        format!(
+            "tasktree show --id {} --tail 8",
+            crate::util::shorten(&open_id)
+        )
     );
     assert!(out.remind.contains("checkpoint"));
     assert!(

@@ -13,7 +13,7 @@ use crate::output;
 use crate::projection::{self, TimelineEventKind};
 use crate::render::*;
 use crate::tree;
-use crate::util::{parse_duration, shorten, truncate};
+use crate::util::{compact_ts, parse_duration, shorten, truncate};
 use std::time::Instant;
 
 fn corrupted_lines_error(skipped: usize) -> String {
@@ -682,19 +682,30 @@ pub(crate) fn cmd_show(
 
     println!("log:");
     for entry in slice {
-        let ref_str = entry
-            .ref_
-            .as_ref()
-            .map(|r| format!(" [ref: {}]", r))
-            .unwrap_or_default();
+        // v2 refs render as short handles; the legacy ref_ pin only shows
+        // when no hash refs exist (dual-track fallback).
+        let ref_str = if !entry.refs.is_empty() {
+            let handles: Vec<String> = entry.refs.iter().map(|h| shorten(h)).collect();
+            format!(" [refs: {}]", handles.join(", "))
+        } else {
+            entry
+                .ref_
+                .as_ref()
+                .map(|r| format!(" [ref: {}]", r))
+                .unwrap_or_default()
+        };
+        // Entry handle: v2 entry hash (short), falling back to the legacy
+        // append_id for rows that predate entry ids.
         let id_str = entry
-            .append_id
-            .as_ref()
-            .map(|a| format!(" [{}]", &a[..12]))
+            .entry_id
+            .as_deref()
+            .map(shorten)
+            .or_else(|| entry.append_id.as_deref().map(shorten))
+            .map(|h| format!(" [{}]", h))
             .unwrap_or_default();
         println!(
             "  [{}]{} {}{}",
-            &entry.ts[..19],
+            compact_ts(&entry.ts),
             id_str,
             entry.content,
             ref_str
