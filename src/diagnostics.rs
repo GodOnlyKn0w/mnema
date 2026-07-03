@@ -217,7 +217,7 @@ JSON 命名法：
 
 全局旗标：
   -C <DIR> / --chdir  如同在 DIR 启动；journal 解析与相对路径随之；DIR 不存在 → exit 3。
-exit code：0 成功 / 1 解析失败 / 2 写入失败 / 3 参数非法。
+exit code：0 成功 / 1 命令执行失败 / 2 journal 不可读或损坏 / 3 解析或参数非法。
 
 永久豁免（点名豁免，防"看起来漏了"的二次猜测）：
   doctor 子命令风格（doctor journal）

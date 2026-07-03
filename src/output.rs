@@ -356,9 +356,7 @@ pub(crate) struct AddOutput<'a> {
     pub(crate) id: String,
     pub(crate) status: &'static str,
     pub(crate) provenance: Option<&'a serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) parent_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) edge_type: Option<&'static str>,
     pub(crate) result: Option<OrientStrand>,
 }
@@ -401,7 +399,6 @@ pub(crate) struct AppendOutput<'a> {
 #[derive(Debug, Serialize)]
 pub(crate) struct LifecycleOutput {
     pub(crate) strand_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) disposition: Option<String>,
     pub(crate) lifecycle: String,
     pub(crate) status: &'static str,
@@ -421,13 +418,9 @@ pub(crate) struct CheckpointErrorOutput<'a> {
 pub(crate) struct CheckpointWarningOutput {
     pub(crate) code: String,
     pub(crate) detail: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) seen_offset: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) strand_last_offset: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) seen_gap: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) catch_up: Option<String>,
 }
 #[derive(Debug, Serialize)]
@@ -791,22 +784,16 @@ impl From<&ProjectedStrand> for StrandDetailOutput {
 #[serde(tag = "kind")]
 pub enum TimelineEventKindOutput {
     #[serde(rename = "strand_created")]
-    StrandCreated {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        summary: Option<String>,
-    },
+    StrandCreated { summary: Option<String> },
     #[serde(rename = "log_appended")]
     LogAppended {
         content: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         append_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         effect: Option<EntryEffectOutput>,
     },
     #[serde(rename = "edge_linked")]
     EdgeLinked {
         target_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         edge_type: Option<String>,
     },
     #[serde(rename = "edge_unlinked")]
@@ -819,7 +806,6 @@ pub enum TimelineEventKindOutput {
     CheckpointCreated {
         observed: String,
         action: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         append_id: Option<String>,
     },
     #[serde(rename = "subject_bound")]
@@ -834,20 +820,14 @@ pub enum TimelineEventKindOutput {
     StrandReopened,
 }
 
-fn is_false(b: &bool) -> bool {
-    !b
-}
-
 /// One timeline entry in JSON output.
 #[derive(Debug, Serialize)]
 pub struct TimelineEntryOutput {
     pub journal_offset: usize,
     pub ts: String,
     pub strand_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub strand_type: Option<String>,
     pub kind: TimelineEventKindOutput,
-    #[serde(skip_serializing_if = "is_false")]
     pub ts_skew: bool,
 }
 
