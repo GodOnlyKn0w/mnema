@@ -561,6 +561,83 @@ mod tests {
     }
 
     #[test]
+    fn audit_reports_ref_target_advanced_position_fact() {
+        use crate::event::{Event, make_log_appended_entry, make_strand_created};
+        let (basis_created, basis_first) = make_strand_created("basis line", None);
+        let basis_id = match &basis_created {
+            Event::StrandCreated { id, .. } => id.clone(),
+            _ => unreachable!(),
+        };
+        let basis_first_hash = match &basis_first {
+            Event::LogAppended { entry_id, .. } => entry_id.clone().unwrap(),
+            _ => unreachable!(),
+        };
+        let (consumer_created, consumer_first) = make_strand_created("consumer line", None);
+        let consumer_id = match &consumer_created {
+            Event::StrandCreated { id, .. } => id.clone(),
+            _ => unreachable!(),
+        };
+        let consumer_first_hash = match &consumer_first {
+            Event::LogAppended { entry_id, .. } => entry_id.clone().unwrap(),
+            _ => unreachable!(),
+        };
+        let citing = make_log_appended_entry(
+            &consumer_id,
+            Some(&consumer_first_hash),
+            "[decision] built on the basis entry",
+            vec![basis_first_hash.clone()],
+            None,
+            None,
+        );
+        let basis_update = make_log_appended_entry(
+            &basis_id,
+            Some(&basis_first_hash),
+            "basis moved on",
+            Vec::new(),
+            None,
+            None,
+        );
+
+        // Cited line has nothing after the citation: no fact to report.
+        let quiet = vec![
+            basis_created.clone(),
+            basis_first.clone(),
+            consumer_created.clone(),
+            consumer_first.clone(),
+            citing.clone(),
+        ];
+        let audit = audit_journal(&quiet, chrono::Utc::now());
+        let section = audit
+            .lint_sections
+            .iter()
+            .find(|s| s.name == "ref-target-advanced")
+            .expect("ref-target-advanced section");
+        assert_eq!(section.count(), 0);
+
+        // Cited line gains an entry after the citation: position fact reported.
+        let advanced = vec![
+            basis_created,
+            basis_first,
+            consumer_created,
+            consumer_first,
+            citing,
+            basis_update,
+        ];
+        let audit = audit_journal(&advanced, chrono::Utc::now());
+        let section = audit
+            .lint_sections
+            .iter()
+            .find(|s| s.name == "ref-target-advanced")
+            .unwrap();
+        assert_eq!(section.count(), 1);
+        assert!(section.findings[0].contains("ref-target-advanced"));
+        assert!(
+            section.findings[0].contains("may warrant review"),
+            "fact is reported, judgment stays with the reader"
+        );
+    }
+
+    #[test]
     fn test_lookup_known_code() {
         let info = lookup("W068").expect("W068 should be known");
         assert_eq!(info.code, "W068");

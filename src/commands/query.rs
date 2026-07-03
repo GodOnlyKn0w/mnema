@@ -681,11 +681,25 @@ pub(crate) fn cmd_show(
     let shown = slice.len();
 
     println!("log:");
+    let entry_index = projection::EntryIndex::build(&strands);
     for entry in slice {
         // v2 refs render as short handles; the legacy ref_ pin only shows
-        // when no hash refs exist (dual-track fallback).
+        // when no hash refs exist (dual-track fallback). A cited entry whose
+        // line gained later entries is annotated in place (ref-target-advanced
+        // is a position fact; whether it overturns anything is the reader's
+        // call — run the catch-up on the cited line to re-look).
         let ref_str = if !entry.refs.is_empty() {
-            let handles: Vec<String> = entry.refs.iter().map(|h| shorten(h)).collect();
+            let handles: Vec<String> = entry
+                .refs
+                .iter()
+                .map(|h| {
+                    let mut handle = shorten(h);
+                    if entry_index.advanced_past(h, entry.offset) == Some(true) {
+                        handle.push_str(" (advanced)");
+                    }
+                    handle
+                })
+                .collect();
             format!(" [refs: {}]", handles.join(", "))
         } else {
             entry

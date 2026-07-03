@@ -783,6 +783,40 @@ pub(crate) fn find_entry<'a>(strands: &'a [ProjectedStrand], prefix: &str) -> En
     }
 }
 
+/// Index from effective entry hash to its home strand and offset. Shared by
+/// the read paths that resolve refs (show annotations, audit
+/// ref-target-advanced) so the position logic has a single owner.
+pub(crate) struct EntryIndex<'a> {
+    by_hash: std::collections::HashMap<&'a str, (&'a ProjectedStrand, usize)>,
+}
+
+impl<'a> EntryIndex<'a> {
+    pub(crate) fn build(strands: &'a [ProjectedStrand]) -> Self {
+        let mut by_hash = std::collections::HashMap::new();
+        for strand in strands {
+            for entry in &strand.log {
+                if let Some(hash) = entry.entry_id.as_deref() {
+                    by_hash.insert(hash, (strand, entry.offset));
+                }
+            }
+        }
+        Self { by_hash }
+    }
+
+    /// The position fact behind ref-target-advanced: did the cited entry's
+    /// line gain entries after the citation was written? Journal offsets are
+    /// globally monotonic, so "the line moved past the citation point" is
+    /// exactly `target.last_offset() > citing_offset` — no stored pin needed,
+    /// and self-referencing entries resolve consistently. Returns `None`
+    /// when the hash does not resolve locally (cross-journal or dangling):
+    /// the machine asserts nothing it cannot verify.
+    pub(crate) fn advanced_past(&self, cited_hash: &str, citing_offset: usize) -> Option<bool> {
+        self.by_hash
+            .get(cited_hash)
+            .map(|(strand, _)| strand.last_offset() > citing_offset)
+    }
+}
+
 // ── Entry point: project_raw → structured ──────────────────
 
 /// Project raw event stream into a Vec<ProjectedStrand>.

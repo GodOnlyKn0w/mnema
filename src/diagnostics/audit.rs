@@ -302,6 +302,31 @@ pub fn audit_journal(
         findings: stale_why,
     });
 
+    // v2 hash refs: position fact only — the cited entry's line gained
+    // entries after the citation. Whether that overturns the citing
+    // conclusion is the reader's judgment, not ours.
+    let entry_index = crate::projection::EntryIndex::build(&strands);
+    let mut ref_advanced = Vec::new();
+    for s in &strands {
+        for entry in &s.log {
+            for cited in &entry.refs {
+                if entry_index.advanced_past(cited, entry.offset) == Some(true) {
+                    ref_advanced.push(format!(
+                        "ref-target-advanced: strand {} entry @{} cites {} whose line gained later entries - may warrant review",
+                        crate::util::shorten(&s.id),
+                        entry.offset,
+                        crate::util::shorten(cited)
+                    ));
+                }
+            }
+        }
+    }
+    sections.push(LintSection {
+        name: "ref-target-advanced",
+        summary_label: "cited entries whose line advanced",
+        findings: ref_advanced,
+    });
+
     JournalAudit {
         lint_sections: sections,
         diagnostics: run_journal_diagnostics(events, now)
