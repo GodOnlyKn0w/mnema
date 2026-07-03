@@ -6,11 +6,11 @@ fn show_json_exposes_per_entry_provenance() {
     let id = create_strand("provenance projection test");
     cmd_append(
         Some("[observed] tagged"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         Some(r#"{"producer":"codex"}"#),
     )
@@ -91,11 +91,11 @@ fn show_search_context_unchanged() {
     let id = create_strand("show me");
     cmd_append(
         Some("entry"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
@@ -119,11 +119,11 @@ fn orient_strand_fields_match_projected_strand() {
     let id = create_strand("summary text for the card");
     cmd_append(
         Some("second entry"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
@@ -161,8 +161,9 @@ fn orient_strand_truncates_prose_to_70() {
         card.summary.len() <= 73,
         "summary must be truncated to 70 chars + ..."
     );
-    // id is never truncated: always shorten(full_id) = 12 chars
-    assert_eq!(card.id.len(), 24);
+    // id is never truncated: v2 strand id is the first entry hash.
+    assert_eq!(card.id, id);
+    assert_eq!(card.id.len(), 64);
 }
 
 #[test]
@@ -190,11 +191,11 @@ fn append_explicit_id_card_fresh_has_new_entry() {
     let id = create_strand("target");
     cmd_append(
         Some("[lesson] learned something"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
@@ -271,7 +272,7 @@ fn strand_card_fresh_finds_hidden_strand() {
 // handles_* — 把手完整性测试族
 //
 // 规则：把手（strand id、现成命令、journal offset）永不截断。
-//   - id 在卡片/orient 用 shorten(id) = 12位十六进制前缀（合法前缀匹配）
+//   - id 在卡片/orient/list/show/search JSON 中都是完整 64 位十六进制 hash
 //   - id 在 list/show/search JSON 用完整 id
 //   - 两种形式都是合法参数；"…" 绝不出现在把手字段中
 //   - 散文字段（summary/last_entry/content）允许 truncate(70) + "…"
@@ -299,12 +300,10 @@ fn handles_card_id_is_legal_prefix() {
         .expect("strand must exist");
     let card = output::OrientStrand::from(s);
 
-    // id: exactly 12 hex chars, is prefix of full id, contains no '…'
-    assert_eq!(card.id.len(), 24, "card.id must be the full 24-hex id");
-    assert!(
-        id.starts_with(&card.id),
-        "card.id must be a prefix of the full id"
-    );
+    // id: full 64-hex hash, contains no '…'
+    assert_eq!(card.id, id, "card.id must be the full strand id");
+    assert_eq!(card.id.len(), 64, "card.id must be the full 64-hex hash");
+    assert!(card.id == id, "card.id must equal the full id");
     assert!(
         !card.id.contains('\u{2026}') && !card.id.contains("..."),
         "card.id must not contain truncation marker"
@@ -333,7 +332,7 @@ fn handles_card_id_is_legal_prefix() {
 // ── Test 2 ────────────────────────────────────────────────────────────
 
 // orient output with long-summary strands: each OrientStrand in active[]
-//   - id is 12 chars, prefix of full id, no '…'
+//   - id is the full 64-char hash, no '…'
 //   - catch_up has no '…', parses, and contains card.id (link points to self)
 //   - last_offset is the real offset
 
@@ -358,15 +357,15 @@ fn handles_orient_text_complete() {
     );
 
     for card in &out.active {
-        // id: full 24-hex width (joins against show/list JSON)
+        // id: full 64-hex width (joins against show/list JSON)
         assert_eq!(
             card.id.len(),
-            24,
-            "orient card.id must be the full 24-hex id, got '{}'",
+            64,
+            "orient card.id must be the full 64-hex hash, got '{}'",
             card.id
         );
-        // Verify it is a legal prefix: find the projected strand by prefix
-        let matched = strands.iter().find(|s| s.id.starts_with(&card.id));
+        // Verify it joins directly to the projected strand
+        let matched = strands.iter().find(|s| s.id == card.id);
         assert!(
             matched.is_some(),
             "orient card.id '{}' must match a strand by prefix",
@@ -417,11 +416,11 @@ fn handles_list_search_ids_intact() {
     let long_content = "unique_search_token_xyz ".to_string() + &"w".repeat(80);
     cmd_append(
         Some(&long_content),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
@@ -430,7 +429,7 @@ fn handles_list_search_ids_intact() {
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
 
-    // list JSON: StrandListItem.id must be the full 32-char id
+    // list JSON: StrandListItem.id must be the full id
     let strands = projection::project_strands(&events, true);
     let list_items: Vec<output::StrandListItem> =
         strands.iter().map(output::StrandListItem::from).collect();
@@ -444,7 +443,7 @@ fn handles_list_search_ids_intact() {
         !item.id.contains('\u{2026}') && !item.id.contains("..."),
         "StrandListItem.id must not contain truncation marker"
     );
-    // id must be at least 12 chars (typical timeid is 24 hex chars)
+    // id must be at least 12 chars (v2 ids are 64 hex chars)
     assert!(
         item.id.len() >= 12,
         "StrandListItem.id length must be at least 12, got {}",
@@ -459,7 +458,7 @@ fn handles_list_search_ids_intact() {
     for (_, event) in &events {
         if let Event::LogAppended { content, .. } = event {
             if content.to_lowercase().contains(&q) {
-                let strand_id_full = event.strand_id().to_string();
+                let strand_id_full = event.strand_id().expect("strand-scoped event").to_string();
                 if strand_map.contains_key(strand_id_full.as_str()) {
                     let projected = strand_map.get(strand_id_full.as_str());
                     search_matches.push(output::SearchMatch {
@@ -616,11 +615,11 @@ fn handles_truncate_never_applied_to_ids() {
     let searchable = "unique_audit_token_abc123 ".to_string() + &"z".repeat(80);
     cmd_append(
         Some(&searchable),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
@@ -650,7 +649,7 @@ fn handles_truncate_never_applied_to_ids() {
         "list JSON: id must not contain truncation marker"
     );
 
-    // orient --format json (orient output): full 24-hex id (joins across outputs)
+    // orient --format json (orient output): full 64-hex id (joins across outputs)
     let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
     let out = orient_output(&strands, false, 10, max_offset);
     let orient_card = out
@@ -660,8 +659,8 @@ fn handles_truncate_never_applied_to_ids() {
         .expect("orient must contain our strand");
     assert_eq!(
         orient_card.id.len(),
-        24,
-        "orient JSON: id must be the full 24-hex id"
+        64,
+        "orient JSON: id must be the full 64-hex hash"
     );
     assert!(
         !orient_card.id.contains('\u{2026}') && !orient_card.id.contains("..."),
@@ -676,7 +675,7 @@ fn handles_truncate_never_applied_to_ids() {
     for (_, event) in &events {
         if let Event::LogAppended { content, .. } = event {
             if content.to_lowercase().contains(&q) {
-                let strand_id_full = event.strand_id().to_string();
+                let strand_id_full = event.strand_id().expect("strand-scoped event").to_string();
                 if strand_map.contains_key(strand_id_full.as_str()) {
                     let projected = strand_map.get(strand_id_full.as_str());
                     if strand_id_full == id {
@@ -721,22 +720,22 @@ fn handles_checkpoint_handle_fields() {
     let id_b = create_strand("another strand to create journal delta");
     cmd_append(
         Some("delta entry one"),
+        None,
+        false,
+        false,
+        None,
         Some(&id_b),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
     .unwrap();
     cmd_append(
         Some("delta entry two"),
+        None,
+        false,
+        false,
+        None,
         Some(&id_b),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
@@ -926,22 +925,22 @@ fn show_digest_returns_ok_without_dumping_log() {
     let id = create_strand("digest target");
     cmd_append(
         Some("[decision] one"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
     .unwrap();
     cmd_append(
         Some("[friction] two"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )

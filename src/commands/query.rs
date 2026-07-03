@@ -1,4 +1,4 @@
-use crate::event::{find_strand, Event};
+use crate::event::{Event, find_strand};
 use crate::graph;
 /// Query-command family: cmd_list, cmd_show, cmd_search, cmd_timeline,
 /// cmd_orient, cmd_agent_context, cmd_tree (+ print_tree_text helper).
@@ -17,7 +17,10 @@ use crate::util::{parse_duration, shorten, truncate};
 use std::time::Instant;
 
 fn corrupted_lines_error(skipped: usize) -> String {
-    format!("corrupt: [tasktree] WARNING: {} corrupted lines skipped", skipped)
+    format!(
+        "corrupt: [tasktree] WARNING: {} corrupted lines skipped",
+        skipped
+    )
 }
 
 pub(crate) struct ListRequest<'a> {
@@ -173,7 +176,7 @@ pub(crate) fn search_events(events: &[(usize, Event)], req: &SearchRequest<'_>) 
     for (_, event) in events {
         if let Event::LogAppended { content, .. } = event {
             if content.to_lowercase().contains(&q) {
-                let strand_id = event.strand_id().to_string();
+                let strand_id = event.strand_id().expect("strand-scoped event").to_string();
                 if !strand_map.contains_key(strand_id.as_str()) {
                     continue;
                 }
@@ -279,15 +282,13 @@ pub(crate) fn cmd_timeline(
     if let Some(lid) = links {
         let full_id =
             find_strand(&events, lid).ok_or_else(|| format!("strand {} not found", lid))?;
-        // Collect linked strand IDs
+        // Collect currently linked strand IDs from the projection so v2 effect
+        // entries and unlink folds use the same semantics as list/tree/orient.
         let mut linked_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         linked_ids.insert(full_id.clone());
-        for (_, event) in &events {
-            if let Event::EdgeLinked { id, to, .. } = event {
-                if *id == full_id {
-                    linked_ids.insert(to.clone());
-                }
-            }
+        let strands = projection::project_strands(&events, true);
+        if let Some(source) = strands.iter().find(|s| s.id == full_id) {
+            linked_ids.extend(source.edges.iter().cloned());
         }
         entries.retain(|e| linked_ids.contains(&e.strand_id));
     }

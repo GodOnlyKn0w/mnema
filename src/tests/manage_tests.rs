@@ -246,7 +246,7 @@ fn link_json_returns_source_target_edge_type() {
 
 #[test]
 fn link_json_default_edge_type_is_depends_on() {
-    // Verify the EdgeLinked event carries the default edge_type when none given.
+    // Verify the link effect carries the default edge_type when none given.
     let _env = setup();
     let src = create_strand("link edge type source");
     let tgt = create_strand("link edge type target");
@@ -254,22 +254,27 @@ fn link_json_default_edge_type_is_depends_on() {
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let found = events.iter().any(|(_, e)| {
-        if let Event::EdgeLinked { id, edge_type, .. } = e {
-            id == &src && edge_type.as_deref() == Some("depends-on")
+        if let Event::LogAppended {
+            id,
+            effect: Some(event::EntryEffect::Link { edge_type, .. }),
+            ..
+        } = e
+        {
+            id == &src && edge_type == "depends-on"
         } else {
             false
         }
     });
     assert!(
         found,
-        "EdgeLinked must carry edge_type=depends-on by default"
+        "link effect must carry edge_type=depends-on by default"
     );
 }
 
 // ── ② provenance: link --provenance ──────────────────────────────────
 
 #[test]
-fn link_provenance_stored_on_edge_linked_event() {
+fn link_provenance_stored_on_link_effect_entry() {
     let _env = setup();
     let src = create_strand("prov link source");
     let tgt = create_strand("prov link target");
@@ -284,7 +289,13 @@ fn link_provenance_stored_on_edge_linked_event() {
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let found = events.iter().any(|(_, e)| {
-        if let Event::EdgeLinked { id, provenance, .. } = e {
+        if let Event::LogAppended {
+            id,
+            effect: Some(event::EntryEffect::Link { .. }),
+            provenance,
+            ..
+        } = e
+        {
             id == &src && provenance.is_some()
         } else {
             false
@@ -292,7 +303,7 @@ fn link_provenance_stored_on_edge_linked_event() {
     });
     assert!(
         found,
-        "EdgeLinked must carry provenance when --provenance given"
+        "link effect entry must carry provenance when --provenance given"
     );
 }
 
@@ -305,13 +316,22 @@ fn link_without_provenance_has_none() {
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let found = events.iter().any(|(_, e)| {
-        if let Event::EdgeLinked { id, provenance, .. } = e {
+        if let Event::LogAppended {
+            id,
+            effect: Some(event::EntryEffect::Link { .. }),
+            provenance,
+            ..
+        } = e
+        {
             id == &src && provenance.is_none()
         } else {
             false
         }
     });
-    assert!(found, "EdgeLinked must have provenance=None when not given");
+    assert!(
+        found,
+        "link effect entry must have provenance=None when not given"
+    );
 }
 
 // Old EdgeLinked JSON without provenance field must still deserialize.
@@ -389,13 +409,21 @@ fn link_edge_type_custom_is_stored() {
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let found = events.iter().any(|(_, e)| {
-        if let Event::EdgeLinked { id, edge_type, .. } = e {
-            id == &src && edge_type.as_deref() == Some("belongs-to")
+        if let Event::LogAppended {
+            id,
+            effect: Some(event::EntryEffect::Link { edge_type, .. }),
+            ..
+        } = e
+        {
+            id == &src && edge_type == "belongs-to"
         } else {
             false
         }
     });
-    assert!(found, "custom edge_type must be stored on EdgeLinked event");
+    assert!(
+        found,
+        "custom edge_type must be stored on link effect entry"
+    );
 }
 
 // ── ④ add --stdin / --file ────────────────────────────────────────────
@@ -587,3 +615,346 @@ fn w074_silent_on_non_closing_markers() {
 }
 
 // orient / remind must NOT contain the old "append [done]" pattern.
+
+#[test]
+fn v2_link_and_unlink_write_effect_entries_and_fold_projection() {
+    let _env = setup();
+    let src = create_strand("v2 link source");
+    let tgt = create_strand("v2 link target");
+    let path = ensure_journal().unwrap();
+    let (before_events, _) = read_events_lossy(&path);
+    let first_entry_id = projection::project_strands(&before_events, true)
+        .iter()
+        .find(|s| s.id == src)
+        .and_then(|s| s.log.last())
+        .and_then(|entry| entry.entry_id.clone())
+        .expect("source entry hash exists");
+
+    cmd_link(&src, &tgt, Some("depends-on"), false, None).unwrap();
+    let (linked_events, _) = read_events_lossy(&path);
+    let link_prev = linked_events
+        .iter()
+        .filter_map(|(_, event)| {
+            if let Event::LogAppended {
+                id,
+                effect: Some(event::EntryEffect::Link { target, edge_type }),
+                prev_entry_id,
+                ..
+            } = event
+            {
+                if id == &src && target == &tgt && edge_type == "depends-on" {
+                    return prev_entry_id.clone();
+                }
+            }
+            None
+        })
+        .next()
+        .expect("link effect entry exists");
+    assert_eq!(link_prev, first_entry_id);
+    let linked_strands = projection::project_strands(&linked_events, true);
+    let linked_src = linked_strands.iter().find(|s| s.id == src).unwrap();
+    assert_eq!(linked_src.depends_on_edges, vec![tgt.clone()]);
+    let link_entry_id = linked_src
+        .log
+        .last()
+        .and_then(|entry| entry.entry_id.clone())
+        .expect("link entry hash exists");
+
+    cmd_unlink(&src, &tgt, Some("depends-on"), false, None).unwrap();
+    let (unlinked_events, _) = read_events_lossy(&path);
+    let unlink_prev = unlinked_events
+        .iter()
+        .filter_map(|(_, event)| {
+            if let Event::LogAppended {
+                id,
+                effect: Some(event::EntryEffect::Unlink { target, edge_type }),
+                prev_entry_id,
+                ..
+            } = event
+            {
+                if id == &src && target == &tgt && edge_type == "depends-on" {
+                    return prev_entry_id.clone();
+                }
+            }
+            None
+        })
+        .next()
+        .expect("unlink effect entry exists");
+    assert_eq!(unlink_prev, link_entry_id);
+    let unlinked_strands = projection::project_strands(&unlinked_events, true);
+    let unlinked_src = unlinked_strands.iter().find(|s| s.id == src).unwrap();
+    assert!(unlinked_src.depends_on_edges.is_empty());
+}
+
+#[test]
+fn v2_hide_and_unhide_write_effect_entries_and_fold_projection() {
+    let _env = setup();
+    let id = create_strand("v2 hide target");
+    let path = ensure_journal().unwrap();
+    let (before_events, _) = read_events_lossy(&path);
+    let first_entry_id = projection::project_strands(&before_events, true)
+        .iter()
+        .find(|s| s.id == id)
+        .and_then(|s| s.log.last())
+        .and_then(|entry| entry.entry_id.clone())
+        .expect("first entry hash exists");
+
+    cmd_hide(
+        &id,
+        Some("parked while waiting"),
+        false,
+        Some(r#"{"producer":"tester"}"#),
+    )
+    .unwrap();
+    let (hidden_events, _) = read_events_lossy(&path);
+    let hide_prev = hidden_events
+        .iter()
+        .filter_map(|(_, event)| {
+            if let Event::LogAppended {
+                id: event_id,
+                content,
+                effect: Some(event::EntryEffect::Hide),
+                prev_entry_id,
+                provenance,
+                ..
+            } = event
+            {
+                if event_id == &id
+                    && content.starts_with("[hidden] parked while waiting")
+                    && provenance.is_some()
+                {
+                    return prev_entry_id.clone();
+                }
+            }
+            None
+        })
+        .next()
+        .expect("hide effect entry exists");
+    assert_eq!(hide_prev, first_entry_id);
+    let hidden_strands = projection::project_strands(&hidden_events, true);
+    let hidden = hidden_strands.iter().find(|s| s.id == id).unwrap();
+    assert!(hidden.hidden);
+    let hide_entry_id = hidden
+        .log
+        .last()
+        .and_then(|entry| entry.entry_id.clone())
+        .expect("hide entry hash exists");
+
+    cmd_unhide(&id, false).unwrap();
+    let (visible_events, _) = read_events_lossy(&path);
+    let unhide_prev = visible_events
+        .iter()
+        .filter_map(|(_, event)| {
+            if let Event::LogAppended {
+                id: event_id,
+                effect: Some(event::EntryEffect::Unhide),
+                prev_entry_id,
+                ..
+            } = event
+            {
+                if event_id == &id {
+                    return prev_entry_id.clone();
+                }
+            }
+            None
+        })
+        .next()
+        .expect("unhide effect entry exists");
+    assert_eq!(unhide_prev, hide_entry_id);
+    let visible_strands = projection::project_strands(&visible_events, true);
+    let visible = visible_strands.iter().find(|s| s.id == id).unwrap();
+    assert!(!visible.hidden);
+}
+
+fn write_legacy_journal(events: &[Event]) {
+    let path = ensure_journal().unwrap();
+    let mut lines = Vec::new();
+    for event in events {
+        lines.push(serde_json::to_string(event).unwrap());
+    }
+    fs::write(path, lines.join("\n") + "\n").unwrap();
+}
+
+#[test]
+fn cutover_v2_dry_run_does_not_rewrite_journal() {
+    let env = setup();
+    let old_id = "0000019dd34b000000000000";
+    let events = vec![
+        Event::StrandCreated {
+            id: old_id.to_string(),
+            ts: "2026-01-01T00:00:00Z".to_string(),
+            strand_type: Some("task".to_string()),
+        },
+        Event::LogAppended {
+            id: old_id.to_string(),
+            ts: "2026-01-01T00:00:01Z".to_string(),
+            content: "legacy root".to_string(),
+            effect: None,
+            prev_entry_id: None,
+            entry_id: None,
+            refs: Vec::new(),
+            ref_: None,
+            append_id: None,
+            git: None,
+            provenance: None,
+        },
+    ];
+    write_legacy_journal(&events);
+    let journal = ensure_journal().unwrap();
+    let before = fs::read_to_string(&journal).unwrap();
+
+    cmd_cutover_v2(false, None, None, true).unwrap();
+
+    assert_eq!(fs::read_to_string(&journal).unwrap(), before);
+    assert!(
+        !env.path()
+            .join(".tasktree")
+            .join("journal.v1.jsonl")
+            .exists()
+    );
+    assert!(
+        !env.path()
+            .join(".tasktree")
+            .join("migration-v1-to-v2.json")
+            .exists()
+    );
+}
+
+#[test]
+fn cutover_v2_apply_archives_v1_and_imports_pure_v2_journal() {
+    let env = setup();
+    let parent = "0000019dd34b000000000000";
+    let child = "0000019dd34c000000000000";
+    let events = vec![
+        Event::StrandCreated {
+            id: parent.to_string(),
+            ts: "2026-01-01T00:00:00Z".to_string(),
+            strand_type: Some("task".to_string()),
+        },
+        Event::LogAppended {
+            id: parent.to_string(),
+            ts: "2026-01-01T00:00:01Z".to_string(),
+            content: "legacy parent".to_string(),
+            effect: None,
+            prev_entry_id: None,
+            entry_id: None,
+            refs: Vec::new(),
+            ref_: None,
+            append_id: None,
+            git: None,
+            provenance: None,
+        },
+        Event::StrandCreated {
+            id: child.to_string(),
+            ts: "2026-01-01T00:00:02Z".to_string(),
+            strand_type: Some("task".to_string()),
+        },
+        Event::LogAppended {
+            id: child.to_string(),
+            ts: "2026-01-01T00:00:03Z".to_string(),
+            content: "legacy child".to_string(),
+            effect: None,
+            prev_entry_id: None,
+            entry_id: None,
+            refs: Vec::new(),
+            ref_: None,
+            append_id: None,
+            git: None,
+            provenance: None,
+        },
+        Event::EdgeLinked {
+            id: child.to_string(),
+            ts: "2026-01-01T00:00:04Z".to_string(),
+            to: parent.to_string(),
+            edge_type: Some("belongs-to".to_string()),
+            provenance: None,
+        },
+        Event::StrandClosed {
+            id: child.to_string(),
+            ts: "2026-01-01T00:00:05Z".to_string(),
+            disposition: "done".to_string(),
+            provenance: None,
+        },
+    ];
+    write_legacy_journal(&events);
+
+    cmd_cutover_v2(true, None, None, false).unwrap();
+
+    let tasktree_dir = env.path().join(".tasktree");
+    assert!(tasktree_dir.join("journal.v1.jsonl").exists());
+    assert!(tasktree_dir.join("migration-v1-to-v2.json").exists());
+
+    let read = read_journal_lossy(&ensure_journal().unwrap());
+    assert!(read.diagnostics.is_empty());
+    let imported: Vec<Event> = read.events.iter().map(|(_, event)| event.clone()).collect();
+    assert!(
+        imported
+            .iter()
+            .any(|event| matches!(event, Event::JournalAnchored { .. }))
+    );
+    assert!(!imported.iter().any(|event| matches!(
+        event,
+        Event::EdgeLinked { .. }
+            | Event::EdgeUnlinked { .. }
+            | Event::StrandClosed { .. }
+            | Event::StrandReopened { .. }
+            | Event::StrandHidden { .. }
+            | Event::StrandUnhidden { .. }
+            | Event::CheckpointCreated { .. }
+    )));
+
+    let created: Vec<String> = imported
+        .iter()
+        .filter_map(|event| {
+            if let Event::StrandCreated { id, .. } = event {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(created.len(), 2);
+    assert!(created.iter().all(|id| id.len() == 64));
+    assert!(created.iter().all(|id| id != parent && id != child));
+
+    let effect_entries: Vec<&event::EntryEffect> = imported
+        .iter()
+        .filter_map(|event| {
+            if let Event::LogAppended {
+                effect: Some(effect),
+                ..
+            } = event
+            {
+                Some(effect)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(effect_entries.iter().any(|effect| matches!(
+        effect,
+        event::EntryEffect::Link { edge_type, .. } if edge_type == "belongs-to"
+    )));
+    assert!(effect_entries.iter().any(|effect| matches!(
+        effect,
+        event::EntryEffect::Close { disposition } if disposition == "done"
+    )));
+    assert!(imported.iter().all(|event| {
+        if let Event::LogAppended { entry_id, ref_, .. } = event {
+            entry_id.as_ref().map_or(false, |id| id.len() == 64) && ref_.is_none()
+        } else {
+            true
+        }
+    }));
+
+    let report = diagnostics::build_doctor_journal_report(
+        &imported,
+        read.events.len(),
+        read.skipped(),
+        0,
+        0,
+        diagnostics::DoctorPreviousState::FirstRun,
+        chrono::Utc::now(),
+    );
+    assert!(!report.integrity.has_errors(), "{:?}", report.integrity);
+}

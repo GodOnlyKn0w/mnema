@@ -140,6 +140,24 @@ fn render_doctor_report(path: &std::path::Path, report: &diagnostics::DoctorJour
     println!();
     println!("  timeline:");
     println!("    {}", report.timeline_status);
+    println!();
+    println!("  integrity:");
+    println!("    anchors: {}", report.integrity.anchor_count);
+    println!(
+        "    unanchored tail events: {}",
+        report.integrity.unanchored_event_count
+    );
+    println!("    chain errors: {}", report.integrity.chain_errors.len());
+    println!(
+        "    anchor errors: {}",
+        report.integrity.anchor_errors.len()
+    );
+    for finding in &report.integrity.chain_errors {
+        eprintln!("[integrity] {}", finding);
+    }
+    for finding in &report.integrity.anchor_errors {
+        eprintln!("[integrity] {}", finding);
+    }
     if !report.orphans.is_empty() {
         println!();
         println!("  orphans:");

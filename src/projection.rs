@@ -1,7 +1,7 @@
 //! Tasktree journal projection layer.
 //! Projects raw event streams into structured strand and timeline views.
 
-use crate::event::Event;
+use crate::event::{EntryEffect, Event};
 use std::collections::HashSet;
 
 /// Collapse repeated values, keeping the first occurrence of each (order
@@ -24,6 +24,10 @@ pub struct LogEntry {
     pub offset: usize,
     pub ts: String,
     pub content: String,
+    pub effect: Option<EntryEffect>,
+    pub prev_entry_id: Option<String>,
+    pub entry_id: Option<String>,
+    pub refs: Vec<String>,
     pub ref_: Option<String>,
     pub append_id: Option<String>,
     pub provenance: Option<serde_json::Value>,
@@ -56,6 +60,7 @@ pub enum TimelineEventKind {
     LogAppended {
         content: String,
         append_id: Option<String>,
+        effect: Option<EntryEffect>,
     },
     EdgeLinked {
         target_id: String,
@@ -85,7 +90,7 @@ pub enum TimelineEventKind {
 
 /// Legacy content-based state markers — kept for display/annotation purposes
 /// only. These no longer affect compute_state; lifecycle state is set
-/// exclusively by StrandClosed / StrandReopened events.
+/// by legacy StrandClosed / StrandReopened events and v2 close/reopen effects.
 pub const STATE_MARKERS: &[&str] = &[
     "[merged]",
     "[cancelled]",
@@ -99,8 +104,76 @@ pub const STATE_MARKERS: &[&str] = &[
 /// Valid close dispositions accepted by `tasktree close --as <DISPOSITION>`.
 pub const CLOSE_DISPOSITIONS: &[&str] = &["done", "failed", "cancelled", "merged", "verified"];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EdgeDelta {
+    pub(crate) target: String,
+    pub(crate) edge_type: Option<String>,
+    pub(crate) linked: bool,
+}
+
+pub(crate) fn lifecycle_effect(event: &Event) -> Option<EntryEffect> {
+    match event {
+        Event::StrandClosed { disposition, .. } => Some(EntryEffect::Close {
+            disposition: disposition.clone(),
+        }),
+        Event::StrandReopened { .. } => Some(EntryEffect::Reopen),
+        Event::LogAppended {
+            effect: Some(effect @ (EntryEffect::Close { .. } | EntryEffect::Reopen)),
+            ..
+        } => Some(effect.clone()),
+        _ => None,
+    }
+}
+
+pub(crate) fn visibility_delta(event: &Event) -> Option<i32> {
+    match event {
+        Event::StrandHidden { .. }
+        | Event::LogAppended {
+            effect: Some(EntryEffect::Hide),
+            ..
+        } => Some(1),
+        Event::StrandUnhidden { .. }
+        | Event::LogAppended {
+            effect: Some(EntryEffect::Unhide),
+            ..
+        } => Some(-1),
+        _ => None,
+    }
+}
+
+pub(crate) fn edge_delta(event: &Event) -> Option<EdgeDelta> {
+    match event {
+        Event::EdgeLinked { to, edge_type, .. } => Some(EdgeDelta {
+            target: to.clone(),
+            edge_type: edge_type.clone(),
+            linked: true,
+        }),
+        Event::EdgeUnlinked { to, edge_type, .. } => Some(EdgeDelta {
+            target: to.clone(),
+            edge_type: edge_type.clone(),
+            linked: false,
+        }),
+        Event::LogAppended {
+            effect: Some(EntryEffect::Link { target, edge_type }),
+            ..
+        } => Some(EdgeDelta {
+            target: target.clone(),
+            edge_type: Some(edge_type.clone()),
+            linked: true,
+        }),
+        Event::LogAppended {
+            effect: Some(EntryEffect::Unlink { target, edge_type }),
+            ..
+        } => Some(EdgeDelta {
+            target: target.clone(),
+            edge_type: Some(edge_type.clone()),
+            linked: false,
+        }),
+        _ => None,
+    }
+}
 /// Compute canonical lifecycle state from raw events (not log content).
-/// Only StrandClosed and StrandReopened events affect state;
+/// Only legacy StrandClosed/StrandReopened events and v2 close/reopen effects affect state;
 /// the last such event wins. No events → "registered" (open).
 ///
 /// Returns (state_str, disposition_or_empty, deciding_offset).
@@ -111,30 +184,23 @@ pub fn compute_state_from_events(
     raw_events: &[(usize, crate::event::Event)],
     strand_id: &str,
 ) -> (String, String, usize) {
-    use crate::event::Event;
-    let mut last: Option<(usize, &Event)> = None;
+    let mut last: Option<(usize, EntryEffect)> = None;
     for (offset, event) in raw_events {
-        if event.strand_id() != strand_id {
+        if event.strand_id() != Some(strand_id) {
             continue;
         }
-        match event {
-            Event::StrandClosed { .. } | Event::StrandReopened { .. } => {
-                last = Some((*offset, event));
-            }
-            _ => {}
+        if let Some(effect) = lifecycle_effect(event) {
+            last = Some((*offset, effect));
         }
     }
     match last {
-        Some((offset, Event::StrandClosed { disposition, .. })) => (
-            format!("closed:{}", disposition),
-            disposition.clone(),
-            offset,
-        ),
-        Some((_, Event::StrandReopened { .. })) => ("registered".to_string(), String::new(), 0),
+        Some((offset, EntryEffect::Close { disposition })) => {
+            (format!("closed:{}", disposition), disposition, offset)
+        }
+        Some((_, EntryEffect::Reopen)) => ("registered".to_string(), String::new(), 0),
         _ => ("registered".to_string(), String::new(), 0),
     }
 }
-
 /// Compute canonical state from log entries (legacy stub — used only for
 /// test compatibility during the transition. Prefer compute_state_from_events
 /// when the event stream is available).
@@ -622,17 +688,15 @@ pub(crate) fn project_visibility_ledger(strands: &[ProjectedStrand]) -> Visibili
     }
 }
 
-/// Balance of StrandHidden minus StrandUnhidden events for one strand.
+/// Balance of legacy visibility events and v2 hide/unhide effects for one strand.
 pub(crate) fn hide_balance(events: &[(usize, Event)], strand_id: &str) -> i32 {
     let mut count: i32 = 0;
     for (_, event) in events {
-        if event.strand_id() != strand_id {
+        if event.strand_id() != Some(strand_id) {
             continue;
         }
-        match event {
-            Event::StrandHidden { .. } => count += 1,
-            Event::StrandUnhidden { .. } => count -= 1,
-            _ => {}
+        if let Some(delta) = visibility_delta(event) {
+            count += delta;
         }
     }
     count
@@ -680,8 +744,8 @@ pub(crate) fn current_binding(
 // ── Entry point: project_raw → structured ──────────────────
 
 /// Project raw event stream into a Vec<ProjectedStrand>.
-/// Each strand is aggregated from all its events (created, log entries, edges, hide toggles).
-/// Hidden state is derived from StrandHidden/StrandUnhidden balance, not a stored flag.
+/// Each strand is aggregated from all its events (created, log entries, edges, visibility toggles).
+/// Hidden state is derived from legacy StrandHidden/StrandUnhidden rows and v2 hide/unhide effects.
 ///
 /// When `include_hidden` is false, strands with `hidden == true` are filtered out of
 /// the returned vector. Callers that need to inspect a known hidden strand explicitly
@@ -690,8 +754,11 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
     use std::collections::BTreeMap;
     let mut by_id: BTreeMap<String, Vec<(usize, &Event)>> = BTreeMap::new();
     for (offset, event) in events {
+        let Some(strand_id) = event.strand_id() else {
+            continue;
+        };
         by_id
-            .entry(event.strand_id().to_string())
+            .entry(strand_id.to_string())
             .or_default()
             .push((*offset, event));
     }
@@ -699,10 +766,8 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
     for (_id, node_events) in by_id {
         let mut hide_count: i32 = 0;
         for (_offset, e) in node_events.iter() {
-            match e {
-                Event::StrandHidden { .. } => hide_count += 1,
-                Event::StrandUnhidden { .. } => hide_count -= 1,
-                _ => {}
+            if let Some(delta) = visibility_delta(e) {
+                hide_count += delta;
             }
         }
         let hidden = hide_count > 0;
@@ -712,34 +777,56 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
         if !has_created {
             continue;
         }
-        // Collect log entries
-        let logs: Vec<LogEntry> = node_events
-            .iter()
-            .filter_map(|(offset, e)| {
-                if let Event::LogAppended {
+        // Collect log entries and compute an effective v2 hash chain. Retained
+        // v1 rows have no stored entry_id, so the projection gives them a
+        // deterministic virtual identity and lets new entries chain forward.
+        let mut logs: Vec<LogEntry> = Vec::new();
+        let mut previous_effective_entry_id: Option<String> = None;
+        for (offset, e) in node_events.iter() {
+            if let Event::LogAppended {
+                ts,
+                content,
+                prev_entry_id,
+                entry_id,
+                refs,
+                ref_,
+                append_id,
+                effect,
+                git,
+                provenance,
+                ..
+            } = e
+            {
+                let effective_prev = prev_entry_id
+                    .clone()
+                    .or_else(|| previous_effective_entry_id.clone());
+                let effective_entry_id = crate::event::effective_entry_id(
+                    entry_id.as_deref(),
+                    effective_prev.as_deref(),
                     ts,
                     content,
-                    ref_,
-                    append_id,
-                    provenance,
-                    ..
-                } = e
-                {
-                    Some(LogEntry {
-                        offset: *offset,
-                        ts: ts.clone(),
-                        content: content.clone(),
-                        ref_: ref_.clone(),
-                        append_id: append_id.clone(),
-                        provenance: provenance.clone(),
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect();
-        // Fold link/unlink into the live edge set (F5). Key is (to, edge_type);
-        // last write wins (EdgeLinked=true, EdgeUnlinked=false). First-occurrence
+                    refs,
+                    effect.as_ref(),
+                    provenance.as_ref(),
+                    git.as_ref(),
+                );
+                logs.push(LogEntry {
+                    offset: *offset,
+                    ts: ts.clone(),
+                    content: content.clone(),
+                    effect: effect.clone(),
+                    prev_entry_id: effective_prev,
+                    entry_id: Some(effective_entry_id.clone()),
+                    refs: refs.clone(),
+                    ref_: ref_.clone(),
+                    append_id: append_id.clone(),
+                    provenance: provenance.clone(),
+                });
+                previous_effective_entry_id = Some(effective_entry_id);
+            }
+        }
+        // Fold legacy edge events and v2 link/unlink effects into the live edge set (F5).
+        // Key is (to, edge_type); last write wins. First-occurrence
         // order is preserved, so for a journal with no unlinks this reduces to the
         // old first-wins dedup — belongs-to ordering (tree/orient) is unchanged.
         // The journal keeps every event (append-only); folding only shapes reads.
@@ -747,16 +834,14 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
             std::collections::HashMap::new();
         let mut edge_order: Vec<(String, Option<String>)> = Vec::new();
         for (_, e) in &node_events {
-            let (to, etype, linked) = match e {
-                Event::EdgeLinked { to, edge_type, .. } => (to, edge_type, true),
-                Event::EdgeUnlinked { to, edge_type, .. } => (to, edge_type, false),
-                _ => continue,
+            let Some(delta) = edge_delta(e) else {
+                continue;
             };
-            let key = (to.clone(), etype.clone());
+            let key = (delta.target, delta.edge_type);
             if !edge_live.contains_key(&key) {
                 edge_order.push(key.clone());
             }
-            edge_live.insert(key, linked);
+            edge_live.insert(key, delta.linked);
         }
         let live: Vec<&(String, Option<String>)> =
             edge_order.iter().filter(|k| edge_live[*k]).collect();
@@ -782,7 +867,11 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
                 None
             }
         });
-        let strand_id_str = node_events[0].1.strand_id().to_string();
+        let strand_id_str = node_events[0]
+            .1
+            .strand_id()
+            .expect("strand-scoped event")
+            .to_string();
         let (state, state_marker, state_offset) = compute_state_from_events(events, &strand_id_str);
         if !include_hidden && hidden {
             continue;
@@ -819,7 +908,17 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
         }
     }
     for (offset, event) in events {
-        let strand_id = event.strand_id().to_string();
+        if matches!(event, Event::JournalAnchored { .. }) {
+            continue;
+        }
+        let strand_id = match event {
+            Event::SubjectBound { strand_id, .. } => strand_id.clone(),
+            Event::JournalAnchored { .. } => unreachable!("journal anchors are skipped above"),
+            _ => event
+                .strand_id()
+                .expect("strand-scoped timeline event")
+                .to_string(),
+        };
         let strand_type = strand_types.get(&strand_id).cloned().flatten();
         let ts = match event {
             Event::StrandCreated { ts, .. } => ts,
@@ -832,6 +931,7 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
             Event::SubjectBound { ts, .. } => ts,
             Event::StrandClosed { ts, .. } => ts,
             Event::StrandReopened { ts, .. } => ts,
+            Event::JournalAnchored { .. } => unreachable!("journal anchors are skipped above"),
         };
         let ts_str = ts.clone();
         let ts_skew = match &prev_ts {
@@ -842,10 +942,14 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
         let kind = match event {
             Event::StrandCreated { .. } => TimelineEventKind::StrandCreated { summary: None },
             Event::LogAppended {
-                content, append_id, ..
+                content,
+                append_id,
+                effect,
+                ..
             } => TimelineEventKind::LogAppended {
                 content: content.clone(),
                 append_id: append_id.clone(),
+                effect: effect.clone(),
             },
             Event::EdgeLinked { to, edge_type, .. } => TimelineEventKind::EdgeLinked {
                 target_id: to.clone(),
@@ -880,6 +984,7 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
                 disposition: disposition.clone(),
             },
             Event::StrandReopened { .. } => TimelineEventKind::StrandReopened,
+            Event::JournalAnchored { .. } => unreachable!("journal anchors are skipped above"),
         };
         entries.push(TimelineEntry {
             journal_offset: *offset,

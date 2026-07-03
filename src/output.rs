@@ -124,7 +124,7 @@ impl<'a> ExplainUnknownOutput<'a> {
 // ── orient --format json ───────────────────────────────────
 
 /// Orient remind line: the operating loop surfaced by orient outputs.
-pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → append --id <ID> \"[decision] ...\" | new matter → add \"<summary>\" | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | read/extract → --format json | jq（id/offset/status，非文本切割）| more → tasktree --help";
+pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → echo \"[decision] ...\" | tasktree append --id <ID> | new matter → echo \"<summary>\" | tasktree add | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | read/extract → --format json | jq（id/offset/status，非文本切割）| more → tasktree --help";
 
 /// One active strand in the orient menu.
 #[derive(Debug, Serialize, Clone)]
@@ -511,6 +511,19 @@ pub(crate) struct CurrentOutput {
 // ── context --format json ──────────────────────────────────
 
 #[derive(Debug, Serialize)]
+pub(crate) struct CutoverV2ReportOutput {
+    pub(crate) applied: bool,
+    pub(crate) source_journal: String,
+    pub(crate) archive_journal: String,
+    pub(crate) map_path: String,
+    pub(crate) source_event_count: usize,
+    pub(crate) imported_event_count: usize,
+    pub(crate) strand_count: usize,
+    pub(crate) entry_count: usize,
+    pub(crate) anchor_count: usize,
+    pub(crate) unresolved_ref_count: usize,
+}
+#[derive(Debug, Serialize)]
 pub(crate) struct ContextOutput {
     pub(crate) strands: Vec<ContextStrandOutput>,
 }
@@ -615,6 +628,37 @@ pub struct StrandListOutput {
     pub strands: Vec<StrandListItem>,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EntryEffectOutput {
+    Close { disposition: String },
+    Reopen,
+    Link { target: String, edge_type: String },
+    Unlink { target: String, edge_type: String },
+    Hide,
+    Unhide,
+}
+
+impl From<&crate::event::EntryEffect> for EntryEffectOutput {
+    fn from(effect: &crate::event::EntryEffect) -> Self {
+        match effect {
+            crate::event::EntryEffect::Close { disposition } => EntryEffectOutput::Close {
+                disposition: disposition.clone(),
+            },
+            crate::event::EntryEffect::Reopen => EntryEffectOutput::Reopen,
+            crate::event::EntryEffect::Link { target, edge_type } => EntryEffectOutput::Link {
+                target: target.clone(),
+                edge_type: edge_type.clone(),
+            },
+            crate::event::EntryEffect::Unlink { target, edge_type } => EntryEffectOutput::Unlink {
+                target: target.clone(),
+                edge_type: edge_type.clone(),
+            },
+            crate::event::EntryEffect::Hide => EntryEffectOutput::Hide,
+            crate::event::EntryEffect::Unhide => EntryEffectOutput::Unhide,
+        }
+    }
+}
 // ── show --format json ─────────────────────────────────────
 
 /// One event entry in the `events` array (projection of LogEntry, not the raw struct).
@@ -622,12 +666,21 @@ pub struct StrandListOutput {
 pub struct EventOutput {
     pub ts: String,
     pub append_id: Option<String>,
+    /// v2 machine effect carried by this entry; null for ordinary notes.
+    pub effect: Option<EntryEffectOutput>,
+    /// v2 content-addressed identity of this entry. For retained v1 rows this is
+    /// the projection-computed effective id; new rows persist the same value.
+    pub entry_id: Option<String>,
+    /// v2 previous entry hash in this strand. Null on the first entry.
+    pub prev_entry_id: Option<String>,
+    /// v2 rationale references: entry hashes, not strand@offset pins.
+    pub refs: Vec<String>,
     pub entry: String,
     /// Per-entry provenance (e.g. {"producer":"codex"}). Always serialised —
     /// `null` when absent — per the show JSON contract (see module header).
     pub provenance: Option<serde_json::Value>,
-    /// Entry rationale pointer (D2/F4): the reserved `ref_` field surfaced so a
-    /// recorded reason-reference is queryable. Always serialised; null when absent.
+    /// Legacy rationale pointer retained during the v2 migration. New callers
+    /// should use `refs`; this field stays for transition audit only.
     #[serde(rename = "ref")]
     pub ref_field: Option<String>,
 }
@@ -718,6 +771,10 @@ impl From<&ProjectedStrand> for StrandDetailOutput {
                 .map(|e| EventOutput {
                     ts: e.ts.clone(),
                     append_id: e.append_id.clone(),
+                    effect: e.effect.as_ref().map(EntryEffectOutput::from),
+                    entry_id: e.entry_id.clone(),
+                    prev_entry_id: e.prev_entry_id.clone(),
+                    refs: e.refs.clone(),
                     entry: e.content.clone(),
                     provenance: e.provenance.clone(),
                     ref_field: e.ref_.clone(),
@@ -743,6 +800,8 @@ pub enum TimelineEventKindOutput {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         append_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        effect: Option<EntryEffectOutput>,
     },
     #[serde(rename = "edge_linked")]
     EdgeLinked {
@@ -814,12 +873,15 @@ impl From<&crate::projection::TimelineEntry> for TimelineEntryOutput {
                         summary: summary.clone(),
                     }
                 }
-                crate::projection::TimelineEventKind::LogAppended { content, append_id } => {
-                    TimelineEventKindOutput::LogAppended {
-                        content: content.clone(),
-                        append_id: append_id.clone(),
-                    }
-                }
+                crate::projection::TimelineEventKind::LogAppended {
+                    content,
+                    append_id,
+                    effect,
+                } => TimelineEventKindOutput::LogAppended {
+                    content: content.clone(),
+                    append_id: append_id.clone(),
+                    effect: effect.as_ref().map(EntryEffectOutput::from),
+                },
                 crate::projection::TimelineEventKind::EdgeLinked {
                     target_id,
                     edge_type,

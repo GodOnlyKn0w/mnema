@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::process::Command;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -12,6 +13,12 @@ pub struct GitContext {
     pub head: String,
     pub branch: String,
     pub status: String,
+}
+/// One strand head captured by a journal integrity anchor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JournalAnchorHead {
+    pub strand_id: String,
+    pub entry_id: String,
 }
 
 pub fn get_git_context() -> Option<GitContext> {
@@ -48,6 +55,38 @@ fn run_cmd(args: &[&str]) -> Result<String, String> {
         .map_err(|e| format!("invalid utf-8: {}", e))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EntryEffect {
+    Close { disposition: String },
+    Reopen,
+    Link { target: String, edge_type: String },
+    Unlink { target: String, edge_type: String },
+    Hide,
+    Unhide,
+}
+
+impl EntryEffect {
+    pub(crate) fn close(disposition: &str) -> Self {
+        EntryEffect::Close {
+            disposition: disposition.to_string(),
+        }
+    }
+
+    pub(crate) fn link(target: &str, edge_type: &str) -> Self {
+        EntryEffect::Link {
+            target: target.to_string(),
+            edge_type: edge_type.to_string(),
+        }
+    }
+
+    pub(crate) fn unlink(target: &str, edge_type: &str) -> Self {
+        EntryEffect::Unlink {
+            target: target.to_string(),
+            edge_type: edge_type.to_string(),
+        }
+    }
+}
 /// Event types for the append-only journal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -64,6 +103,14 @@ pub enum Event {
         id: String,
         ts: String,
         content: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        effect: Option<EntryEffect>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        prev_entry_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        entry_id: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        refs: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         ref_: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,6 +187,17 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         provenance: Option<serde_json::Value>,
     },
+    /// Journal-level integrity anchor. It captures the replayed set of current
+    /// strand heads and a digest over that set plus the previous anchor digest.
+    #[serde(rename = "journal_anchored")]
+    JournalAnchored {
+        ts: String,
+        covered_event_count: usize,
+        heads: Vec<JournalAnchorHead>,
+        digest: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        previous_anchor: Option<String>,
+    },
     /// Subject binding fact. Generic record of `subject_type + subject_id -> strand_id`.
     /// Consumers (e.g. `pi-strand`) decide what subject types mean; this crate only
     /// stores the binding, indexes it, and exposes it through `bind` / `current`.
@@ -157,7 +215,7 @@ pub enum Event {
 }
 
 impl Event {
-    pub fn strand_id(&self) -> &str {
+    pub fn strand_id(&self) -> Option<&str> {
         match self {
             Event::StrandCreated { id, .. }
             | Event::LogAppended { id, .. }
@@ -167,11 +225,8 @@ impl Event {
             | Event::StrandUnhidden { id, .. }
             | Event::CheckpointCreated { id, .. }
             | Event::StrandClosed { id, .. }
-            | Event::StrandReopened { id, .. } => id,
-            // Binding events reference a strand but are not strand events.
-            // Group them under the target strand so projection ignores them
-            // (no StrandCreated match → filtered out by has_created gate).
-            Event::SubjectBound { strand_id, .. } => strand_id,
+            | Event::StrandReopened { id, .. } => Some(id),
+            Event::JournalAnchored { .. } | Event::SubjectBound { .. } => None,
         }
     }
 }
@@ -180,7 +235,7 @@ fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
-/// ID format: 24 hex digits = microsecond timestamp (16) + PID (4) + counter (4).
+/// Legacy non-strand ID format: 24 hex digits = microsecond timestamp (16) + PID (4) + counter (4).
 /// PID prevents collision across processes on a single machine; counter prevents
 /// collision within a process in the same microsecond.
 ///
@@ -200,7 +255,7 @@ fn generate_id() -> String {
     format!("{:016x}{:04x}{:04x}", ts, pid, counter)
 }
 
-/// Stable content-derived ID for a log append.
+/// Legacy content-derived ID for a log append.
 /// sha256(strand_id + ts + content) — deterministic, survives journal repairs.
 pub fn compute_append_id(strand_id: &str, ts: &str, content: &str) -> String {
     let mut hasher = Sha256::new();
@@ -210,11 +265,149 @@ pub fn compute_append_id(strand_id: &str, ts: &str, content: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// v2 entry identity: a strand-local hash chain.
+///
+/// The event's own `entry_id` and journal offset are excluded. Refs are entry
+/// hashes and participate in identity, because changing an entry's cited basis
+/// changes the entry itself.
+pub fn compute_entry_id(
+    prev_entry_id: Option<&str>,
+    ts: &str,
+    content: &str,
+    refs: &[String],
+    effect: Option<&EntryEffect>,
+    provenance: Option<&serde_json::Value>,
+    git: Option<&GitContext>,
+) -> String {
+    let payload = json!({
+        "prev": prev_entry_id,
+        "ts": ts,
+        "content": content,
+        "refs": refs,
+        "effect": effect,
+        "provenance": provenance,
+        "git": git,
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&payload).expect("entry hash payload serializes"));
+    hex::encode(hasher.finalize())
+}
+
+/// Effective identity for retained v1 rows that predate `entry_id`.
+/// New appends can chain from this value without rewriting old journal lines.
+pub(crate) fn effective_entry_id(
+    stored_entry_id: Option<&str>,
+    prev_entry_id: Option<&str>,
+    ts: &str,
+    content: &str,
+    refs: &[String],
+    effect: Option<&EntryEffect>,
+    provenance: Option<&serde_json::Value>,
+    git: Option<&GitContext>,
+) -> String {
+    stored_entry_id.map(str::to_string).unwrap_or_else(|| {
+        compute_entry_id(prev_entry_id, ts, content, refs, effect, provenance, git)
+    })
+}
+pub fn journal_anchor_heads(events: &[Event]) -> Vec<JournalAnchorHead> {
+    let mut heads: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for event in events {
+        if let Event::LogAppended {
+            id,
+            ts,
+            content,
+            refs,
+            effect,
+            provenance,
+            git,
+            ..
+        } = event
+        {
+            let prev = heads.get(id).map(|s| s.as_str());
+            let entry_id = compute_entry_id(
+                prev,
+                ts,
+                content,
+                refs,
+                effect.as_ref(),
+                provenance.as_ref(),
+                git.as_ref(),
+            );
+            heads.insert(id.clone(), entry_id);
+        }
+    }
+    heads
+        .into_iter()
+        .map(|(strand_id, entry_id)| JournalAnchorHead {
+            strand_id,
+            entry_id,
+        })
+        .collect()
+}
+
+pub fn compute_journal_anchor_digest(
+    heads: &[JournalAnchorHead],
+    previous_anchor: Option<&str>,
+    covered_event_count: usize,
+) -> String {
+    let payload = json!({
+        "covered_event_count": covered_event_count,
+        "previous_anchor": previous_anchor,
+        "heads": heads,
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&payload).expect("journal anchor payload serializes"));
+    hex::encode(hasher.finalize())
+}
+
+pub fn latest_journal_anchor_digest(events: &[Event]) -> Option<String> {
+    events.iter().rev().find_map(|event| {
+        if let Event::JournalAnchored { digest, .. } = event {
+            Some(digest.clone())
+        } else {
+            None
+        }
+    })
+}
+
+pub fn make_journal_anchor(events: &[Event]) -> Event {
+    let previous_anchor = latest_journal_anchor_digest(events);
+    let heads = journal_anchor_heads(events);
+    let covered_event_count = events.len();
+    let digest =
+        compute_journal_anchor_digest(&heads, previous_anchor.as_deref(), covered_event_count);
+    Event::JournalAnchored {
+        ts: now(),
+        covered_event_count,
+        heads,
+        digest,
+        previous_anchor,
+    }
+}
+
 pub fn make_strand_created(content: &str, strand_type: Option<&str>) -> (Event, Event) {
+    make_strand_created_with_provenance(content, strand_type, None)
+}
+
+pub fn make_strand_created_with_provenance(
+    content: &str,
+    strand_type: Option<&str>,
+    provenance: Option<serde_json::Value>,
+) -> (Event, Event) {
     let ts = now();
-    let id = generate_id();
-    let append_id = compute_append_id(&id, &ts, content);
+    let refs: Vec<String> = Vec::new();
     let git = get_git_context();
+    let entry_id = compute_entry_id(
+        None,
+        &ts,
+        content,
+        &refs,
+        None,
+        provenance.as_ref(),
+        git.as_ref(),
+    );
+    let id = entry_id.clone();
+    let append_id = compute_append_id(&id, &ts, content);
     let created = Event::StrandCreated {
         id: id.clone(),
         ts: ts.clone(),
@@ -224,45 +417,92 @@ pub fn make_strand_created(content: &str, strand_type: Option<&str>) -> (Event, 
         id,
         ts,
         content: content.to_string(),
+        effect: None,
+        prev_entry_id: None,
+        entry_id: Some(entry_id),
+        refs,
         ref_: None,
         append_id: Some(append_id),
         git,
-        provenance: None,
+        provenance,
     };
     (created, appended)
 }
-
 /// Build a `LogAppended` event. `provenance` is the optional structured
 /// metadata blob attached to the entry. `None` produces an event identical
 /// to the pre-provenance schema; older consumers see the same JSON shape
 /// thanks to `skip_serializing_if`.
 pub fn make_log_appended(id: &str, content: &str, provenance: Option<serde_json::Value>) -> Event {
-    make_log_appended_with_ref(id, content, None, provenance)
+    make_log_appended_entry(id, None, content, Vec::new(), None, provenance)
 }
 
-/// Like `make_log_appended` but sets the entry's `ref_` rationale pointer
-/// (W1/F4-pin). `ref_` is a pinned reference `<target_id>@<offset>` so the
-/// why-staleness clerk can later detect when the cited basis has evolved.
+/// Like `make_log_appended` but sets the entry's legacy `ref_` rationale
+/// pointer. New callers should prefer `make_log_appended_entry` with `refs`.
 pub fn make_log_appended_with_ref(
     id: &str,
     content: &str,
     ref_: Option<&str>,
     provenance: Option<serde_json::Value>,
 ) -> Event {
+    make_log_appended_entry(id, None, content, Vec::new(), ref_, provenance)
+}
+
+/// Build a v2 chained log entry. `refs` are entry hashes; `legacy_ref` is the
+/// transitional v1 strand@offset pin kept while callers migrate.
+pub fn make_log_appended_entry(
+    id: &str,
+    prev_entry_id: Option<&str>,
+    content: &str,
+    refs: Vec<String>,
+    legacy_ref: Option<&str>,
+    provenance: Option<serde_json::Value>,
+) -> Event {
+    make_log_appended_entry_with_effect(
+        id,
+        prev_entry_id,
+        content,
+        refs,
+        legacy_ref,
+        None,
+        provenance,
+    )
+}
+
+pub fn make_log_appended_entry_with_effect(
+    id: &str,
+    prev_entry_id: Option<&str>,
+    content: &str,
+    refs: Vec<String>,
+    legacy_ref: Option<&str>,
+    effect: Option<EntryEffect>,
+    provenance: Option<serde_json::Value>,
+) -> Event {
     let ts = now();
     let append_id = compute_append_id(id, &ts, content);
     let git = get_git_context();
+    let entry_id = compute_entry_id(
+        prev_entry_id,
+        &ts,
+        content,
+        &refs,
+        effect.as_ref(),
+        provenance.as_ref(),
+        git.as_ref(),
+    );
     Event::LogAppended {
         id: id.to_string(),
         ts,
         content: content.to_string(),
-        ref_: ref_.map(|s| s.to_string()),
+        effect,
+        prev_entry_id: prev_entry_id.map(|s| s.to_string()),
+        entry_id: Some(entry_id),
+        refs,
+        ref_: legacy_ref.map(|s| s.to_string()),
         append_id: Some(append_id),
         git,
         provenance,
     }
 }
-
 /// Build a `CheckpointCreated` event. `provenance` follows the same
 /// contract as on `LogAppended`; pass `None` for the original behaviour.
 pub fn make_checkpoint(
@@ -286,72 +526,114 @@ pub fn make_checkpoint(
 
 pub fn make_edge_linked(
     source_id: &str,
+    prev_entry_id: Option<&str>,
     target_id: &str,
     edge_type: Option<&str>,
     provenance: Option<serde_json::Value>,
 ) -> Event {
-    Event::EdgeLinked {
-        id: source_id.to_string(),
-        ts: now(),
-        to: target_id.to_string(),
-        edge_type: edge_type.map(|s| s.to_string()),
+    let edge_type = edge_type.unwrap_or("depends-on");
+    make_log_appended_entry_with_effect(
+        source_id,
+        prev_entry_id,
+        &format!("link {} {}", edge_type, target_id),
+        Vec::new(),
+        None,
+        Some(EntryEffect::link(target_id, edge_type)),
         provenance,
-    }
+    )
 }
 
-/// Build an `EdgeUnlinked` event (F5). Symmetric with `make_edge_linked`:
+/// Build an unlink effect entry (F5). Symmetric with `make_edge_linked`:
 /// carries edge_type (which typed edge to remove) and provenance.
 pub fn make_edge_unlinked(
     source_id: &str,
+    prev_entry_id: Option<&str>,
     target_id: &str,
     edge_type: Option<&str>,
     provenance: Option<serde_json::Value>,
 ) -> Event {
-    Event::EdgeUnlinked {
-        id: source_id.to_string(),
-        ts: now(),
-        to: target_id.to_string(),
-        edge_type: edge_type.map(|s| s.to_string()),
+    let edge_type = edge_type.unwrap_or("depends-on");
+    make_log_appended_entry_with_effect(
+        source_id,
+        prev_entry_id,
+        &format!("unlink {} {}", edge_type, target_id),
+        Vec::new(),
+        None,
+        Some(EntryEffect::unlink(target_id, edge_type)),
         provenance,
-    }
+    )
 }
 
-/// Build a `StrandClosed` event.
+/// Build a close effect entry.
 /// `disposition` must be one of: done, failed, cancelled, merged, verified.
 pub fn make_strand_closed(
     id: &str,
+    prev_entry_id: Option<&str>,
     disposition: &str,
     provenance: Option<serde_json::Value>,
 ) -> Event {
-    Event::StrandClosed {
-        id: id.to_string(),
-        ts: now(),
-        disposition: disposition.to_string(),
+    make_log_appended_entry_with_effect(
+        id,
+        prev_entry_id,
+        &format!("close disposition={}", disposition),
+        Vec::new(),
+        None,
+        Some(EntryEffect::close(disposition)),
         provenance,
-    }
+    )
 }
 
-/// Build a `StrandReopened` event.
-pub fn make_strand_reopened(id: &str, provenance: Option<serde_json::Value>) -> Event {
-    Event::StrandReopened {
-        id: id.to_string(),
-        ts: now(),
+/// Build a reopen effect entry.
+pub fn make_strand_reopened(
+    id: &str,
+    prev_entry_id: Option<&str>,
+    provenance: Option<serde_json::Value>,
+) -> Event {
+    make_log_appended_entry_with_effect(
+        id,
+        prev_entry_id,
+        "reopen erroneous close",
+        Vec::new(),
+        None,
+        Some(EntryEffect::Reopen),
         provenance,
-    }
+    )
 }
 
-pub fn make_strand_hidden(id: &str) -> Event {
-    Event::StrandHidden {
-        id: id.to_string(),
-        ts: now(),
-    }
+pub fn make_strand_hidden(
+    id: &str,
+    prev_entry_id: Option<&str>,
+    reason: Option<&str>,
+    provenance: Option<serde_json::Value>,
+) -> Event {
+    let content = reason
+        .map(|r| format!("[hidden] {}", r))
+        .unwrap_or_else(|| "hide".to_string());
+    make_log_appended_entry_with_effect(
+        id,
+        prev_entry_id,
+        &content,
+        Vec::new(),
+        None,
+        Some(EntryEffect::Hide),
+        provenance,
+    )
 }
 
-pub fn make_strand_unhidden(id: &str) -> Event {
-    Event::StrandUnhidden {
-        id: id.to_string(),
-        ts: now(),
-    }
+pub fn make_strand_unhidden(
+    id: &str,
+    prev_entry_id: Option<&str>,
+    provenance: Option<serde_json::Value>,
+) -> Event {
+    make_log_appended_entry_with_effect(
+        id,
+        prev_entry_id,
+        "unhide",
+        Vec::new(),
+        None,
+        Some(EntryEffect::Unhide),
+        provenance,
+    )
 }
 
 /// Build a `SubjectBound` event. The `id` is the binding's own event id;

@@ -67,7 +67,10 @@ pub(in crate::tests) fn with_tasktree_home<F: FnOnce() -> R, R>(
 
 pub(in crate::tests) fn create_strand(content: &str) -> String {
     let (created, appended) = event::make_strand_created(content, None);
-    let id = created.strand_id().to_string();
+    let id = created
+        .strand_id()
+        .expect("strand-scoped event")
+        .to_string();
     with_journal_write_lock(|journal| {
         append_event_unlocked(journal, &created)?;
         append_event_unlocked(journal, &appended)?;
@@ -79,7 +82,10 @@ pub(in crate::tests) fn create_strand(content: &str) -> String {
 
 pub(in crate::tests) fn create_prompt_strand(content: &str) -> String {
     let (created, appended) = event::make_strand_created(content, Some("prompt-strand"));
-    let id = created.strand_id().to_string();
+    let id = created
+        .strand_id()
+        .expect("strand-scoped event")
+        .to_string();
     with_journal_write_lock(|journal| {
         append_event_unlocked(journal, &created)?;
         append_event_unlocked(journal, &appended)?;
@@ -99,6 +105,22 @@ pub(in crate::tests) fn count_hide_events(
         match (e, kind) {
             (Event::StrandHidden { id, .. }, "hidden") if id == strand_id => n += 1,
             (Event::StrandUnhidden { id, .. }, "unhidden") if id == strand_id => n += 1,
+            (
+                Event::LogAppended {
+                    id,
+                    effect: Some(event::EntryEffect::Hide),
+                    ..
+                },
+                "hidden",
+            ) if id == strand_id => n += 1,
+            (
+                Event::LogAppended {
+                    id,
+                    effect: Some(event::EntryEffect::Unhide),
+                    ..
+                },
+                "unhidden",
+            ) if id == strand_id => n += 1,
             _ => {}
         }
     }
@@ -107,5 +129,9 @@ pub(in crate::tests) fn count_hide_events(
 
 pub(in crate::tests) fn total_events() -> usize {
     let path = ensure_journal().unwrap();
-    read_events_lossy(&path).0.len()
+    read_events_lossy(&path)
+        .0
+        .iter()
+        .filter(|(_, event)| !matches!(event, Event::JournalAnchored { .. }))
+        .count()
 }

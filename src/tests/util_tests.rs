@@ -6,11 +6,11 @@ fn leading_whitespace_preserved() {
     let id = create_strand("first strand");
     let result = cmd_append(
         Some("    indented code block\n    more indent"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     );
@@ -55,7 +55,7 @@ fn single_unhide_restores_visibility() {
 fn cmd_agent_context_default_excludes_hidden_via_cmd_path() {
     let _env = setup();
     let (c, a) = event::make_strand_created("[covers] audit2/", Some("prompt-strand"));
-    let id = c.strand_id().to_string();
+    let id = c.strand_id().expect("strand-scoped event").to_string();
     with_journal_write_lock(|j| {
         append_event_unlocked(j, &c)?;
         append_event_unlocked(j, &a)

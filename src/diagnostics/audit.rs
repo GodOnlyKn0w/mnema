@@ -26,6 +26,19 @@ impl JournalAudit {
         self.lint_sections.iter().map(LintSection::count).sum()
     }
 }
+#[derive(Debug, Clone, Default)]
+pub struct IntegrityReport {
+    pub anchor_count: usize,
+    pub chain_errors: Vec<String>,
+    pub anchor_errors: Vec<String>,
+    pub unanchored_event_count: usize,
+}
+
+impl IntegrityReport {
+    pub fn has_errors(&self) -> bool {
+        !self.chain_errors.is_empty() || !self.anchor_errors.is_empty()
+    }
+}
 
 pub fn audit_journal(
     events: &[crate::event::Event],
@@ -56,6 +69,14 @@ pub fn audit_journal(
     }
 
     let mut sections = Vec::new();
+    fn link_view(event: &Event) -> Option<(String, String, Option<String>)> {
+        let delta = crate::projection::edge_delta(event)?;
+        if !delta.linked {
+            return None;
+        }
+        let source = event.strand_id()?.to_string();
+        Some((source, delta.target, delta.edge_type))
+    }
 
     let mut dag_done = Vec::new();
     for (id, summary) in &strand_summaries {
@@ -94,9 +115,9 @@ pub fn audit_journal(
 
     let mut orphan_links = Vec::new();
     for event in events {
-        if let Event::EdgeLinked { to, .. } = event {
-            if !created_ids.contains(to) {
-                orphan_links.push(format!("orphan link: target strand {} not found", to));
+        if let Some((_, target, _)) = link_view(event) {
+            if !created_ids.contains(&target) {
+                orphan_links.push(format!("orphan link: target strand {} not found", target));
             }
         }
     }
@@ -137,21 +158,15 @@ pub fn audit_journal(
 
     let mut link_direction = Vec::new();
     for event in events {
-        if let Event::EdgeLinked {
-            id: source,
-            to: target,
-            ..
-        } = event
-        {
+        if let Some((source, target, _)) = link_view(event) {
             let src_summary = strand_summaries
-                .get(source)
+                .get(&source)
                 .map(|s| s.as_str())
                 .unwrap_or("");
             let tgt_summary = strand_summaries
-                .get(target)
+                .get(&target)
                 .map(|s| s.as_str())
                 .unwrap_or("");
-            let src_is_dag = src_summary.starts_with("para group ");
             let src_is_task = src_summary.starts_with('[')
                 && src_summary[1..]
                     .chars()
@@ -161,12 +176,6 @@ pub fn audit_journal(
             if src_is_task && tgt_is_dag {
                 link_direction.push(format!(
                     "link direction: task {} links to DAG {} - unusual",
-                    source, target
-                ));
-            }
-            if !src_is_dag && !src_is_task && tgt_is_dag {
-                link_direction.push(format!(
-                    "link direction: non-task {} links to DAG {} - unusual",
                     source, target
                 ));
             }
@@ -254,13 +263,11 @@ pub fn audit_journal(
 
     let mut legacy_why = Vec::new();
     for event in events {
-        if let Event::EdgeLinked {
-            id, to, edge_type, ..
-        } = event
-        {
-            if edge_type.as_deref() == Some("why") {
-                legacy_why.push(format!("legacy why-edge {} -> {}: why is no longer a link (D2) - record the reason in an entry", id, to));
+        if let Some((source, target, Some(edge_type))) = link_view(event) {
+            if edge_type != "why" {
+                continue;
             }
+            legacy_why.push(format!("legacy why-edge {} -> {}: why is no longer a link (D2) - record the reason in an entry", source, target));
         }
     }
     sections.push(LintSection {
@@ -304,6 +311,132 @@ pub fn audit_journal(
     }
 }
 
+pub fn verify_journal_integrity(events: &[crate::event::Event]) -> IntegrityReport {
+    use crate::event::{Event, JournalAnchorHead, compute_entry_id, compute_journal_anchor_digest};
+    use std::collections::{BTreeMap, HashMap};
+
+    let mut heads: BTreeMap<String, String> = BTreeMap::new();
+    let mut log_counts: HashMap<String, usize> = HashMap::new();
+    let mut previous_anchor: Option<String> = None;
+    let mut last_anchor_index: Option<usize> = None;
+    let mut report = IntegrityReport::default();
+
+    for (idx, event) in events.iter().enumerate() {
+        match event {
+            Event::LogAppended {
+                id,
+                ts,
+                content,
+                effect,
+                prev_entry_id,
+                entry_id,
+                refs,
+                provenance,
+                git,
+                ..
+            } => {
+                let expected_prev = heads.get(id).cloned();
+                if entry_id.is_some() && prev_entry_id.as_deref() != expected_prev.as_deref() {
+                    report.chain_errors.push(format!(
+                        "hash-chain: event {} strand {} prev_entry_id {:?} expected {:?}",
+                        idx,
+                        id,
+                        prev_entry_id.as_deref(),
+                        expected_prev.as_deref()
+                    ));
+                }
+                let prev_for_hash = if entry_id.is_some() {
+                    prev_entry_id.as_deref()
+                } else {
+                    expected_prev.as_deref()
+                };
+                let computed = compute_entry_id(
+                    prev_for_hash,
+                    ts,
+                    content,
+                    refs,
+                    effect.as_ref(),
+                    provenance.as_ref(),
+                    git.as_ref(),
+                );
+                if let Some(stored) = entry_id {
+                    if stored != &computed {
+                        report.chain_errors.push(format!(
+                            "hash-chain: event {} strand {} entry_id {} expected {}",
+                            idx, id, stored, computed
+                        ));
+                    }
+                    let count = log_counts.entry(id.clone()).or_insert(0);
+                    if *count == 0 && stored != id {
+                        report.chain_errors.push(format!(
+                            "hash-chain: strand {} first entry_id {} does not equal strand id",
+                            id, stored
+                        ));
+                    }
+                    *count += 1;
+                } else {
+                    *log_counts.entry(id.clone()).or_insert(0) += 1;
+                }
+                heads.insert(id.clone(), computed);
+            }
+            Event::JournalAnchored {
+                covered_event_count,
+                heads: stored_heads,
+                digest,
+                previous_anchor: stored_previous,
+                ..
+            } => {
+                report.anchor_count += 1;
+                let expected_heads: Vec<JournalAnchorHead> = heads
+                    .iter()
+                    .map(|(strand_id, entry_id)| JournalAnchorHead {
+                        strand_id: strand_id.clone(),
+                        entry_id: entry_id.clone(),
+                    })
+                    .collect();
+                if *covered_event_count != idx {
+                    report.anchor_errors.push(format!(
+                        "anchor: event {} covers {} events, expected {}",
+                        idx, covered_event_count, idx
+                    ));
+                }
+                if stored_previous.as_deref() != previous_anchor.as_deref() {
+                    report.anchor_errors.push(format!(
+                        "anchor: event {} previous_anchor {:?} expected {:?}",
+                        idx,
+                        stored_previous.as_deref(),
+                        previous_anchor.as_deref()
+                    ));
+                }
+                if stored_heads != &expected_heads {
+                    report.anchor_errors.push(format!(
+                        "anchor: event {} head list mismatch (stored {}, expected {})",
+                        idx,
+                        stored_heads.len(),
+                        expected_heads.len()
+                    ));
+                }
+                let expected_digest =
+                    compute_journal_anchor_digest(&expected_heads, previous_anchor.as_deref(), idx);
+                if digest != &expected_digest {
+                    report.anchor_errors.push(format!(
+                        "anchor: event {} digest {} expected {}",
+                        idx, digest, expected_digest
+                    ));
+                }
+                previous_anchor = Some(digest.clone());
+                last_anchor_index = Some(idx);
+            }
+            _ => {}
+        }
+    }
+
+    report.unanchored_event_count = match last_anchor_index {
+        Some(idx) => events.len().saturating_sub(idx + 1),
+        None => events.len(),
+    };
+    report
+}
 #[derive(Debug, Clone)]
 pub enum DoctorPreviousState {
     FirstRun,
@@ -324,12 +457,13 @@ pub struct DoctorJournalReport {
     pub git_context_event_count: usize,
     pub timeline_status: String,
     pub timeline_warning: bool,
+    pub integrity: IntegrityReport,
     pub audit: JournalAudit,
 }
 
 impl DoctorJournalReport {
     pub fn has_errors(&self) -> bool {
-        self.corrupted > 0 || !self.orphans.is_empty()
+        self.corrupted > 0 || !self.orphans.is_empty() || self.integrity.has_errors()
     }
 
     pub fn has_advisories(&self) -> bool {
@@ -394,6 +528,7 @@ pub fn build_doctor_journal_report(
         }
     };
     let timeline_warning = timeline_status.contains("warning");
+    let integrity = verify_journal_integrity(events);
 
     DoctorJournalReport {
         total_lines,
@@ -412,6 +547,7 @@ pub fn build_doctor_journal_report(
         git_context_event_count,
         timeline_status,
         timeline_warning,
+        integrity,
         audit: audit_journal(events, now),
     }
 }

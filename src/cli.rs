@@ -43,11 +43,11 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
 做 / change:
   add           Create a new strand
   append        Append an entry to a strand
-  close         Close a strand (StrandClosed event)
-  reopen        Reopen a closed strand (StrandReopened event)
+  close         Close a strand (close effect entry)
+  reopen        Reopen a closed strand (reopen effect entry)
   checkpoint    Record context before an irreversible action
   link          Link strands (belongs-to / depends-on)
-  unlink        Remove a link (EdgeUnlinked; read projection drops the edge)
+  unlink        Remove a link (unlink effect entry; projection drops the edge)
   bind          Record a subject binding
 
 管 / manage:
@@ -56,6 +56,7 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   unhide        Unhide a strand
   doctor        Diagnose journal integrity
   export        Export journal as standalone audit artifact
+  cutover-v2    Rewrite/import current journal into pure v2 form
   explain       Explain a diagnostic code or topic (markers, json, grammar, ...)
 
 Run:  tasktree <command> --help"
@@ -94,31 +95,19 @@ impl IdTarget {
 enum Commands {
     /// Initialize .tasktree/ directory and journal
     Init,
-    /// Create a new strand with first log entry
+    /// Create a new strand with first log entry from stdin
     #[command(after_help = "\
-Content source (choose exactly one):
-  CONTENT             First log entry content
-  --stdin             Read content from standard input
-  --file <PATH>       Read content from a file
+Content source:
+  stdin               First log entry content. Piped input is required.
 
 Rules:
-  CONTENT, --stdin, and --file are mutually exclusive.
-  Empty content is rejected.
+  Entry content is never read from positional arguments, --stdin, or --file.
+  Empty stdin content is rejected.
 
 Examples:
-  tasktree add \"start a new line of work\"
-  tasktree add --parent <PARENT> \"child line of work\"
-  echo \"start a new line\" | tasktree add --stdin
-  tasktree add --file brief.md")]
+  echo \"start a new line of work\" | tasktree add
+  echo \"child line of work\" | tasktree add --parent <PARENT>")]
     Add {
-        /// Content for the first log entry (positional; omit when using --stdin or --file)
-        content: Option<String>,
-        /// Read content from standard input
-        #[arg(long, verbatim_doc_comment)]
-        stdin: bool,
-        /// Read content from a file
-        #[arg(long, value_name = "PATH", verbatim_doc_comment)]
-        file: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -132,44 +121,29 @@ Examples:
         #[arg(long = "provenance", value_name = "JSON")]
         provenance: Option<String>,
     },
-    /// Append content to a strand, or create a new strand from content.
+    /// Append stdin content to a strand, or create a new strand from stdin.
     #[command(after_help = "\
 Invocation forms:
-  tasktree append <CONTENT> [LEGACY_ID]
-  tasktree append --stdin [--id <ID> | --new]
-  tasktree append --file <PATH> [--id <ID> | --new]
+  tasktree append [--id <ID> | --new]
 
-Content source (choose exactly one):
-  CONTENT             Log content
-  --stdin             Read content from standard input
-  --file <PATH>       Read content from a file
+Content source:
+  stdin               Log content. Piped input is required.
 
 Target (choose at most one):
   (none)              Append to most recently active strand
   --id <ID>           Append to a specific strand
-  <ID>                [LEGACY] Strand ID as second positional argument.
-                      Only valid with positional CONTENT.
   --new               Create a new strand from the content
 
 Rules:
-  CONTENT, --stdin, and --file are mutually exclusive.
-  --new, --id, and LEGACY_ID are mutually exclusive.
-  LEGACY_ID is only valid with positional CONTENT.
-  Empty content is rejected.
+  Entry content is never read from positional arguments, --stdin, or --file.
+  --new and --id are mutually exclusive.
+  Empty stdin content is rejected.
 
 Examples:
-  tasktree append \"short note\"
-  tasktree append \"short note\" 0000019dd34b
-  tasktree append --id 0000019dd34b \"short note\"
-
-  echo \"long note\" | tasktree append --stdin
-  echo \"long note\" | tasktree append --stdin --id 0000019dd34b
-
-  tasktree append --file note.md
-  tasktree append --file note.md --id 0000019dd34b
-
-  echo \"new strand title\" | tasktree append --stdin --new
-  tasktree append --file note.md --id 0000019dd34b --provenance '{\"producer\":\"pi\",\"model\":\"gpt-5\"}'
+  echo \"short note\" | tasktree append
+  echo \"long note\" | tasktree append --id 0000019dd34b
+  echo \"new strand title\" | tasktree append --new
+  echo \"[metric] win_count=26\" | tasktree append --id 0000019dd34b --provenance '{\"producer\":\"pi\",\"model\":\"gpt-5\"}'
 
 Markers (optional bracket prefix on the first line):
   Marker vocabulary: tasktree explain markers
@@ -181,20 +155,9 @@ Provenance:
   --seen-offset <N>    Caller-declared last observed offset for the target
                        strand. If stale, emits W076 but still writes.")]
     Append {
-        /// Log content
-        content: Option<String>,
-        /// [LEGACY] Strand ID as second positional argument.
-        /// Only valid with positional CONTENT.
-        id: Option<String>,
-        /// Create a new strand from the content
+        /// Create a new strand from stdin content
         #[arg(short, long)]
         new: bool,
-        /// Read content from standard input
-        #[arg(long, verbatim_doc_comment)]
-        stdin: bool,
-        /// Read content from a file
-        #[arg(long, value_name = "PATH", verbatim_doc_comment)]
-        file: Option<String>,
         /// Output format: text (default) or json
         #[arg(short, long, default_value = "text")]
         format: Option<String>,
@@ -209,9 +172,8 @@ Provenance:
         /// If behind the target's current last_offset, emits W076 but still writes.
         #[arg(long = "seen-offset", value_name = "N")]
         seen_offset: Option<usize>,
-        /// Pin a rationale: the strand whose entry this one's reason rests on
-        /// (prefix match). Stored as ref=<id>@<offset> (W1/F4-pin); the doctor
-        /// why-staleness clerk flags it when that strand later advances.
+        /// Pin a rationale: the target strand's latest entry hash is stored in refs.
+        /// During the v2 migration, a legacy ref=<id>@<offset> pin is also stored.
         #[arg(long = "why", value_name = "REF")]
         why: Option<String>,
     },
@@ -385,11 +347,11 @@ JSON shape: tasktree explain json")]
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
         /// Optional provenance JSON object. Same shape as `append --provenance`.
-        /// Stored on the EdgeLinked event.
+        /// Stored on the link effect entry.
         #[arg(long = "provenance", value_name = "JSON")]
         provenance: Option<String>,
     },
-    /// Remove a directed link between two strands (writes an EdgeUnlinked event)
+    /// Remove a directed link between two strands (writes an unlink effect entry)
     #[command(after_help = "\
 Append-only: the original link stays in the journal; the read projection drops
 the edge. edge_type must match the link being removed (belongs-to / depends-on).
@@ -407,7 +369,7 @@ Example:
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
-        /// Optional provenance JSON object. Stored on the EdgeUnlinked event.
+        /// Optional provenance JSON object. Stored on the unlink effect entry.
         #[arg(long = "provenance", value_name = "JSON")]
         provenance: Option<String>,
     },
@@ -415,15 +377,13 @@ Example:
     Hide {
         #[command(flatten)]
         target: IdTarget,
-        /// Reason for hiding (optional). If provided, appends '[hidden] <reason>' to the strand.
+        /// Reason for hiding (optional). If provided, stored as '[hidden] <reason>' content on the hide effect entry.
         #[arg(long)]
         reason: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
-        /// Optional provenance JSON object. When --reason is given, stored on
-        /// the '[hidden] <reason>' LogAppended entry. Without --reason the
-        /// StrandHidden event carries no provenance (no content entry is written).
+        /// Optional provenance JSON object. Stored on the hide effect entry.
         #[arg(long = "provenance", value_name = "JSON")]
         provenance: Option<String>,
     },
@@ -436,7 +396,7 @@ Example:
         format: Option<String>,
     },
 
-    /// Close a strand (write a StrandClosed lifecycle event)
+    /// Close a strand (write a close effect entry)
     ///
     /// This is the only way to change a strand's lifecycle state to closed.
     /// Appending [done] to a strand no longer closes it — use this command.
@@ -464,7 +424,7 @@ Examples:
         format: Option<String>,
     },
 
-    /// Reopen a closed strand (write a StrandReopened lifecycle event)
+    /// Reopen a closed strand (write a reopen effect entry)
     ///
     /// Moves the strand back to open/registered state.
     #[command(after_help = "\
@@ -579,6 +539,26 @@ Examples:
         #[arg(long, value_name = "PATH")]
         out: String,
     },
+    /// Rewrite/import the current journal into pure v2 form
+    #[command(
+        name = "cutover-v2",
+        after_help = "\
+Default is a dry run. --apply performs the cutover in .tasktree/:\n  - moves journal.jsonl to journal.v1.jsonl\n  - writes a new pure-v2 journal.jsonl\n  - writes migration-v1-to-v2.json with old id/offset to new hash mappings\n\nExamples:\n  tasktree cutover-v2\n  tasktree cutover-v2 --format json\n  tasktree cutover-v2 --apply"
+    )]
+    CutoverV2 {
+        /// Apply the cutover. Without this flag, only report the plan.
+        #[arg(long)]
+        apply: bool,
+        /// Archive path for the pre-cutover journal (default: .tasktree/journal.v1.jsonl)
+        #[arg(long, value_name = "PATH")]
+        archive: Option<String>,
+        /// Mapping output path (default: .tasktree/migration-v1-to-v2.json)
+        #[arg(long = "map", value_name = "PATH")]
+        map: Option<String>,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+    },
     /// Show entry events in journal append order (timeline projection)
     Timeline {
         /// Return events with journal_offset > N
@@ -626,8 +606,8 @@ Output per active strand:
                 strand since it was last touched (cursor = last_offset)
 
 After orienting:
-  continue a line   tasktree append --id <ID> \"[decision] ...\"
-  new matter        tasktree add \"<summary>\"
+  continue a line   echo \"[decision] ...\" | tasktree append --id <ID>
+  new matter        echo \"<summary>\" | tasktree add
   matter concluded  tasktree close --id <ID> [--as done|failed|cancelled|merged|verified]
                     (default: done; reopen with tasktree reopen --id <ID>)
   before anything irreversible
@@ -836,19 +816,13 @@ fn run(command: &Commands) -> Result<(), String> {
     match command {
         Commands::Init => cmd_init(),
         Commands::Add {
-            content,
-            stdin,
-            file,
             format,
             parent,
             strand_type,
             provenance,
         } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_add_with_parent(
-                content.as_deref(),
-                *stdin,
-                file.as_deref(),
+            cmd_add_from_stdin(
                 fmt,
                 parent.as_deref(),
                 strand_type.as_deref(),
@@ -856,22 +830,14 @@ fn run(command: &Commands) -> Result<(), String> {
             )
         }
         Commands::Append {
-            content,
-            id,
             new,
-            stdin,
-            file,
             explicit_id,
             format,
             provenance,
             seen_offset,
             why,
-        } => cmd_append_with_seen_offset(
-            content.as_deref(),
-            id.as_deref(),
+        } => cmd_append_from_stdin(
             *new,
-            *stdin,
-            file.as_deref(),
             explicit_id.as_deref(),
             format.as_deref(),
             provenance.as_deref(),
@@ -1037,6 +1003,17 @@ fn run(command: &Commands) -> Result<(), String> {
 
         Commands::Export { out } => cmd_export(out),
 
+        Commands::CutoverV2 {
+            apply,
+            archive,
+            map,
+            format,
+        } => cmd_cutover_v2(
+            *apply,
+            archive.as_deref(),
+            map.as_deref(),
+            format.as_deref() == Some("json"),
+        ),
         Commands::Tree { target, format } => match target.get() {
             Some(id) => cmd_tree(id, format.as_deref()),
             None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),

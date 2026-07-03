@@ -56,7 +56,7 @@ static TOPICS: &[TopicInfo] = &[
   都在写后回显受影响线的卡片。
 
 JSON 形态（OrientStrand，写命令 result 字段 / orient active[]）：
-  - id:           全宽 strand id（24 hex，跨输出可直接 join）
+  - id:           全宽 strand id（64 hex 内容 hash，跨输出可直接 join）
   - strand_type:  线的类型，可为 null（task/dag/why/session）
   - entry_count:  日志条目计数
   - summary:      第一条日志截断到 70 字符
@@ -119,7 +119,7 @@ Marker 语义（一行一条）：
   add      每次创建新 strand；不检查内容重复
   checkpoint  重复写入新的 checkpoint 条目；
               超时后先 timeline 查账再决定
-  link     重复写入新的 EdgeLinked 事件；投影去重与否取决于下游
+  link     重复写入新的 link effect entry；legacy EdgeLinked 仍按投影折叠
 
 通用原则：超时后先查账（show/orient/timeline），
 确认事件是否已写入，再决定是否重试。"#,
@@ -155,8 +155,8 @@ hide / unhide: strand_id / status / noop /
   active_count / closed_count / hidden_count / result（卡片）
 link: source_id / target_id / edge_type / status /
   result.source / result.target（卡片）
-卡片/result 形态见 tasktree explain card
-jq 整型（切 JSON 成你要的形）见 tasktree explain jq"#,
+cutover-v2: applied / source_journal / archive_journal / map_path / source_event_count / imported_event_count / strand_count / entry_count / anchor_count / unresolved_ref_count
+卡片/result 形态见 tasktree explain card；jq 整型见 tasktree explain jq"#,
     },
     TopicInfo {
         name: "jq",
@@ -168,7 +168,7 @@ jq 整型（切 JSON 成你要的形）见 tasktree explain jq"#,
 顶层字段见 tasktree explain json。常用：
 
 取 strand id（免脆弱解析，取代手搓字符串切割）：
-  tasktree add "..." --format json | jq -r .id
+  echo "..." | tasktree add --format json | jq -r .id
 
 取日志行：
   tasktree show --id <ID> --format json | jq -r '.events[].entry'
@@ -178,7 +178,7 @@ jq 整型（切 JSON 成你要的形）见 tasktree explain jq"#,
   坑：用 startswith；勿用 test("^\[...")——shell 里反斜杠转义会炸。
 
 抽数字轨迹（先按约定写 [metric] name=val，再 capture 出序列）：
-  tasktree append --id <ID> "[metric] win_count=26"
+  echo "[metric] win_count=26" | tasktree append --id <ID>
   tasktree show --id <ID> --format json | jq '[.events[].entry | capture("win_count=(?<v>[0-9]+)") | .v | tonumber]'
 
 数值筛选（offset / count / entry_count 是数，可比较）：
@@ -193,8 +193,8 @@ jq 整型（切 JSON 成你要的形）见 tasktree explain jq"#,
     TopicInfo {
         name: "grammar",
         title: "文法契约——全 CLI 一致的参数与命名规则",
-        body: r#"目标线：主对象用位置参数；位置被 content 占用的命令
-（append/checkpoint/bind）用 --id；单 id 命令两种写法等价
+        body: r#"目标线：主对象用位置参数；正文写入命令（add/append）的正文只走 stdin；
+checkpoint/bind 用 --id；单 id 命令两种写法等价
 （<ID> 与 --id <ID>）；timeline 的 --id 等价 --strand。
 
 旗标词表（同一概念只有一个名字）：
@@ -208,7 +208,7 @@ JSON 命名法：
   复数名词 = 数组（events / matches / strands / active / timeline）
   计数 = count 或 *_count（entry_count / closed_count / hidden_count）
   自身身份 = id；引用他者 = <noun>_id（如 search 的 strand_id）
-  id / strand_id 一律全宽 24 hex，跨输出可 join
+  id / strand_id 一律全宽 64 hex 内容 hash，跨输出可 join
   （append_id 例外：64 hex 内容哈希，不是 strand 把手）
 
 写命令三件套：写 journal 必收 --provenance、必有 --format json
@@ -221,8 +221,8 @@ exit code：0 成功 / 1 解析失败 / 2 写入失败 / 3 参数非法。
 
 永久豁免（点名豁免，防"看起来漏了"的二次猜测）：
   doctor 子命令风格（doctor journal）
-  export --out <PATH>（主对象用旗标）
-  append [CONTENT] [ID] 的 LEGACY 第二位置参数"#,
+  export --out <PATH>（主对象用旗标）；cutover-v2 --apply（journal maintenance）
+  add/append 正文位置参数、--stdin、--file 已在 v2 迁移中移除"#,
     },
 ];
 
@@ -309,7 +309,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         severity: Severity::Warning,
         category: "lifecycle",
         title: "deadline overdue",
-        finding: "A task has a [deadline] entry whose by= time has passed, and the strand carries no closing marker ([verified] [done] [cancelled] [failed] [merged] [ended]).",
+        finding: "A task has a [deadline] entry whose by= time has passed, and the strand carries no close effect or legacy closing marker.",
         impact: "The task is overdue; downstream schedule assumptions are invalid.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
@@ -557,6 +557,10 @@ mod tests {
                 id: "task".to_string(),
                 ts: ts.clone(),
                 content: "task summary".to_string(),
+                effect: None,
+                prev_entry_id: None,
+                entry_id: None,
+                refs: Vec::new(),
                 ref_: None,
                 append_id: None,
                 git: None,
@@ -571,6 +575,10 @@ mod tests {
                 id: "parent_a".to_string(),
                 ts: ts.clone(),
                 content: "parent a".to_string(),
+                effect: None,
+                prev_entry_id: None,
+                entry_id: None,
+                refs: Vec::new(),
                 ref_: None,
                 append_id: None,
                 git: None,
@@ -585,6 +593,10 @@ mod tests {
                 id: "parent_b".to_string(),
                 ts: ts.clone(),
                 content: "parent b".to_string(),
+                effect: None,
+                prev_entry_id: None,
+                entry_id: None,
+                refs: Vec::new(),
                 ref_: None,
                 append_id: None,
                 git: None,

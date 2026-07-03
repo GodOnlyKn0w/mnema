@@ -455,11 +455,13 @@ fn tree_and_orient_forest_agree_on_nesting() {
         tree_child_ids, forest_child_ids,
         "tree and orient --tree must list the same children under the parent"
     );
-    assert_eq!(tree_child_ids, vec![child_a.clone(), child_b.clone()]);
+    let mut expected_child_ids = vec![child_a.clone(), child_b.clone()];
+    expected_child_ids.sort();
+    assert_eq!(tree_child_ids, expected_child_ids);
 }
 
 // tree: a duplicate belongs-to link must not double-project the child.
-// Read-side dedup folds repeated EdgeLinked targets (journal keeps both).
+// Read-side dedup folds repeated link entries (journal keeps both).
 
 #[test]
 fn tree_duplicate_belongs_to_link_does_not_double_project() {
@@ -473,14 +475,22 @@ fn tree_duplicate_belongs_to_link_does_not_double_project() {
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
 
-    // The journal is append-only: both EdgeLinked events are present.
+    // The journal is append-only: both link effect entries are present.
     let link_events = events
         .iter()
-        .filter(|(_, e)| matches!(e, Event::EdgeLinked { .. }))
+        .filter(|(_, e)| {
+            matches!(
+                e,
+                Event::LogAppended {
+                    effect: Some(event::EntryEffect::Link { .. }),
+                    ..
+                }
+            )
+        })
         .count();
     assert_eq!(
         link_events, 2,
-        "journal keeps both link events (append-only)"
+        "journal keeps both link entries (append-only)"
     );
 
     // The projection folds them: belongs_to_edges holds one entry.
@@ -727,11 +737,11 @@ fn search_default_excludes_hidden() {
     let id = create_strand("anchor");
     cmd_append(
         Some("needle-haystack"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
@@ -751,11 +761,11 @@ fn search_include_hidden_projection_reports_hidden() {
     let id = create_strand("anchor");
     cmd_append(
         Some("needle-haystack"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
@@ -782,22 +792,22 @@ fn show_tail_works_with_explicit_id() {
     let id = create_strand("tail decoupling test");
     cmd_append(
         Some("entry two"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
     .unwrap();
     cmd_append(
         Some("entry three"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )

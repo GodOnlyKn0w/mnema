@@ -6,7 +6,10 @@ fn test_context_text_output_contract() {
     // Create a typed prompt-strand with [covers]
     let (created, appended) =
         event::make_strand_created("[covers] test-area/", Some("prompt-strand"));
-    let id = created.strand_id().to_string();
+    let id = created
+        .strand_id()
+        .expect("strand-scoped event")
+        .to_string();
     with_journal_write_lock(|journal| {
         append_event_unlocked(journal, &created)?;
         append_event_unlocked(journal, &appended)?;
@@ -823,7 +826,7 @@ fn context_closed_strand_observation_folding() {
 fn agent_context_default_excludes_hidden_prompt_strands() {
     let _env = setup();
     let (c, a) = event::make_strand_created("[covers] test/", Some("prompt-strand"));
-    let id = c.strand_id().to_string();
+    let id = c.strand_id().expect("strand-scoped event").to_string();
     with_journal_write_lock(|j| {
         append_event_unlocked(j, &c)?;
         append_event_unlocked(j, &a)
@@ -850,7 +853,7 @@ fn agent_context_default_excludes_hidden_prompt_strands() {
 fn context_default_excludes_hidden() {
     let _env = setup();
     let (c, a) = event::make_strand_created("[covers] test-area/", Some("prompt-strand"));
-    let id = c.strand_id().to_string();
+    let id = c.strand_id().expect("strand-scoped event").to_string();
     with_journal_write_lock(|j| {
         append_event_unlocked(j, &c)?;
         append_event_unlocked(j, &a)
@@ -865,13 +868,13 @@ fn context_default_excludes_hidden() {
     assert!(all.iter().any(|s| s.id == id));
 }
 
-// Repeated `cmd_hide` is idempotent: only one StrandHidden event is written.
+// Repeated `cmd_hide` is idempotent: only one hide visibility entry is written.
 
 #[test]
 fn cmd_context_default_excludes_hidden_via_cmd_path() {
     let _env = setup();
     let (c, a) = event::make_strand_created("[covers] audit/", Some("prompt-strand"));
-    let id = c.strand_id().to_string();
+    let id = c.strand_id().expect("strand-scoped event").to_string();
     with_journal_write_lock(|j| {
         append_event_unlocked(j, &c)?;
         append_event_unlocked(j, &a)

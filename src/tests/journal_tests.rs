@@ -301,3 +301,67 @@ fn find_strand_rejects_empty_id() {
     // a real prefix still resolves
     assert_eq!(find_strand(&events, &id[..8]), Some(id.clone()));
 }
+
+#[test]
+fn v2_journal_anchor_written_after_write_and_doctor_verifies() {
+    let _env = setup();
+    create_strand("anchored strand");
+    let path = ensure_journal().unwrap();
+    let read = read_journal_lossy(&path);
+    let events: Vec<Event> = read.events.iter().map(|(_, event)| event.clone()).collect();
+    let anchor_count = events
+        .iter()
+        .filter(|event| matches!(event, Event::JournalAnchored { .. }))
+        .count();
+    assert!(anchor_count >= 1, "write transaction must append an anchor");
+
+    let total_lines = fs::read_to_string(&path).unwrap().lines().count();
+    let report = diagnostics::build_doctor_journal_report(
+        &events,
+        total_lines,
+        read.skipped(),
+        0,
+        0,
+        diagnostics::DoctorPreviousState::FirstRun,
+        chrono::Utc::now(),
+    );
+
+    assert_eq!(report.integrity.anchor_count, anchor_count);
+    assert!(
+        !report.integrity.has_errors(),
+        "fresh anchored journal must verify: {:?}",
+        report.integrity
+    );
+    assert_eq!(report.integrity.unanchored_event_count, 0);
+}
+
+#[test]
+fn doctor_integrity_detects_tampered_anchored_entry() {
+    let _env = setup();
+    create_strand("anchor tamper source");
+    let path = ensure_journal().unwrap();
+    let raw = fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("anchor tamper source"));
+    let tampered = raw.replacen("anchor tamper source", "anchor tamper edited", 1);
+    fs::write(&path, tampered).unwrap();
+
+    let read = read_journal_lossy(&path);
+    let events: Vec<Event> = read.events.iter().map(|(_, event)| event.clone()).collect();
+    let total_lines = fs::read_to_string(&path).unwrap().lines().count();
+    let report = diagnostics::build_doctor_journal_report(
+        &events,
+        total_lines,
+        read.skipped(),
+        0,
+        0,
+        diagnostics::DoctorPreviousState::FirstRun,
+        chrono::Utc::now(),
+    );
+
+    assert!(report.has_errors(), "tampering must be an integrity error");
+    assert!(
+        !report.integrity.chain_errors.is_empty() || !report.integrity.anchor_errors.is_empty(),
+        "tampering must surface in integrity details: {:?}",
+        report.integrity
+    );
+}

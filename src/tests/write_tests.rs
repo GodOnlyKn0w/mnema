@@ -52,7 +52,7 @@ fn positional_append_most_recent() {
 }
 
 #[test]
-fn positional_with_legacy_id() {
+fn legacy_positional_id_is_rejected() {
     let _env = setup();
     let id1 = create_strand("first strand");
     let result = cmd_append(
@@ -65,7 +65,8 @@ fn positional_with_legacy_id() {
         None,
         None,
     );
-    assert!(result.is_ok());
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("legacy positional strand id"));
 }
 
 #[test]
@@ -172,13 +173,13 @@ fn file_content_empty() {
 // ── Content source conflicts ──
 
 #[test]
-fn content_source_none() {
+fn default_stdin_empty_or_unpiped_is_rejected() {
     let _env = setup();
     create_strand("first strand");
     let result = cmd_append(None, None, false, false, None, None, None, None);
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(err.contains("content source"));
+    assert!(err.contains("stdin"));
 }
 
 #[test]
@@ -188,7 +189,7 @@ fn content_source_conflict_positional_and_stdin() {
     let result = cmd_append(Some("content"), None, false, true, None, None, None, None);
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(err.contains("only one content source"));
+    assert!(err.contains("exactly one stdin stream"));
 }
 
 #[test]
@@ -209,11 +210,11 @@ fn content_source_conflict_positional_and_file() {
         None,
     );
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("only one content source"));
+    assert!(result.unwrap_err().contains("exactly one stdin stream"));
 }
 
 #[test]
-fn stdin_positional_strand_id_warns_to_use_explicit_id() {
+fn direct_content_and_stdin_conflict() {
     let _env = setup();
     create_strand("first strand");
     let result = cmd_append(
@@ -228,12 +229,11 @@ fn stdin_positional_strand_id_warns_to_use_explicit_id() {
     );
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(err.starts_with("warn:"));
-    assert!(err.contains("require --id"));
+    assert!(err.contains("exactly one stdin stream"));
 }
 
 #[test]
-fn file_positional_strand_id_warns_to_use_explicit_id() {
+fn direct_content_and_file_conflict() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("note.md");
     fs::write(&file_path, "test").unwrap();
@@ -251,8 +251,7 @@ fn file_positional_strand_id_warns_to_use_explicit_id() {
     );
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(err.starts_with("warn:"));
-    assert!(err.contains("require --id"));
+    assert!(err.contains("exactly one stdin stream"));
 }
 
 #[test]
@@ -273,7 +272,7 @@ fn content_source_conflict_stdin_and_file() {
         None,
     );
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("only one content source"));
+    assert!(result.unwrap_err().contains("exactly one stdin stream"));
 }
 
 #[test]
@@ -294,7 +293,7 @@ fn content_source_all_three() {
         None,
     );
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("only one content source"));
+    assert!(result.unwrap_err().contains("exactly one stdin stream"));
 }
 
 // ── Target source conflicts ──
@@ -413,22 +412,22 @@ fn checkpoint_tail_does_not_change_observed_entry_count() {
     let id = create_strand("checkpoint target");
     cmd_append(
         Some("step one"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
     .unwrap();
     cmd_append(
         Some("step two"),
+        None,
+        false,
+        false,
+        None,
         Some(&id),
-        false,
-        false,
-        None,
-        None,
         None,
         None,
     )
@@ -883,10 +882,11 @@ fn add_multiple_content_sources_errors() {
 }
 
 #[test]
-fn add_no_content_source_errors() {
+fn add_default_stdin_empty_or_unpiped_errors() {
     let _env = setup();
     let result = cmd_add(None, false, None, false, None, None);
-    assert!(result.is_err(), "add with no content source must error");
+    assert!(result.is_err(), "add without piped stdin must error");
+    assert!(result.unwrap_err().contains("stdin"));
 }
 
 #[test]
@@ -917,3 +917,199 @@ fn add_nonexistent_file_errors() {
 }
 
 // ── W073: typo marker suggestion ─────────────────────────────────────────
+
+#[test]
+fn v2_add_uses_first_entry_hash_as_strand_id() {
+    let _env = setup();
+    let id = create_strand("v2 first entry identity");
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let strand = strands.iter().find(|s| s.id == id).expect("strand exists");
+    let first = strand.log.first().expect("first entry exists");
+
+    assert_eq!(id.len(), 64);
+    assert_eq!(first.entry_id.as_deref(), Some(id.as_str()));
+    assert!(first.prev_entry_id.is_none());
+}
+
+#[test]
+fn v2_append_chains_to_previous_entry_hash() {
+    let _env = setup();
+    let id = create_strand("v2 chain root");
+    let path = ensure_journal().unwrap();
+    let (before_events, _) = read_events_lossy(&path);
+    let before_strands = projection::project_strands(&before_events, true);
+    let first_entry_id = before_strands
+        .iter()
+        .find(|s| s.id == id)
+        .and_then(|s| s.log.first())
+        .and_then(|entry| entry.entry_id.clone())
+        .expect("first entry hash exists");
+
+    cmd_append(
+        Some("v2 chained append"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let (after_events, _) = read_events_lossy(&path);
+    let after_strands = projection::project_strands(&after_events, true);
+    let strand = after_strands
+        .iter()
+        .find(|s| s.id == id)
+        .expect("strand exists after append");
+    let second = strand.log.get(1).expect("second entry exists");
+
+    assert_eq!(
+        second.prev_entry_id.as_deref(),
+        Some(first_entry_id.as_str())
+    );
+    assert_ne!(second.entry_id.as_deref(), Some(first_entry_id.as_str()));
+}
+
+#[test]
+fn v2_why_writes_entry_hash_ref_and_legacy_pin() {
+    let _env = setup();
+    let basis = create_strand("basis strand");
+    cmd_append(
+        Some("basis update"),
+        None,
+        false,
+        false,
+        None,
+        Some(&basis),
+        None,
+        None,
+    )
+    .unwrap();
+    let consumer = create_strand("consumer strand");
+
+    let path = ensure_journal().unwrap();
+    let (before_events, _) = read_events_lossy(&path);
+    let basis_entry_id = projection::project_strands(&before_events, true)
+        .iter()
+        .find(|s| s.id == basis)
+        .and_then(|s| s.log.last())
+        .and_then(|entry| entry.entry_id.clone())
+        .expect("basis entry hash exists");
+
+    cmd_append_with_seen_offset(
+        Some("[decision] cite basis"),
+        None,
+        false,
+        false,
+        None,
+        Some(&consumer),
+        None,
+        None,
+        None,
+        Some(&basis),
+    )
+    .unwrap();
+
+    let (after_events, _) = read_events_lossy(&path);
+    let cited = after_events
+        .iter()
+        .filter_map(|(_, event)| {
+            if let Event::LogAppended {
+                id,
+                content,
+                refs,
+                ref_,
+                ..
+            } = event
+            {
+                if id == &consumer && content == "[decision] cite basis" {
+                    return Some((refs, ref_));
+                }
+            }
+            None
+        })
+        .next()
+        .expect("citing entry exists");
+
+    assert_eq!(cited.0, &vec![basis_entry_id]);
+    assert!(
+        cited
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with(&format!("{}@", basis)),
+        "legacy ref pin should remain during transition"
+    );
+}
+#[test]
+fn v2_close_and_reopen_write_lifecycle_effect_entries() {
+    let _env = setup();
+    let id = create_strand("v2 lifecycle target");
+    let path = ensure_journal().unwrap();
+    let (before_events, _) = read_events_lossy(&path);
+    let first_entry_id = projection::project_strands(&before_events, true)
+        .iter()
+        .find(|s| s.id == id)
+        .and_then(|s| s.log.last())
+        .and_then(|entry| entry.entry_id.clone())
+        .expect("first entry hash exists");
+
+    cmd_close(&id, Some("done"), false).unwrap();
+    let (closed_events, _) = read_events_lossy(&path);
+    let close_prev = closed_events
+        .iter()
+        .filter_map(|(_, event)| {
+            if let Event::LogAppended {
+                id: event_id,
+                effect: Some(event::EntryEffect::Close { disposition }),
+                prev_entry_id,
+                ..
+            } = event
+            {
+                if event_id == &id && disposition == "done" {
+                    return prev_entry_id.clone();
+                }
+            }
+            None
+        })
+        .next()
+        .expect("close effect entry exists");
+    assert_eq!(close_prev, first_entry_id);
+    let closed_strands = projection::project_strands(&closed_events, true);
+    let closed = closed_strands.iter().find(|s| s.id == id).unwrap();
+    assert_eq!(closed.state(), "closed:done");
+    let close_entry_id = closed
+        .log
+        .last()
+        .and_then(|entry| entry.entry_id.clone())
+        .expect("close entry hash exists");
+
+    cmd_reopen(&id, false).unwrap();
+    let (reopened_events, _) = read_events_lossy(&path);
+    let reopen_prev = reopened_events
+        .iter()
+        .filter_map(|(_, event)| {
+            if let Event::LogAppended {
+                id: event_id,
+                effect: Some(event::EntryEffect::Reopen),
+                prev_entry_id,
+                ..
+            } = event
+            {
+                if event_id == &id {
+                    return prev_entry_id.clone();
+                }
+            }
+            None
+        })
+        .next()
+        .expect("reopen effect entry exists");
+    assert_eq!(reopen_prev, close_entry_id);
+    let reopened_strands = projection::project_strands(&reopened_events, true);
+    let reopened = reopened_strands.iter().find(|s| s.id == id).unwrap();
+    assert_eq!(reopened.state(), "registered");
+}

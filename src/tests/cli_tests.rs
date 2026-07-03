@@ -82,13 +82,13 @@ fn target_conflict_new_and_id() {
 }
 
 #[test]
-fn target_conflict_new_and_legacy_id() {
+fn legacy_positional_id_is_rejected() {
     let _env = setup();
     let id = create_strand("first strand");
     let result = cmd_append(
         Some("content"),
         Some(&id),
-        true,
+        false,
         false,
         None,
         None,
@@ -96,16 +96,16 @@ fn target_conflict_new_and_legacy_id() {
         None,
     );
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("only one target"));
+    assert!(result.unwrap_err().contains("legacy positional strand id"));
 }
 
 #[test]
-fn reversed_positional_append_gets_helpful_error() {
+fn reversed_positional_append_is_no_longer_supported() {
     let _env = setup();
     let id = create_strand("first strand");
     let result = cmd_append(
-        Some(&id),
         Some("[observed] finding"),
+        Some(&id),
         false,
         false,
         None,
@@ -115,12 +115,9 @@ fn reversed_positional_append_gets_helpful_error() {
     );
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(err.contains("arguments look reversed"));
-    assert!(err.contains("tasktree append --id"));
-    // The suggested command must carry the actual content, not echo the id
-    assert!(err.contains(&format!("--id {} \"[observed] finding\"", id)));
+    assert!(err.contains("legacy positional strand id"));
+    assert!(err.contains("use --id <ID>"));
 }
-
 // ── orient ──
 
 #[test]
@@ -359,15 +356,13 @@ fn catalog_referenced_markers_are_writable() {
 fn add_parent_and_belongs_to_alias_parse() {
     use clap::CommandFactory;
     let parent = "0000019dd34b";
-    let by_parent =
-        Cli::command().try_get_matches_from(["tasktree", "add", "--parent", parent, "child"]);
+    let by_parent = Cli::command().try_get_matches_from(["tasktree", "add", "--parent", parent]);
     assert!(
         by_parent.is_ok(),
         "add --parent must parse: {:?}",
         by_parent
     );
-    let by_alias =
-        Cli::command().try_get_matches_from(["tasktree", "add", "--belongs-to", parent, "child"]);
+    let by_alias = Cli::command().try_get_matches_from(["tasktree", "add", "--belongs-to", parent]);
     assert!(
         by_alias.is_ok(),
         "add --belongs-to alias must parse: {:?}",
@@ -425,11 +420,34 @@ fn depends_help_frames_upstreams_as_review_context() {
 // ── context exposure axis (ADR-0002) ──
 
 #[test]
-fn grammar_content_position_write_commands_accept_id_flag() {
+fn grammar_write_commands_accept_id_flag_without_content_position() {
     use clap::CommandFactory;
     let id = "0000019dd34b";
-    let append = Cli::command().try_get_matches_from(["tasktree", "append", "--id", id, "note"]);
+    let append = Cli::command().try_get_matches_from(["tasktree", "append", "--id", id]);
     assert!(append.is_ok(), "append --id must parse: {:?}", append);
+    let add = Cli::command().try_get_matches_from(["tasktree", "add"]);
+    assert!(
+        add.is_ok(),
+        "add must parse without a content arg: {:?}",
+        add
+    );
+    let append_positional =
+        Cli::command().try_get_matches_from(["tasktree", "append", "--id", id, "note"]);
+    assert!(
+        append_positional.is_err(),
+        "append positional content must not parse"
+    );
+    let add_positional = Cli::command().try_get_matches_from(["tasktree", "add", "note"]);
+    assert!(
+        add_positional.is_err(),
+        "add positional content must not parse"
+    );
+    let stdin_flag = Cli::command().try_get_matches_from(["tasktree", "append", "--stdin"]);
+    assert!(stdin_flag.is_err(), "append --stdin must not parse");
+    let file_flag =
+        Cli::command().try_get_matches_from(["tasktree", "append", "--file", "note.md"]);
+    assert!(file_flag.is_err(), "append --file must not parse");
+
     let checkpoint = Cli::command().try_get_matches_from([
         "tasktree",
         "checkpoint",
@@ -486,16 +504,8 @@ fn grammar_write_commands_accept_provenance() {
     let id = "0000019dd34b";
     let provenance = r#"{"producer":"tester"}"#;
     let cases: Vec<Vec<&str>> = vec![
-        vec!["tasktree", "add", "--provenance", provenance, "note"],
-        vec![
-            "tasktree",
-            "append",
-            "--id",
-            id,
-            "--provenance",
-            provenance,
-            "note",
-        ],
+        vec!["tasktree", "add", "--provenance", provenance],
+        vec!["tasktree", "append", "--id", id, "--provenance", provenance],
         vec![
             "tasktree",
             "checkpoint",
@@ -606,7 +616,6 @@ fn seen_offset_flag_parses_on_write_commands() {
         "0000019dd34b",
         "--seen-offset",
         "2",
-        "note",
     ]);
     assert!(
         append.is_ok(),
@@ -693,12 +702,12 @@ fn grammar_json_field_naming() {
                 if (k == "count" || k.ends_with("_count")) && !val.is_number() {
                     errs.push(format!("count field `{}` is not a number", k));
                 }
-                // id/strand_id are full-width 24-hex handles (join law);
+                // id/strand_id are full-width 64-hex content-addressed handles (join law);
                 // append_id is a 64-hex content hash, not a strand handle.
                 if (k == "id" || k == "strand_id") && val.is_string() {
                     let s = val.as_str().unwrap();
-                    if s.len() != 24 {
-                        errs.push(format!("`{}` is not full-width 24-hex: `{}`", k, s));
+                    if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+                        errs.push(format!("`{}` is not full-width 64-hex: `{}`", k, s));
                     }
                 }
                 walk(val, errs);
@@ -764,14 +773,13 @@ fn target_conflict_new_legacy_and_explicit() {
         None,
     );
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("only one target"));
+    assert!(result.unwrap_err().contains("legacy positional strand id"));
 }
 
 #[test]
 fn target_conflict_explicit_and_legacy() {
     let _env = setup();
     let id = create_strand("first strand");
-    // --id <id> "content" <id> — both explicit and legacy ID provided
     let result = cmd_append(
         Some("content"),
         Some(&id),
@@ -783,17 +791,15 @@ fn target_conflict_explicit_and_legacy() {
         None,
     );
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("only one target"));
+    assert!(result.unwrap_err().contains("legacy positional strand id"));
 }
 
 #[test]
-fn legacy_id_rejected_with_stdin() {
+fn legacy_id_rejected_before_content_source_resolution() {
     let _env = setup();
     let id = create_strand("first strand");
-    // legacy positional id with --stdin (not positional content)
     let file_path = _env.path().join("note.md");
     fs::write(&file_path, "stdin content here").unwrap();
-    // We use --file as a proxy for --stdin since we can't pipe in tests
     let result = cmd_append(
         None,
         Some(&id),
@@ -805,13 +811,13 @@ fn legacy_id_rejected_with_stdin() {
         None,
     );
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("positional strand id"));
+    assert!(result.unwrap_err().contains("legacy positional strand id"));
 }
 
 // ── --new strand creation ──
 
 #[test]
-fn new_with_positional_content() {
+fn new_with_direct_content() {
     let _env = setup();
     let result = cmd_append(
         Some("brand new strand"),
@@ -825,7 +831,6 @@ fn new_with_positional_content() {
     );
     assert!(result.is_ok());
 }
-
 #[test]
 fn new_with_file_content() {
     let dir = tempfile::tempdir().unwrap();
@@ -859,7 +864,7 @@ fn exit_code_for_journal_unreadable_is_2() {
 #[test]
 fn exit_code_for_generic_and_warn_are_1() {
     assert_eq!(exit_code_for("strand abc not found"), 1);
-    assert_eq!(exit_code_for("warn: stdin and --file require --id"), 1);
+    assert_eq!(exit_code_for("legacy positional strand id was removed"), 1);
     assert_eq!(exit_code_for("journal issues detected"), 1);
 }
 

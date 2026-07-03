@@ -7,8 +7,8 @@
 use crate::diagnostics;
 use crate::event::{self, Event, find_strand, resolve_id};
 use crate::journal::{
-    append_event_unlocked, ensure_journal, read_events_lossy, read_events_strict,
-    with_journal_write_lock,
+    JournalEntryAppendRequest, append_entry_to_strand, append_entry_to_strand_checked,
+    append_events, ensure_journal, read_events_lossy, read_events_strict,
 };
 use crate::markers::{
     is_closing_annotation_marker, is_known_marker_str, suggest_marker, validate_lifecycle_marker,
@@ -16,8 +16,8 @@ use crate::markers::{
 use crate::output::{self, OrientStrand};
 use crate::projection;
 use crate::util::{
-    humanize_duration, looks_like_strand_id, parse_event_ts, parse_provenance_arg,
-    read_file_content, read_stdin_content, shorten,
+    humanize_duration, parse_event_ts, parse_provenance_arg, read_file_content, read_stdin_content,
+    shorten,
 };
 use crate::{
     print_card_with_state, print_handle_line, strand_card_fresh, strand_card_fresh_with_state,
@@ -55,6 +55,23 @@ pub(crate) fn cmd_add(
     )
 }
 
+pub(crate) fn cmd_add_from_stdin(
+    format_json: bool,
+    parent: Option<&str>,
+    strand_type: Option<&str>,
+    provenance_raw: Option<&str>,
+) -> Result<(), String> {
+    let raw = read_stdin_content()?;
+    cmd_add_with_parent(
+        Some(&raw),
+        false,
+        None,
+        format_json,
+        parent,
+        strand_type,
+        provenance_raw,
+    )
+}
 pub(crate) fn cmd_add_with_parent(
     content: Option<&str>,
     stdin: bool,
@@ -64,40 +81,28 @@ pub(crate) fn cmd_add_with_parent(
     strand_type: Option<&str>,
     provenance_raw: Option<&str>,
 ) -> Result<(), String> {
-    // ---- Content Source Resolution (mirrors append) ----
-    let source_kind = match (content.is_some(), stdin, file.is_some()) {
-        (false, false, false) => {
-            return Err(
-                "choose a content source: positional content, --stdin, or --file <path>"
-                    .to_string(),
-            );
-        }
-        (true, false, false) => "positional",
-        (false, true, false) => "stdin",
-        (false, false, true) => "file",
+    // CLI v2 carries entry content on stdin. The content/file branches are kept
+    // for unit tests and internal callers that bypass clap.
+    let (raw, source_kind) = match (content, stdin, file) {
+        (None, false, None) | (None, true, None) => (read_stdin_content()?, "stdin"),
+        (Some(c), false, None) => (c.to_string(), "direct"),
+        (None, false, Some(path)) => (read_file_content(path)?, "file"),
         _ => {
             let mut sources = Vec::new();
             if content.is_some() {
-                sources.push("positional content");
+                sources.push("direct content");
             }
             if stdin {
-                sources.push("--stdin");
+                sources.push("stdin");
             }
             if file.is_some() {
-                sources.push("--file");
+                sources.push("file");
             }
             return Err(format!(
-                "choose only one content source, got: {}",
+                "entry content is read from exactly one stdin stream; got: {}",
                 sources.join(", ")
             ));
         }
-    };
-
-    let raw = match source_kind {
-        "positional" => content.unwrap().to_string(),
-        "stdin" => read_stdin_content()?,
-        "file" => read_file_content(file.unwrap())?,
-        _ => unreachable!(),
     };
 
     if raw.trim().is_empty() {
@@ -145,31 +150,27 @@ pub(crate) fn cmd_add_with_parent(
         None
     };
 
-    // acquire lock once, write all events atomically
-    let result = with_journal_write_lock(|journal| {
-        let (created, mut appended) = event::make_strand_created(&stored, resolved_type);
-        // Attach provenance to the initial LogAppended event
-        if let Event::LogAppended {
-            provenance: ref mut prov_field,
-            ..
-        } = appended
-        {
-            *prov_field = provenance.clone();
-        }
-        let id = created.strand_id().to_string();
-        append_event_unlocked(journal, &created)?;
-        append_event_unlocked(journal, &appended)?;
-        if let Some(parent_id) = &parent_id {
-            let edge =
-                event::make_edge_linked(&id, parent_id, Some("belongs-to"), provenance.clone());
-            append_event_unlocked(journal, &edge)?;
-        }
-        Ok(id)
-    });
-    let id = match result {
-        Ok(id) => id,
-        Err(e) => return Err(e),
+    let (created, appended) =
+        event::make_strand_created_with_provenance(&stored, resolved_type, provenance.clone());
+    let id = created
+        .strand_id()
+        .expect("strand-scoped event")
+        .to_string();
+    let first_entry_id = match &appended {
+        Event::LogAppended { entry_id, .. } => entry_id.clone(),
+        _ => None,
     };
+    let mut events_to_append = vec![created, appended];
+    if let Some(parent_id) = &parent_id {
+        events_to_append.push(event::make_edge_linked(
+            &id,
+            first_entry_id.as_deref(),
+            parent_id,
+            Some("belongs-to"),
+            provenance.clone(),
+        ));
+    }
+    append_events(&events_to_append)?;
     if format_json {
         let output = output::AddOutput {
             id: id.clone(),
@@ -251,6 +252,28 @@ pub(crate) fn cmd_append(
     )
 }
 
+pub(crate) fn cmd_append_from_stdin(
+    new: bool,
+    explicit_id: Option<&str>,
+    format: Option<&str>,
+    provenance_raw: Option<&str>,
+    seen_offset: Option<usize>,
+    why: Option<&str>,
+) -> Result<(), String> {
+    let raw = read_stdin_content()?;
+    cmd_append_with_seen_offset(
+        Some(&raw),
+        None,
+        new,
+        false,
+        None,
+        explicit_id,
+        format,
+        provenance_raw,
+        seen_offset,
+        why,
+    )
+}
 pub(crate) fn cmd_append_with_seen_offset(
     content: Option<&str>,
     legacy_id: Option<&str>,
@@ -279,48 +302,32 @@ pub(crate) fn cmd_append_with_seen_offset(
 }
 
 pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, String> {
-    if (req.stdin || req.file.is_some())
-        && req.legacy_id.is_none()
-        && req.content.map(looks_like_strand_id).unwrap_or(false)
-    {
-        return Err(
-            "warn: stdin and --file require --id to specify target; positional strand id is not supported with this content source".to_string()
-        );
+    if req.legacy_id.is_some() {
+        return Err("legacy positional strand id was removed; use --id <ID>".to_string());
     }
 
-    let source_kind = match (req.content.is_some(), req.stdin, req.file.is_some()) {
-        (false, false, false) => {
-            return Err(
-                "choose a content source: positional content, --stdin, or --file <path>"
-                    .to_string(),
-            );
-        }
-        (true, false, false) => "positional",
-        (false, true, false) => "stdin",
-        (false, false, true) => "file",
+    // CLI v2 carries entry content on stdin. The content/file branches are kept
+    // for unit tests and internal callers that bypass clap.
+    let (raw, source_kind) = match (req.content, req.stdin, req.file) {
+        (None, false, None) | (None, true, None) => (read_stdin_content()?, "stdin"),
+        (Some(c), false, None) => (c.to_string(), "direct"),
+        (None, false, Some(path)) => (read_file_content(path)?, "file"),
         _ => {
             let mut sources = Vec::new();
             if req.content.is_some() {
-                sources.push("positional content");
+                sources.push("direct content");
             }
             if req.stdin {
-                sources.push("--stdin");
+                sources.push("stdin");
             }
             if req.file.is_some() {
-                sources.push("--file");
+                sources.push("file");
             }
             return Err(format!(
-                "choose only one content source, got: {}",
+                "entry content is read from exactly one stdin stream; got: {}",
                 sources.join(", ")
             ));
         }
-    };
-
-    let raw = match source_kind {
-        "positional" => req.content.unwrap().to_string(),
-        "stdin" => read_stdin_content()?,
-        "file" => read_file_content(req.file.unwrap())?,
-        _ => unreachable!(),
     };
 
     if raw.trim().is_empty() {
@@ -338,56 +345,40 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
     let path = ensure_journal()?;
     let (events, _) = read_events_lossy(&path);
 
-    if let (Some(first), Some(second)) = (req.content, req.legacy_id) {
-        if find_strand(&events, first).is_some() && find_strand(&events, second).is_none() {
-            return Err(format!(
-                "positional append arguments look reversed. Use:\n  tasktree append --id {} \"{}\"",
-                first,
-                second.replace('"', "\\\"")
-            ));
-        }
-    }
-
     if req.explicit_id.map_or(false, |id| id.trim().is_empty()) {
         return Err("explicit --id cannot be empty".to_string());
     }
 
-    let target_count = [req.new, req.explicit_id.is_some(), req.legacy_id.is_some()]
+    let target_count = [req.new, req.explicit_id.is_some()]
         .iter()
         .filter(|&&x| x)
         .count();
 
     if target_count > 1 {
-        return Err("choose only one target: --new, --id, or positional strand id".to_string());
-    }
-
-    if req.legacy_id.is_some() && source_kind != "positional" {
-        return Err(
-            "warn: stdin and --file require --id to specify target; positional strand id is not supported with this content source".to_string()
-        );
+        return Err("choose only one target: --new or --id".to_string());
     }
 
     let provenance = parse_provenance_arg(req.provenance_raw)?;
 
     if req.new {
-        let (created, mut appended) = event::make_strand_created(&stored, Some("session"));
-        if let Event::LogAppended {
-            provenance: ref mut prov_field,
-            ..
-        } = appended
-        {
-            *prov_field = provenance.clone();
-        }
-        let new_id = created.strand_id().to_string();
-        with_journal_write_lock(|journal| {
-            append_event_unlocked(journal, &created)?;
-            append_event_unlocked(journal, &appended)?;
-            Ok(())
-        })?;
+        let (created, appended) = event::make_strand_created_with_provenance(
+            &stored,
+            Some("session"),
+            provenance.clone(),
+        );
+        let new_id = created
+            .strand_id()
+            .expect("strand-scoped event")
+            .to_string();
+        let append_id = match &appended {
+            Event::LogAppended { append_id, .. } => append_id.clone(),
+            _ => None,
+        };
+        append_events(&[created, appended])?;
         return Ok(AppendOutcome {
             kind: AppendOutcomeKind::CreatedNew,
             strand_id: new_id.clone(),
-            append_id: None,
+            append_id,
             stored_content: stored,
             provenance: provenance.clone(),
             seen_offset: req.seen_offset,
@@ -398,20 +389,21 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         });
     }
 
+    let all_strands = projection::project_strands(&events, true);
     let target_id = req.explicit_id.or(req.legacy_id);
     let full_id = if let Some(id) = target_id {
         find_strand(&events, id).ok_or_else(|| {
             let mut msg = format!("strand {} not found", id);
             if id == "-" {
                 msg.push_str(
-                    ". If you meant to pipe content from stdin, use:\n  echo \"...\" | tasktree append --stdin --id <id>",
+                    ". If you meant to pipe content from stdin, use:\n  echo \"...\" | tasktree append --id <id>",
                 );
             }
             msg
         })?
     } else {
-        let strands = projection::project_strands(&events, false);
-        let mut sorted: Vec<_> = strands.iter().collect();
+        let visible_strands = projection::project_strands(&events, false);
+        let mut sorted: Vec<_> = visible_strands.iter().collect();
         sorted.sort_by(|a, b| b.last_ts().cmp(&a.last_ts()));
         let recent = sorted
             .first()
@@ -419,37 +411,42 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         recent.id.clone()
     };
 
-    let strand_last_offset = projection::project_strands(&events, true)
+    let target_strand = all_strands
         .iter()
         .find(|s| s.id == full_id)
-        .map(|s| s.last_offset())
-        .unwrap_or(0);
+        .ok_or_else(|| format!("strand {} not found", full_id))?;
+    let strand_last_offset = target_strand.last_offset();
+
     let seen_warning =
         diagnostics::check_w076_seen_offset(&full_id, req.seen_offset, strand_last_offset);
-    let pinned_ref: Option<String> = match req.why {
+    let mut refs: Vec<String> = Vec::new();
+    let legacy_ref: Option<String> = match req.why {
         Some(w) => {
             let tgt = find_strand(&events, w)
                 .ok_or_else(|| format!("--why target strand {} not found", w))?;
-            let tgt_offset = projection::project_strands(&events, true)
+            let target_basis = all_strands
                 .iter()
                 .find(|s| s.id == tgt)
-                .map(|s| s.last_offset())
-                .unwrap_or(0);
-            Some(format!("{}@{}", tgt, tgt_offset))
+                .ok_or_else(|| format!("--why target strand {} not found", w))?;
+            let target_entry_id = target_basis
+                .log
+                .last()
+                .and_then(|entry| entry.entry_id.clone())
+                .ok_or_else(|| format!("--why target strand {} has no entry hash", w))?;
+            refs.push(target_entry_id);
+            Some(format!("{}@{}", tgt, target_basis.last_offset()))
         }
         None => None,
     };
-    let event = event::make_log_appended_with_ref(
-        &full_id,
-        &stored,
-        pinned_ref.as_deref(),
-        provenance.clone(),
-    );
-    let append_id = match &event {
-        Event::LogAppended { append_id, .. } => append_id.clone(),
-        _ => None,
-    };
-    with_journal_write_lock(|journal| append_event_unlocked(journal, &event))?;
+    let appended = append_entry_to_strand(JournalEntryAppendRequest {
+        strand_id: full_id.clone(),
+        content: stored.clone(),
+        refs,
+        legacy_ref,
+        effect: None,
+        provenance: provenance.clone(),
+    })?;
+    let append_id = appended.append_id;
 
     let marker_warning = possible_marker_warning(&stored);
     let closing_marker_warning = is_closing_annotation_marker(&stored);
@@ -486,7 +483,7 @@ fn possible_marker_warning(stored: &str) -> Option<AppendMarkerWarning> {
 }
 
 fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
-    if outcome.kind == AppendOutcomeKind::CreatedNew {
+    if outcome.kind == AppendOutcomeKind::CreatedNew && format != Some("json") {
         println!("{}", outcome.strand_id);
         if let Some((card, state)) = &outcome.card_state {
             print_card_with_state(card, state);
@@ -552,7 +549,7 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
     }
 }
 
-/// Close a strand by writing a StrandClosed lifecycle event.
+/// Close a strand by writing a close effect entry.
 /// `disposition` defaults to "done" when not specified.
 pub(crate) fn cmd_close(
     id: &str,
@@ -568,19 +565,28 @@ pub(crate) fn cmd_close(
         ));
     }
     let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
-    // Check current state before writing (readable feedback, not a gate)
-    let path = ensure_journal()?;
-    let (events, _) = read_events_lossy(&path);
-    let (current_state, _, _) = projection::compute_state_from_events(&events, &strand_id);
-    if current_state.starts_with("closed:") {
-        return Err(format!(
-            "strand {} is already {}; use reopen first",
-            shorten(&strand_id),
-            current_state
-        ));
-    }
-    let close_event = event::make_strand_closed(&strand_id, disp, None);
-    with_journal_write_lock(|journal| append_event_unlocked(journal, &close_event))?;
+    let validate_id = strand_id.clone();
+    append_entry_to_strand_checked(
+        JournalEntryAppendRequest {
+            strand_id: strand_id.clone(),
+            content: format!("close disposition={}", disp),
+            refs: Vec::new(),
+            legacy_ref: None,
+            effect: Some(event::EntryEffect::close(disp)),
+            provenance: None,
+        },
+        move |events| {
+            let (current_state, _, _) = projection::compute_state_from_events(events, &validate_id);
+            if current_state.starts_with("closed:") {
+                return Err(format!(
+                    "strand {} is already {}; use reopen first",
+                    shorten(&validate_id),
+                    current_state
+                ));
+            }
+            Ok(())
+        },
+    )?;
     if format_json {
         let output = output::LifecycleOutput {
             strand_id: strand_id.clone(),
@@ -602,20 +608,30 @@ pub(crate) fn cmd_close(
     Ok(())
 }
 
-/// Reopen a closed strand by writing a StrandReopened lifecycle event.
+/// Reopen a closed strand by writing a reopen effect entry.
 pub(crate) fn cmd_reopen(id: &str, format_json: bool) -> Result<(), String> {
     let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
-    let path = ensure_journal()?;
-    let (events, _) = read_events_lossy(&path);
-    let (current_state, _, _) = projection::compute_state_from_events(&events, &strand_id);
-    if current_state == "registered" {
-        return Err(format!(
-            "strand {} is already open (registered); nothing to reopen",
-            shorten(&strand_id)
-        ));
-    }
-    let reopen_event = event::make_strand_reopened(&strand_id, None);
-    with_journal_write_lock(|journal| append_event_unlocked(journal, &reopen_event))?;
+    let validate_id = strand_id.clone();
+    append_entry_to_strand_checked(
+        JournalEntryAppendRequest {
+            strand_id: strand_id.clone(),
+            content: "reopen erroneous close".to_string(),
+            refs: Vec::new(),
+            legacy_ref: None,
+            effect: Some(event::EntryEffect::Reopen),
+            provenance: None,
+        },
+        move |events| {
+            let (current_state, _, _) = projection::compute_state_from_events(events, &validate_id);
+            if current_state == "registered" {
+                return Err(format!(
+                    "strand {} is already open (registered); nothing to reopen",
+                    shorten(&validate_id)
+                ));
+            }
+            Ok(())
+        },
+    )?;
     if format_json {
         let output = output::LifecycleOutput {
             strand_id: strand_id.clone(),
@@ -811,7 +827,18 @@ pub(crate) fn plan_checkpoint(
         "[checkpoint] ok resolved_by=\"{}\" observed_entries_before_append={} action=\"{}\"",
         resolved_by, observed_entries_before_append, escaped_action
     );
-    let event = event::make_log_appended(&strand.id, &content, provenance_val);
+    let prev_entry_id = strand
+        .log
+        .last()
+        .and_then(|entry| entry.entry_id.as_deref());
+    let event = event::make_log_appended_entry(
+        &strand.id,
+        prev_entry_id,
+        &content,
+        Vec::new(),
+        None,
+        provenance_val,
+    );
     let append_id = match &event {
         Event::LogAppended { append_id, .. } => append_id.clone(),
         _ => None,
@@ -903,8 +930,56 @@ pub(crate) fn plan_checkpoint(
     })
 }
 
-pub(crate) fn commit_checkpoint(plan: &CheckpointPlan) -> Result<(), CheckpointFailure> {
-    with_journal_write_lock(|journal| append_event_unlocked(journal, &plan.event)).map_err(|e| {
+pub(crate) fn commit_checkpoint(plan: &mut CheckpointPlan) -> Result<(), CheckpointFailure> {
+    let Event::LogAppended {
+        content,
+        refs,
+        ref_,
+        effect,
+        provenance,
+        prev_entry_id,
+        ..
+    } = &plan.event
+    else {
+        return Err(checkpoint_failure(
+            2,
+            "journal append failed: checkpoint plan did not contain a log entry".to_string(),
+            plan.requested_strand.clone(),
+            Some(plan.strand_id.clone()),
+            false,
+        ));
+    };
+    let planned_prev_entry_id = prev_entry_id.clone();
+    let planned_max_offset = plan.max_offset_before;
+    let validate_id = plan.strand_id.clone();
+    let appended = append_entry_to_strand_checked(
+        JournalEntryAppendRequest {
+            strand_id: plan.strand_id.clone(),
+            content: content.clone(),
+            refs: refs.clone(),
+            legacy_ref: ref_.clone(),
+            effect: effect.clone(),
+            provenance: provenance.clone(),
+        },
+        move |events| {
+            let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+            if current_max_offset != planned_max_offset {
+                return Err(format!(
+                    "checkpoint plan is stale: journal advanced from offset {} to {}; rerun checkpoint",
+                    planned_max_offset, current_max_offset
+                ));
+            }
+            let current_head = crate::journal::current_entry_head(events, &validate_id);
+            if current_head != planned_prev_entry_id {
+                return Err(format!(
+                    "checkpoint plan is stale: strand {} head changed; rerun checkpoint",
+                    shorten(&validate_id)
+                ));
+            }
+            Ok(())
+        },
+    )
+    .map_err(|e| {
         checkpoint_failure(
             2,
             format!("journal append failed: {}", e),
@@ -912,7 +987,10 @@ pub(crate) fn commit_checkpoint(plan: &CheckpointPlan) -> Result<(), CheckpointF
             Some(plan.strand_id.clone()),
             false,
         )
-    })
+    })?;
+    plan.event = appended.event;
+    plan.append_id = appended.append_id;
+    Ok(())
 }
 
 pub(crate) fn checkpoint_outcome(plan: CheckpointPlan) -> CheckpointOutcome {
@@ -1059,8 +1137,8 @@ pub(crate) fn cmd_checkpoint_with_seen_offset(
         provenance_raw,
         seen_offset,
     };
-    let plan = plan_checkpoint(&events, request, chrono::Utc::now())?;
-    commit_checkpoint(&plan)?;
+    let mut plan = plan_checkpoint(&events, request, chrono::Utc::now())?;
+    commit_checkpoint(&mut plan)?;
     let outcome = checkpoint_outcome(plan);
     render_checkpoint_outcome(&outcome, format_json);
     Ok(())

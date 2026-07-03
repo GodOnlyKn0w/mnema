@@ -67,7 +67,7 @@ pub(crate) fn parse_provenance_arg(raw: Option<&str>) -> Result<Option<serde_jso
 pub(crate) fn read_stdin_content() -> Result<String, String> {
     // Detect TTY: if stdin is a terminal, reject immediately to avoid agent hanging
     if atty::is(atty::Stream::Stdin) {
-        return Err("--stdin requires piped input".to_string());
+        return Err("stdin requires piped input".to_string());
     }
     let mut buf = String::new();
     std::io::stdin()
@@ -86,11 +86,6 @@ pub(crate) fn read_file_content(path: &str) -> Result<String, String> {
     }
     let buf = std::fs::read_to_string(p).map_err(|e| format!("failed to read file: {}", e))?;
     Ok(buf)
-}
-
-pub(crate) fn looks_like_strand_id(value: &str) -> bool {
-    let len = value.len();
-    (6..=32).contains(&len) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Render a duration in seconds as a human-readable string.
@@ -113,13 +108,18 @@ pub(crate) fn parse_duration(s: &str) -> Result<usize, String> {
         return Err("empty duration".to_string());
     }
     let (num_str, unit) = s.split_at(s.len() - 1);
-    let num: usize = num_str.parse().map_err(|_| format!("invalid duration: {}", s))?;
+    let num: usize = num_str
+        .parse()
+        .map_err(|_| format!("invalid duration: {}", s))?;
     match unit {
         "s" => Ok(num),
         "m" => Ok(num * 60),
         "h" => Ok(num * 3600),
         "d" => Ok(num * 86400),
-        _ => Err(format!("unknown duration unit '{}'. Use s/m/h/d (e.g. 2h)", unit)),
+        _ => Err(format!(
+            "unknown duration unit '{}'. Use s/m/h/d (e.g. 2h)",
+            unit
+        )),
     }
 }
 

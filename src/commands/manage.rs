@@ -68,8 +68,14 @@ pub(crate) fn cmd_link(
     let src_id = resolve_id(&events, source)?;
     let tgt_id = resolve_id(&events, target)?;
     let provenance = parse_provenance_arg(provenance_raw)?;
-    let event = event::make_edge_linked(&src_id, &tgt_id, Some(etype), provenance);
-    with_journal_write_lock(|journal| append_event_unlocked(journal, &event))?;
+    append_entry_to_strand(JournalEntryAppendRequest {
+        strand_id: src_id.clone(),
+        content: format!("link {} {}", etype, tgt_id),
+        refs: Vec::new(),
+        legacy_ref: None,
+        effect: Some(event::EntryEffect::link(&tgt_id, etype)),
+        provenance,
+    })?;
     if format_json {
         let output = output::LinkOutput {
             source_id: src_id.clone(),
@@ -101,9 +107,9 @@ pub(crate) fn cmd_link(
 }
 
 /// Remove a typed edge (F5). Symmetric with `cmd_link`: validates edge_type,
-/// resolves both ids, appends an `EdgeUnlinked` carrying edge_type so the
+/// resolves both ids, appends an unlink effect entry carrying edge_type so the
 /// projection's last-write-wins fold drops exactly that edge. Append-only — the
-/// original EdgeLinked stays in the journal; only the read projection changes.
+/// original link entry stays in the journal; only the read projection changes.
 pub(crate) fn cmd_unlink(
     source: &str,
     target: &str,
@@ -130,8 +136,14 @@ pub(crate) fn cmd_unlink(
     let src_id = resolve_id(&events, source)?;
     let tgt_id = resolve_id(&events, target)?;
     let provenance = parse_provenance_arg(provenance_raw)?;
-    let event = event::make_edge_unlinked(&src_id, &tgt_id, Some(etype), provenance);
-    with_journal_write_lock(|journal| append_event_unlocked(journal, &event))?;
+    append_entry_to_strand(JournalEntryAppendRequest {
+        strand_id: src_id.clone(),
+        content: format!("unlink {} {}", etype, tgt_id),
+        refs: Vec::new(),
+        legacy_ref: None,
+        effect: Some(event::EntryEffect::unlink(&tgt_id, etype)),
+        provenance,
+    })?;
     if format_json {
         let output = output::UnlinkOutput {
             source_id: src_id.clone(),
@@ -156,9 +168,9 @@ pub(crate) fn cmd_unlink(
 /// no event is written. The current state read and the append happen inside the
 /// same journal write lock so concurrent hide/unhide calls are serialised.
 ///
-/// `provenance_raw` is forwarded to the `[hidden] <reason>` LogAppended entry
-/// when `reason` is given. Without a reason no content entry is written and
-/// the StrandHidden event carries no provenance field (the event schema has none).
+/// `provenance_raw` is stored on the hide effect entry.
+/// When `reason` is given, the entry content keeps the transition
+/// `[hidden] <reason>` spelling.
 pub(crate) fn cmd_hide(
     id: &str,
     reason: Option<&str>,
@@ -169,7 +181,7 @@ pub(crate) fn cmd_hide(
     let provenance = parse_provenance_arg(provenance_raw)?;
     // Both the read (to compute current state) and the append must be inside
     // the same write lock. Otherwise two concurrent `cmd_hide` calls would each
-    // see hide_count=0 and both append a StrandHidden event.
+    // see hide_count=0 and both append a hide effect entry.
     let outcome = with_journal_write_lock(|journal| {
         // Re-read events under the lock. The journal file is already open
         // for append, so we use a fresh read of the on-disk file via the
@@ -180,17 +192,21 @@ pub(crate) fn cmd_hide(
         if current > 0 {
             return Ok(false); // already hidden: no-op
         }
-        let hide_event = event::make_strand_hidden(&strand_id);
-        if let Some(r) = reason {
-            let log_event = event::make_log_appended(
-                &strand_id,
-                &format!("[hidden] {}", r),
-                provenance.clone(),
-            );
-            append_events_unlocked(journal, &[hide_event, log_event])?;
-        } else {
-            append_event_unlocked(journal, &hide_event)?;
-        }
+        let content = reason
+            .map(|r| format!("[hidden] {}", r))
+            .unwrap_or_else(|| "hide".to_string());
+        append_entry_to_strand_unlocked(
+            journal,
+            &events,
+            JournalEntryAppendRequest {
+                strand_id: strand_id.clone(),
+                content,
+                refs: Vec::new(),
+                legacy_ref: None,
+                effect: Some(event::EntryEffect::Hide),
+                provenance: provenance.clone(),
+            },
+        )?;
         Ok(true)
     })?;
     if format_json {
@@ -222,8 +238,18 @@ pub(crate) fn cmd_unhide(id: &str, format_json: bool) -> Result<(), String> {
         if current <= 0 {
             return Ok(false); // already visible: no-op
         }
-        let event = event::make_strand_unhidden(&strand_id);
-        append_event_unlocked(journal, &event)?;
+        append_entry_to_strand_unlocked(
+            journal,
+            &events,
+            JournalEntryAppendRequest {
+                strand_id: strand_id.clone(),
+                content: "unhide".to_string(),
+                refs: Vec::new(),
+                legacy_ref: None,
+                effect: Some(event::EntryEffect::Unhide),
+                provenance: None,
+            },
+        )?;
         Ok(true)
     })?;
     if format_json {
@@ -441,5 +467,80 @@ pub(crate) fn cmd_export(out: &str) -> Result<(), String> {
         "Exported {} lines (1 metadata + {} journal) to {}",
         export_lines, line_count, out
     );
+    Ok(())
+}
+
+pub(crate) fn cmd_cutover_v2(
+    apply: bool,
+    archive: Option<&str>,
+    map: Option<&str>,
+    format_json: bool,
+) -> Result<(), String> {
+    let journal_dir = resolve_journal_dir()?;
+    let journal_path = ensure_journal()?;
+    let archive_path = archive
+        .map(PathBuf::from)
+        .unwrap_or_else(|| journal_dir.join("journal.v1.jsonl"));
+    let map_path = map
+        .map(PathBuf::from)
+        .unwrap_or_else(|| journal_dir.join("migration-v1-to-v2.json"));
+
+    let read = read_journal_lossy(&journal_path);
+    if let Some(error) = read.read_error {
+        return Err(error);
+    }
+    if !read.diagnostics.is_empty() {
+        return Err(format!(
+            "cannot cut over: journal has {} parse error(s); run doctor first",
+            read.diagnostics.len()
+        ));
+    }
+
+    let source_event_count = read.events.len();
+    let plan = build_cutover_v2_plan(&read.events)?;
+    let report = output::CutoverV2ReportOutput {
+        applied: apply,
+        source_journal: journal_path.display().to_string(),
+        archive_journal: archive_path.display().to_string(),
+        map_path: map_path.display().to_string(),
+        source_event_count,
+        imported_event_count: plan.events.len(),
+        strand_count: plan.map.strands.len(),
+        entry_count: plan.map.entries.len(),
+        anchor_count: plan
+            .events
+            .iter()
+            .filter(|event| matches!(event, Event::JournalAnchored { .. }))
+            .count(),
+        unresolved_ref_count: plan.map.unresolved_refs.len(),
+    };
+
+    if apply {
+        apply_cutover_v2(&journal_path, &archive_path, &map_path, &plan)?;
+    }
+
+    if format_json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).expect("serialize cutover report")
+        );
+    } else {
+        println!("v2 cutover {}", if apply { "applied" } else { "dry-run" });
+        println!("  source: {}", report.source_journal);
+        println!("  archive: {}", report.archive_journal);
+        println!("  map: {}", report.map_path);
+        println!(
+            "  events: {} -> {}",
+            report.source_event_count, report.imported_event_count
+        );
+        println!("  strands: {}", report.strand_count);
+        println!("  entries: {}", report.entry_count);
+        println!("  anchors: {}", report.anchor_count);
+        println!("  unresolved_refs: {}", report.unresolved_ref_count);
+        if !apply {
+            println!("  apply with: tasktree cutover-v2 --apply");
+        }
+    }
+
     Ok(())
 }
