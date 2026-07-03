@@ -251,7 +251,7 @@ pub(crate) fn current_entry_head(events: &[(usize, Event)], strand_id: &str) -> 
     fold.head(strand_id)
 }
 
-pub(crate) fn append_entry_to_strand_unlocked(
+fn append_entry_to_strand_unlocked(
     journal: &mut std::fs::File,
     events: &[(usize, Event)],
     req: JournalEntryAppendRequest,
@@ -274,6 +274,28 @@ pub(crate) fn append_entry_to_strand_checked(
     req: JournalEntryAppendRequest,
     validate: impl FnOnce(&[(usize, Event)]) -> Result<(), String>,
 ) -> Result<JournalAppendOutcome, String> {
+    let outcome = append_entry_to_strand_gated(req, |events| {
+        validate(events)?;
+        Ok(AppendGate::Proceed)
+    })?;
+    Ok(outcome.expect("Proceed gate always appends"))
+}
+
+/// Gate decision for `append_entry_to_strand_gated`: write the entry, or skip
+/// it and report success (for idempotent commands like hide/unhide where the
+/// target is already in the requested state).
+pub(crate) enum AppendGate {
+    Proceed,
+    Skip,
+}
+
+/// Like `append_entry_to_strand_checked`, but the gate may also decide —
+/// from the events read under the write lock — that no entry is needed.
+/// Returns `Ok(None)` when the gate skipped, `Ok(Some(outcome))` when it wrote.
+pub(crate) fn append_entry_to_strand_gated(
+    req: JournalEntryAppendRequest,
+    gate: impl FnOnce(&[(usize, Event)]) -> Result<AppendGate, String>,
+) -> Result<Option<JournalAppendOutcome>, String> {
     with_journal_write_lock(|journal| {
         let path = ensure_journal()?;
         let read = read_journal_lossy(&path);
@@ -286,8 +308,12 @@ pub(crate) fn append_entry_to_strand_checked(
                 read.diagnostics.len()
             ));
         }
-        validate(&read.events)?;
-        append_entry_to_strand_unlocked(journal, &read.events, req)
+        match gate(&read.events)? {
+            AppendGate::Skip => Ok(None),
+            AppendGate::Proceed => {
+                append_entry_to_strand_unlocked(journal, &read.events, req).map(Some)
+            }
+        }
     })
 }
 

@@ -179,36 +179,29 @@ pub(crate) fn cmd_hide(
 ) -> Result<(), String> {
     let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
     let provenance = parse_provenance_arg(provenance_raw)?;
-    // Both the read (to compute current state) and the append must be inside
-    // the same write lock. Otherwise two concurrent `cmd_hide` calls would each
-    // see hide_count=0 and both append a hide effect entry.
-    let outcome = with_journal_write_lock(|journal| {
-        // Re-read events under the lock. The journal file is already open
-        // for append, so we use a fresh read of the on-disk file via the
-        // shared reader for consistency.
-        let path = ensure_journal()?;
-        let (events, _) = read_events_lossy(&path);
-        let current = projection::hide_balance(&events, &strand_id);
-        if current > 0 {
-            return Ok(false); // already hidden: no-op
-        }
-        let content = reason
-            .map(|r| format!("[hidden] {}", r))
-            .unwrap_or_else(|| "hide".to_string());
-        append_entry_to_strand_unlocked(
-            journal,
-            &events,
-            JournalEntryAppendRequest {
-                strand_id: strand_id.clone(),
-                content,
-                refs: Vec::new(),
-                legacy_ref: None,
-                effect: Some(event::EntryEffect::Hide),
-                provenance: provenance.clone(),
-            },
-        )?;
-        Ok(true)
-    })?;
+    let content = reason
+        .map(|r| format!("[hidden] {}", r))
+        .unwrap_or_else(|| "hide".to_string());
+    // The gate reads current state and the append happens under the same
+    // journal write lock, so concurrent hide/unhide calls are serialised.
+    let outcome = append_entry_to_strand_gated(
+        JournalEntryAppendRequest {
+            strand_id: strand_id.clone(),
+            content,
+            refs: Vec::new(),
+            legacy_ref: None,
+            effect: Some(event::EntryEffect::Hide),
+            provenance,
+        },
+        |events| {
+            if projection::hide_balance(events, &strand_id) > 0 {
+                Ok(AppendGate::Skip) // already hidden: no-op
+            } else {
+                Ok(AppendGate::Proceed)
+            }
+        },
+    )?
+    .is_some();
     if format_json {
         println!("{}", visibility_ledger_json(&strand_id, !outcome));
     } else {
@@ -231,27 +224,24 @@ pub(crate) fn cmd_hide(
 /// same journal write lock so concurrent hide/unhide calls are serialised.
 pub(crate) fn cmd_unhide(id: &str, format_json: bool) -> Result<(), String> {
     let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
-    let outcome = with_journal_write_lock(|journal| {
-        let path = ensure_journal()?;
-        let (events, _) = read_events_lossy(&path);
-        let current = projection::hide_balance(&events, &strand_id);
-        if current <= 0 {
-            return Ok(false); // already visible: no-op
-        }
-        append_entry_to_strand_unlocked(
-            journal,
-            &events,
-            JournalEntryAppendRequest {
-                strand_id: strand_id.clone(),
-                content: "unhide".to_string(),
-                refs: Vec::new(),
-                legacy_ref: None,
-                effect: Some(event::EntryEffect::Unhide),
-                provenance: None,
-            },
-        )?;
-        Ok(true)
-    })?;
+    let outcome = append_entry_to_strand_gated(
+        JournalEntryAppendRequest {
+            strand_id: strand_id.clone(),
+            content: "unhide".to_string(),
+            refs: Vec::new(),
+            legacy_ref: None,
+            effect: Some(event::EntryEffect::Unhide),
+            provenance: None,
+        },
+        |events| {
+            if projection::hide_balance(events, &strand_id) <= 0 {
+                Ok(AppendGate::Skip) // already visible: no-op
+            } else {
+                Ok(AppendGate::Proceed)
+            }
+        },
+    )?
+    .is_some();
     if format_json {
         println!("{}", visibility_ledger_json(&strand_id, !outcome));
     } else {
