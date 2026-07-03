@@ -50,14 +50,68 @@ pub(crate) fn cmd_add(
         file,
         format_json,
         None,
+        None,
         strand_type,
         provenance_raw,
     )
 }
 
+/// Resolve a `--why`/`--from` rationale REF to `(entry hash, legacy pin)`.
+///
+/// Resolution order: a strand id/prefix pins the target line's *latest*
+/// entry (shorthand for "that line's current conclusion", v1-compatible);
+/// anything else resolves as an entry-hash prefix and pins that exact entry.
+/// The legacy pin always records the citation-time frontier
+/// (`<strand>@<last_offset>`): staleness means "the line moved past the
+/// point where I cited it", not "the cited entry is not the newest".
+fn resolve_rationale_ref(
+    events: &[(usize, Event)],
+    all_strands: &[projection::ProjectedStrand],
+    input: &str,
+) -> Result<(String, String), String> {
+    if let Some(tgt) = find_strand(events, input) {
+        let target_basis = all_strands
+            .iter()
+            .find(|s| s.id == tgt)
+            .ok_or_else(|| format!("rationale target strand {} not found", input))?;
+        let target_entry_id = target_basis
+            .log
+            .last()
+            .and_then(|entry| entry.entry_id.clone())
+            .ok_or_else(|| format!("rationale target strand {} has no entry hash", input))?;
+        return Ok((
+            target_entry_id,
+            format!("{}@{}", tgt, target_basis.last_offset()),
+        ));
+    }
+    match projection::find_entry(all_strands, input) {
+        projection::EntryLookup::One { strand, entry } => {
+            let entry_id = entry
+                .entry_id
+                .clone()
+                .expect("find_entry only matches entries with ids");
+            Ok((entry_id, format!("{}@{}", strand.id, strand.last_offset())))
+        }
+        projection::EntryLookup::None => Err(format!(
+            "rationale target {} matches no strand or entry",
+            input
+        )),
+        projection::EntryLookup::Ambiguous(candidates) => {
+            let sample: Vec<String> = candidates.iter().take(4).map(|c| shorten(c)).collect();
+            Err(format!(
+                "rationale prefix {} is ambiguous: {} entries match (e.g. {})",
+                input,
+                candidates.len(),
+                sample.join(", ")
+            ))
+        }
+    }
+}
+
 pub(crate) fn cmd_add_from_stdin(
     format_json: bool,
     parent: Option<&str>,
+    from: Option<&str>,
     strand_type: Option<&str>,
     provenance_raw: Option<&str>,
 ) -> Result<(), String> {
@@ -68,16 +122,19 @@ pub(crate) fn cmd_add_from_stdin(
         None,
         format_json,
         parent,
+        from,
         strand_type,
         provenance_raw,
     )
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_add_with_parent(
     content: Option<&str>,
     stdin: bool,
     file: Option<&str>,
     format_json: bool,
     parent: Option<&str>,
+    from: Option<&str>,
     strand_type: Option<&str>,
     provenance_raw: Option<&str>,
 ) -> Result<(), String> {
@@ -135,13 +192,20 @@ pub(crate) fn cmd_add_with_parent(
     });
 
     let provenance = parse_provenance_arg(provenance_raw)?;
+    // --parent (belongs-to) and --from (source ref) are orthogonal: a child
+    // can carry either, both, or neither (CORPUS §6 归属与来源正交).
+    let needs_events = parent.is_some() || from.is_some();
+    let events = if needs_events {
+        let path = ensure_journal()?;
+        read_events_lossy(&path).0
+    } else {
+        Vec::new()
+    };
     let parent_id = if let Some(parent_raw) = parent {
         let parent_raw = parent_raw.trim();
         if parent_raw.is_empty() {
             return Err("--parent cannot be empty".to_string());
         }
-        let path = ensure_journal()?;
-        let (events, _) = read_events_lossy(&path);
         Some(
             find_strand(&events, parent_raw)
                 .ok_or_else(|| format!("parent strand {} not found", parent_raw))?,
@@ -149,9 +213,25 @@ pub(crate) fn cmd_add_with_parent(
     } else {
         None
     };
+    let (from_refs, from_legacy) = if let Some(from_raw) = from {
+        let from_raw = from_raw.trim();
+        if from_raw.is_empty() {
+            return Err("--from cannot be empty".to_string());
+        }
+        let all_strands = projection::project_strands(&events, true);
+        let (entry_id, pin) = resolve_rationale_ref(&events, &all_strands, from_raw)?;
+        (vec![entry_id], Some(pin))
+    } else {
+        (Vec::new(), None)
+    };
 
-    let (created, appended) =
-        event::make_strand_created_with_provenance(&stored, resolved_type, provenance.clone());
+    let (created, appended) = event::make_strand_created_with_refs(
+        &stored,
+        resolved_type,
+        from_refs,
+        from_legacy.as_deref(),
+        provenance.clone(),
+    );
     let id = created
         .strand_id()
         .expect("strand-scoped event")
@@ -422,19 +502,9 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
     let mut refs: Vec<String> = Vec::new();
     let legacy_ref: Option<String> = match req.why {
         Some(w) => {
-            let tgt = find_strand(&events, w)
-                .ok_or_else(|| format!("--why target strand {} not found", w))?;
-            let target_basis = all_strands
-                .iter()
-                .find(|s| s.id == tgt)
-                .ok_or_else(|| format!("--why target strand {} not found", w))?;
-            let target_entry_id = target_basis
-                .log
-                .last()
-                .and_then(|entry| entry.entry_id.clone())
-                .ok_or_else(|| format!("--why target strand {} has no entry hash", w))?;
+            let (target_entry_id, pin) = resolve_rationale_ref(&events, &all_strands, w)?;
             refs.push(target_entry_id);
-            Some(format!("{}@{}", tgt, target_basis.last_offset()))
+            Some(pin)
         }
         None => None,
     };

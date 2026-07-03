@@ -742,6 +742,47 @@ pub(crate) fn current_binding(
     }
     latest
 }
+// ── Entry lookup by hash prefix ─────────────────────────────
+
+/// Result of resolving an entry-hash prefix against projected strands.
+/// Mirrors `find_strand`'s contract but keeps ambiguity explicit so the
+/// caller can list candidates instead of guessing.
+pub(crate) enum EntryLookup<'a> {
+    None,
+    One {
+        strand: &'a ProjectedStrand,
+        entry: &'a LogEntry,
+    },
+    Ambiguous(Vec<String>),
+}
+
+/// Resolve `prefix` against every effective entry id (stored v2 hashes and
+/// the deterministic virtual ids projected for retained v1 rows).
+pub(crate) fn find_entry<'a>(strands: &'a [ProjectedStrand], prefix: &str) -> EntryLookup<'a> {
+    let mut hits: Vec<(&ProjectedStrand, &LogEntry)> = Vec::new();
+    for strand in strands {
+        for entry in &strand.log {
+            if let Some(entry_id) = entry.entry_id.as_deref() {
+                if entry_id.starts_with(prefix) {
+                    hits.push((strand, entry));
+                }
+            }
+        }
+    }
+    match hits.len() {
+        0 => EntryLookup::None,
+        1 => EntryLookup::One {
+            strand: hits[0].0,
+            entry: hits[0].1,
+        },
+        _ => EntryLookup::Ambiguous(
+            hits.iter()
+                .filter_map(|(_, e)| e.entry_id.clone())
+                .collect(),
+        ),
+    }
+}
+
 // ── Entry point: project_raw → structured ──────────────────
 
 /// Project raw event stream into a Vec<ProjectedStrand>.

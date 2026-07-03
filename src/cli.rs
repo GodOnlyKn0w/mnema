@@ -107,7 +107,8 @@ Rules:
 
 Examples:
   echo \"start a new line of work\" | tasktree add
-  echo \"child line of work\" | tasktree add --parent <PARENT>")]
+  echo \"child line of work\" | tasktree add --parent <PARENT>
+  echo \"derived matter\" | tasktree add --parent <PARENT> --from <REF>")]
     Add {
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -115,6 +116,12 @@ Examples:
         /// Parent strand id. Creates a belongs-to edge from the new child to this parent.
         #[arg(long = "parent", visible_alias = "belongs-to", value_name = "PARENT")]
         parent: Option<String>,
+        /// Source record this line derives from: a strand id/prefix (pins its
+        /// latest entry) or an entry-hash prefix (pins that exact entry).
+        /// Stored as a ref on the new line's first entry. Orthogonal to
+        /// --parent: derivation may carry either, both, or neither.
+        #[arg(long = "from", value_name = "REF")]
+        from: Option<String>,
         /// Strand type: task, dag, why, session (default: auto-detect)
         #[arg(long = "type", value_name = "TYPE")]
         strand_type: Option<String>,
@@ -173,8 +180,10 @@ Provenance:
         /// If behind the target's current last_offset, emits W076 but still writes.
         #[arg(long = "seen-offset", value_name = "N")]
         seen_offset: Option<usize>,
-        /// Pin a rationale: the target strand's latest entry hash is stored in refs.
-        /// During the v2 migration, a legacy ref=<id>@<offset> pin is also stored.
+        /// Pin a rationale. REF is a strand id/prefix (stores that line's
+        /// latest entry hash — "its current conclusion") or an entry-hash
+        /// prefix (pins that exact entry). During the v2 migration, a legacy
+        /// ref=<id>@<offset> citation-frontier pin is also stored.
         #[arg(long = "why", value_name = "REF")]
         why: Option<String>,
     },
@@ -824,6 +833,7 @@ fn run(command: &Commands) -> Result<(), String> {
         Commands::Add {
             format,
             parent,
+            from,
             strand_type,
             provenance,
         } => {
@@ -831,6 +841,7 @@ fn run(command: &Commands) -> Result<(), String> {
             cmd_add_from_stdin(
                 fmt,
                 parent.as_deref(),
+                from.as_deref(),
                 strand_type.as_deref(),
                 provenance.as_deref(),
             )

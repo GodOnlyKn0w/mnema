@@ -457,8 +457,21 @@ pub fn make_strand_created_with_provenance(
     strand_type: Option<&str>,
     provenance: Option<serde_json::Value>,
 ) -> (Event, Event) {
+    make_strand_created_with_refs(content, strand_type, Vec::new(), None, provenance)
+}
+
+/// Like `make_strand_created_with_provenance`, but the first entry carries
+/// source refs (`add --from`): the refs participate in the first entry's
+/// hash and therefore in the strand id itself — a line's identity includes
+/// where it came from.
+pub fn make_strand_created_with_refs(
+    content: &str,
+    strand_type: Option<&str>,
+    refs: Vec<String>,
+    legacy_ref: Option<&str>,
+    provenance: Option<serde_json::Value>,
+) -> (Event, Event) {
     let ts = now();
-    let refs: Vec<String> = Vec::new();
     let git = get_git_context();
     let entry_id = compute_entry_id(
         None,
@@ -484,7 +497,7 @@ pub fn make_strand_created_with_provenance(
         prev_entry_id: None,
         entry_id: Some(entry_id),
         refs,
-        ref_: None,
+        ref_: legacy_ref.map(str::to_string),
         append_id: Some(append_id),
         git,
         provenance,

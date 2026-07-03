@@ -791,6 +791,7 @@ fn add_parent_creates_child_and_belongs_to_edge() {
         Some(&parent),
         None,
         None,
+        None,
     )
     .unwrap();
     let path = ensure_journal().unwrap();
@@ -814,6 +815,7 @@ fn add_parent_missing_errors_without_creating_child() {
         Some("0000019dd34b"),
         None,
         None,
+        None,
     );
     assert!(result.is_err(), "missing parent must error");
     assert!(result.unwrap_err().contains("parent strand"));
@@ -829,7 +831,8 @@ fn add_parent_missing_errors_without_creating_child() {
 #[test]
 fn add_empty_parent_errors() {
     let _env = setup();
-    let result = cmd_add_with_parent(Some("child"), false, None, false, Some("  "), None, None);
+    let result =
+        cmd_add_with_parent(Some("child"), false, None, false, Some("  "), None, None, None);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("--parent cannot be empty"));
 }
@@ -1045,6 +1048,174 @@ fn v2_why_writes_entry_hash_ref_and_legacy_pin() {
         "legacy ref pin should remain during transition"
     );
 }
+
+#[test]
+fn v2_why_pins_exact_entry_by_hash_prefix() {
+    let _env = setup();
+    let basis = create_strand("basis line first entry");
+    for content in ["basis middle entry", "basis late entry"] {
+        cmd_append(
+            Some(content),
+            None,
+            false,
+            false,
+            None,
+            Some(&basis),
+            None,
+            None,
+        )
+        .unwrap();
+    }
+    let consumer = create_strand("consumer line");
+
+    let path = ensure_journal().unwrap();
+    let (before_events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&before_events, true);
+    let basis_strand = strands.iter().find(|s| s.id == basis).unwrap();
+    // Pin the MIDDLE entry — not the head (a head prefix resolves as the
+    // strand and falls back to latest-entry shorthand), not the latest.
+    let middle_entry_id = basis_strand.log[1]
+        .entry_id
+        .clone()
+        .expect("middle entry hash exists");
+    let citation_frontier = format!("{}@{}", basis, basis_strand.last_offset());
+
+    cmd_append_with_seen_offset(
+        Some("[decision] cite the middle entry exactly"),
+        None,
+        false,
+        false,
+        None,
+        Some(&consumer),
+        None,
+        None,
+        None,
+        Some(&middle_entry_id[..16]),
+    )
+    .unwrap();
+
+    let (after_events, _) = read_events_lossy(&path);
+    let cited = after_events
+        .iter()
+        .filter_map(|(_, event)| {
+            if let Event::LogAppended {
+                id,
+                content,
+                refs,
+                ref_,
+                ..
+            } = event
+            {
+                if id == &consumer && content == "[decision] cite the middle entry exactly" {
+                    return Some((refs.clone(), ref_.clone()));
+                }
+            }
+            None
+        })
+        .next()
+        .expect("citing entry exists");
+
+    assert_eq!(
+        cited.0,
+        vec![middle_entry_id],
+        "an entry-hash prefix pins that exact entry, not the line's latest"
+    );
+    assert_eq!(
+        cited.1.as_deref(),
+        Some(citation_frontier.as_str()),
+        "legacy pin records the citation-time frontier of the cited line"
+    );
+}
+
+#[test]
+fn add_from_pins_source_and_composes_with_parent() {
+    let _env = setup();
+    let mother = create_strand("mother line of work");
+    cmd_append(
+        Some("[decision] spawn a derived matter"),
+        None,
+        false,
+        false,
+        None,
+        Some(&mother),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (before_events, _) = read_events_lossy(&path);
+    let mother_latest_entry_id = projection::project_strands(&before_events, true)
+        .iter()
+        .find(|s| s.id == mother)
+        .and_then(|s| s.log.last())
+        .and_then(|entry| entry.entry_id.clone())
+        .expect("mother entry hash exists");
+
+    // --parent and --from together: one command writes first entry with the
+    // source ref AND the belongs-to link (CORPUS §6 atomic derivation).
+    cmd_add_with_parent(
+        Some("derived line of work"),
+        false,
+        None,
+        false,
+        Some(&mother),
+        Some(&mother),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let (after_events, _) = read_events_lossy(&path);
+    let first_entry = after_events
+        .iter()
+        .filter_map(|(_, event)| {
+            if let Event::LogAppended {
+                id,
+                content,
+                refs,
+                ref_,
+                ..
+            } = event
+            {
+                if content == "derived line of work" {
+                    return Some((id.clone(), refs.clone(), ref_.clone()));
+                }
+            }
+            None
+        })
+        .next()
+        .expect("derived first entry exists");
+
+    assert_eq!(
+        first_entry.1,
+        vec![mother_latest_entry_id],
+        "--from stores the source ref on the derived line's first entry"
+    );
+    assert!(
+        first_entry
+            .2
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with(&format!("{}@", mother)),
+        "legacy pin should remain during transition"
+    );
+    let has_belongs_to = after_events.iter().any(|(_, event)| {
+        matches!(
+            event,
+            Event::LogAppended {
+                id,
+                effect: Some(event::EntryEffect::Link { target, edge_type }),
+                ..
+            } if id == &first_entry.0 && target == &mother && edge_type == "belongs-to"
+        )
+    });
+    assert!(
+        has_belongs_to,
+        "--parent still writes the belongs-to link alongside --from"
+    );
+}
+
 #[test]
 fn v2_close_and_reopen_write_lifecycle_effect_entries() {
     let _env = setup();
