@@ -12,7 +12,7 @@ use std::path::PathBuf;
 fn version_info() -> &'static str {
     concat!(
         env!("CARGO_PKG_VERSION"),
-        "\njournal schema: tasktree-journal-v1",
+        "\njournal schema: tasktree-journal-v2",
         "\ncommit: ",
         env!("TASKTREE_COMMIT"),
         "\nbuild: ",
@@ -182,8 +182,7 @@ Provenance:
         seen_offset: Option<usize>,
         /// Pin a rationale. REF is a strand id/prefix (stores that line's
         /// latest entry hash — "its current conclusion") or an entry-hash
-        /// prefix (pins that exact entry). During the v2 migration, a legacy
-        /// ref=<id>@<offset> citation-frontier pin is also stored.
+        /// prefix (pins that exact entry).
         #[arg(long = "why", value_name = "REF")]
         why: Option<String>,
     },

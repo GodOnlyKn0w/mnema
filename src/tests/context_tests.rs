@@ -181,28 +181,28 @@ fn context_friction_fixed_pair_produces_scar() {
         None,
     )
     .unwrap();
-    // Read back the friction's append_id to form a fixes= reference
+    // Read back the friction's entry_id to form a fixes= reference
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
-    let friction_append_id = events
+    let friction_entry_id = events
         .iter()
         .rev()
         .find_map(|(_, e)| {
             if let event::Event::LogAppended {
                 id: eid,
                 content,
-                append_id,
+                entry_id,
                 ..
             } = e
             {
                 if eid == &id && content.contains("a hole to fill") {
-                    return append_id.clone();
+                    return entry_id.clone();
                 }
             }
             None
         })
-        .expect("friction must have append_id");
-    let prefix = &friction_append_id[..8.min(friction_append_id.len())];
+        .expect("friction must have entry_id");
+    let prefix = &friction_entry_id[..8.min(friction_entry_id.len())];
     let fixed_content = format!("[fixed] filled the hole fixes={}", prefix);
     cmd_append(
         Some(&fixed_content),
@@ -330,7 +330,7 @@ fn context_friction_fixed_explicit_fixes_ref() {
     // Expected: friction_A becomes scar, friction_B stays full-text.
     let _env = setup();
     let id = create_prompt_strand("live guidance");
-    // Append friction_A first and capture its append_id
+    // Append friction_A first and capture its entry_id
     cmd_append(
         Some("[friction] hole alpha"),
         None,
@@ -354,29 +354,29 @@ fn context_friction_fixed_explicit_fixes_ref() {
         None,
     )
     .unwrap();
-    // Read back to find friction_A's append_id
+    // Read back to find friction_A's entry_id
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
-    let friction_a_append_id = events
+    let friction_a_entry_id = events
         .iter()
         .rev()
         .find_map(|(_, e)| {
             if let event::Event::LogAppended {
                 id: eid,
                 content,
-                append_id,
+                entry_id,
                 ..
             } = e
             {
                 if eid == &id && content.contains("hole alpha") {
-                    return append_id.clone();
+                    return entry_id.clone();
                 }
             }
             None
         })
-        .expect("friction_A must have append_id");
-    // Use first 8 chars of append_id as the prefix
-    let prefix = &friction_a_append_id[..8.min(friction_a_append_id.len())];
+        .expect("friction_A must have entry_id");
+    // Use first 8 chars of entry_id as the prefix
+    let prefix = &friction_a_entry_id[..8.min(friction_a_entry_id.len())];
     let fixed_content = format!("[fixed] resolves first hole fixes={}", prefix);
     cmd_append(
         Some(&fixed_content),
@@ -437,28 +437,28 @@ fn context_exclude_friction_also_suppresses_scars() {
         None,
     )
     .unwrap();
-    // Read back the friction's append_id
+    // Read back the friction's entry_id
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
-    let friction_append_id = events
+    let friction_entry_id = events
         .iter()
         .rev()
         .find_map(|(_, e)| {
             if let event::Event::LogAppended {
                 id: eid,
                 content,
-                append_id,
+                entry_id,
                 ..
             } = e
             {
                 if eid == &id && content.contains("a hole") {
-                    return append_id.clone();
+                    return entry_id.clone();
                 }
             }
             None
         })
-        .expect("friction must have append_id");
-    let prefix = &friction_append_id[..8.min(friction_append_id.len())];
+        .expect("friction must have entry_id");
+    let prefix = &friction_entry_id[..8.min(friction_entry_id.len())];
     let fixed_content = format!("[fixed] filled fixes={}", prefix);
     cmd_append(
         Some(&fixed_content),
@@ -501,7 +501,7 @@ fn context_dangling_fixes_produces_no_fold() {
         None,
     )
     .unwrap();
-    // Use a fake/nonexistent append_id prefix (all zeros, ≥8 chars)
+    // Use a fake/nonexistent entry_id prefix (all zeros, ≥8 chars)
     cmd_append(
         Some("[fixed] pretend fix fixes=00000000deadbeef"),
         None,
@@ -566,25 +566,25 @@ fn context_one_fixed_pairs_at_most_one_friction() {
     .unwrap();
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
-    let friction_append_id = events
+    let friction_entry_id = events
         .iter()
         .rev()
         .find_map(|(_, e)| {
             if let event::Event::LogAppended {
                 id: eid,
                 content,
-                append_id,
+                entry_id,
                 ..
             } = e
             {
                 if eid == &id && content.contains("target hole") {
-                    return append_id.clone();
+                    return entry_id.clone();
                 }
             }
             None
         })
-        .expect("friction must have append_id");
-    let prefix = &friction_append_id[..8.min(friction_append_id.len())];
+        .expect("friction must have entry_id");
+    let prefix = &friction_entry_id[..8.min(friction_entry_id.len())];
     // Two [fixed] entries both referencing the same friction
     let fixed1 = format!("[fixed] first fix fixes={}", prefix);
     let fixed2 = format!("[fixed] second fix fixes={}", prefix);

@@ -56,42 +56,34 @@ pub(crate) fn cmd_add(
     )
 }
 
-/// Resolve a `--why`/`--from` rationale REF to `(entry hash, legacy pin)`.
+/// Resolve a `--why`/`--from` rationale REF to the cited entry hash.
 ///
 /// Resolution order: a strand id/prefix pins the target line's *latest*
-/// entry (shorthand for "that line's current conclusion", v1-compatible);
-/// anything else resolves as an entry-hash prefix and pins that exact entry.
-/// The legacy pin always records the citation-time frontier
-/// (`<strand>@<last_offset>`): staleness means "the line moved past the
-/// point where I cited it", not "the cited entry is not the newest".
+/// entry (shorthand for "that line's current conclusion"); anything else
+/// resolves as an entry-hash prefix and pins that exact entry. Staleness
+/// needs no stored pin: journal offsets are globally monotonic, so
+/// ref-target-advanced derives it from positions alone.
 fn resolve_rationale_ref(
     events: &[(usize, Event)],
     all_strands: &[projection::ProjectedStrand],
     input: &str,
-) -> Result<(String, String), String> {
+) -> Result<String, String> {
     if let Some(tgt) = find_strand(events, input) {
         let target_basis = all_strands
             .iter()
             .find(|s| s.id == tgt)
             .ok_or_else(|| format!("rationale target strand {} not found", input))?;
-        let target_entry_id = target_basis
+        return target_basis
             .log
             .last()
             .and_then(|entry| entry.entry_id.clone())
-            .ok_or_else(|| format!("rationale target strand {} has no entry hash", input))?;
-        return Ok((
-            target_entry_id,
-            format!("{}@{}", tgt, target_basis.last_offset()),
-        ));
+            .ok_or_else(|| format!("rationale target strand {} has no entry hash", input));
     }
     match projection::find_entry(all_strands, input) {
-        projection::EntryLookup::One { strand, entry } => {
-            let entry_id = entry
-                .entry_id
-                .clone()
-                .expect("find_entry only matches entries with ids");
-            Ok((entry_id, format!("{}@{}", strand.id, strand.last_offset())))
-        }
+        projection::EntryLookup::One { entry, .. } => Ok(entry
+            .entry_id
+            .clone()
+            .expect("find_entry only matches entries with ids")),
         projection::EntryLookup::None => Err(format!(
             "rationale target {} matches no strand or entry",
             input
@@ -213,23 +205,22 @@ pub(crate) fn cmd_add_with_parent(
     } else {
         None
     };
-    let (from_refs, from_legacy) = if let Some(from_raw) = from {
+    let from_refs = if let Some(from_raw) = from {
         let from_raw = from_raw.trim();
         if from_raw.is_empty() {
             return Err("--from cannot be empty".to_string());
         }
         let all_strands = projection::project_strands(&events, true);
-        let (entry_id, pin) = resolve_rationale_ref(&events, &all_strands, from_raw)?;
-        (vec![entry_id], Some(pin))
+        vec![resolve_rationale_ref(&events, &all_strands, from_raw)?]
     } else {
-        (Vec::new(), None)
+        Vec::new()
     };
 
     let (created, appended) = event::make_strand_created_with_refs(
         &stored,
         resolved_type,
         from_refs,
-        from_legacy.as_deref(),
+        None,
         provenance.clone(),
     );
     let id = created
@@ -298,7 +289,7 @@ pub(crate) struct AppendMarkerWarning {
 pub(crate) struct AppendOutcome {
     pub(crate) kind: AppendOutcomeKind,
     pub(crate) strand_id: String,
-    pub(crate) append_id: Option<String>,
+    pub(crate) entry_id: Option<String>,
     pub(crate) stored_content: String,
     pub(crate) provenance: Option<serde_json::Value>,
     pub(crate) seen_offset: Option<usize>,
@@ -450,15 +441,15 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
             .strand_id()
             .expect("strand-scoped event")
             .to_string();
-        let append_id = match &appended {
-            Event::LogAppended { append_id, .. } => append_id.clone(),
+        let entry_id = match &appended {
+            Event::LogAppended { entry_id, .. } => entry_id.clone(),
             _ => None,
         };
         append_events(&[created, appended])?;
         return Ok(AppendOutcome {
             kind: AppendOutcomeKind::CreatedNew,
             strand_id: new_id.clone(),
-            append_id,
+            entry_id,
             stored_content: stored,
             provenance: provenance.clone(),
             seen_offset: req.seen_offset,
@@ -500,23 +491,18 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
     let seen_warning =
         diagnostics::check_w076_seen_offset(&full_id, req.seen_offset, strand_last_offset);
     let mut refs: Vec<String> = Vec::new();
-    let legacy_ref: Option<String> = match req.why {
-        Some(w) => {
-            let (target_entry_id, pin) = resolve_rationale_ref(&events, &all_strands, w)?;
-            refs.push(target_entry_id);
-            Some(pin)
-        }
-        None => None,
-    };
+    if let Some(w) = req.why {
+        refs.push(resolve_rationale_ref(&events, &all_strands, w)?);
+    }
     let appended = append_entry_to_strand(JournalEntryAppendRequest {
         strand_id: full_id.clone(),
         content: stored.clone(),
         refs,
-        legacy_ref,
+        legacy_ref: None,
         effect: None,
         provenance: provenance.clone(),
     })?;
-    let append_id = appended.append_id;
+    let entry_id = appended.entry_id;
 
     let marker_warning = possible_marker_warning(&stored);
     let closing_marker_warning = is_closing_annotation_marker(&stored);
@@ -525,7 +511,7 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
     Ok(AppendOutcome {
         kind: AppendOutcomeKind::AppendedExisting,
         strand_id: full_id,
-        append_id,
+        entry_id,
         stored_content: stored,
         provenance,
         seen_offset: req.seen_offset,
@@ -588,7 +574,7 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
             .collect();
         let output = output::AppendOutput {
             strand_id: &outcome.strand_id,
-            append_id: &outcome.append_id,
+            entry_id: &outcome.entry_id,
             content_preview: outcome.stored_content.chars().take(120).collect::<String>(),
             provenance: &outcome.provenance,
             seen_offset: outcome.seen_offset,
@@ -769,7 +755,7 @@ pub(crate) struct CheckpointRequest<'a> {
 pub(crate) struct CheckpointShownEntry {
     pub(crate) ts: String,
     pub(crate) content: String,
-    pub(crate) append_id: Option<String>,
+    pub(crate) entry_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -780,7 +766,7 @@ pub(crate) struct CheckpointPlan {
     pub(crate) resolved_by: &'static str,
     pub(crate) action: String,
     pub(crate) event: Event,
-    pub(crate) append_id: Option<String>,
+    pub(crate) entry_id: Option<String>,
     pub(crate) observed_entries_before_append: usize,
     pub(crate) shown_entries: Vec<CheckpointShownEntry>,
     pub(crate) staleness_seconds: Option<i64>,
@@ -911,8 +897,8 @@ pub(crate) fn plan_checkpoint(
         None,
         provenance_val,
     );
-    let append_id = match &event {
-        Event::LogAppended { append_id, .. } => append_id.clone(),
+    let entry_id = match &event {
+        Event::LogAppended { entry_id, .. } => entry_id.clone(),
         _ => None,
     };
 
@@ -926,7 +912,7 @@ pub(crate) fn plan_checkpoint(
     .map(|entry| CheckpointShownEntry {
         ts: entry.ts.clone(),
         content: entry.content.clone(),
-        append_id: entry.append_id.clone(),
+        entry_id: entry.entry_id.clone(),
     })
     .collect();
 
@@ -986,7 +972,7 @@ pub(crate) fn plan_checkpoint(
         resolved_by,
         action: req.action.to_string(),
         event,
-        append_id,
+        entry_id,
         observed_entries_before_append,
         shown_entries,
         staleness_seconds,
@@ -1061,7 +1047,7 @@ pub(crate) fn commit_checkpoint(plan: &mut CheckpointPlan) -> Result<(), Checkpo
         )
     })?;
     plan.event = appended.event;
-    plan.append_id = appended.append_id;
+    plan.entry_id = appended.entry_id;
     Ok(())
 }
 
@@ -1081,7 +1067,7 @@ pub(crate) fn render_checkpoint_outcome(outcome: &CheckpointOutcome, format_json
             observed_entries_before_append: plan.observed_entries_before_append,
             shown_entries: plan.shown_entries.len(),
             action: &plan.action,
-            append_id: &plan.append_id,
+            entry_id: &plan.entry_id,
             journal_appended: true,
             diagnostics_count: plan.diagnostics_count,
             result: outcome.card.clone(),
@@ -1130,14 +1116,14 @@ pub(crate) fn render_checkpoint_outcome(outcome: &CheckpointOutcome, format_json
         plan.observed_entries_before_append
     );
     println!("  action: {}", plan.action);
-    if let Some(id) = &plan.append_id {
-        println!("  append_id: {}", id);
+    if let Some(id) = &plan.entry_id {
+        println!("  entry_id: {}", id);
     }
     println!("  appended to journal");
     println!("log:");
     for entry in &plan.shown_entries {
         let id_str = entry
-            .append_id
+            .entry_id
             .as_ref()
             .map(|a| format!(" [{}]", &a[..12]))
             .unwrap_or_default();

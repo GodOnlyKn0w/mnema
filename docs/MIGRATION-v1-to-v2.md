@@ -90,19 +90,26 @@ jq '.entries[] | select(.old_offset == 42)' .tasktree/migration-v1-to-v2.json
 `strands`（旧线 id → 新线 id）/ `entries`（逐条映射）/
 `unresolved_refs`。
 
-## 7. 迁移后的双轨兼容面
+## 7. 双轨兼容面（已于 2026-07-04 退役，v0.2.0）
 
-迁移产物是纯 v2，但工具在过渡期仍维护以下兼容行为，供尚未换算完
-旧引用的消费者过渡：
+过渡期曾维护三个兼容行为，现均已显式退役：
 
-- `--why`/`--from` 在写入 entry 哈希 refs 的同时，双写一条 legacy
-  `ref=<线id>@<offset>` 引用前沿 pin；
-- 旧字段 `append_id`、`ref` 在存储与 `--format json` 中保留（JSON
-  契约字段只增不删）；
-- show 文本视图优先渲染 v2 把手（短 entry 哈希、hash refs），仅在
-  无 v2 数据时回退 legacy 显示。
+- ~~`--why`/`--from` 双写 legacy `ref=<线id>@<offset>` pin~~ →
+  新写入只存 entry 哈希 refs。失效检测不再需要 pin：journal offset
+  全局单调，"被引线越过引用时点"由位置直接推出（ref-target-advanced）。
+- ~~`append_id`、`ref` 字段在 JSON 输出中保留~~ → 已从
+  `--format json` 出口移除；写回执与 checkpoint 的条目把手改为
+  `entry_id`。存储结构仍**读取容忍**退役前已落盘的旧字段（旧行
+  原样保留、旧 journal 照常解析），只是不再写、不再输出。
+- ~~show 文本对无 v2 数据的行回退 legacy 显示~~ → 只渲染 v2 把手。
 
-这些兼容面将在后续大版本中退役，退役同样只能走一次显式迁移。
+配套：`[fixed] fixes=<前缀>` 配对把手改为 entry 哈希（对退役前写入
+的旧 [friction] 行仍按其 append_id 兜底匹配）；audit 的 pin 基
+`why-staleness` lint 节由哈希基 `ref-target-advanced` 取代。
+
+仍然保留的 v1 读取面（属下一次 schema 迁移，非本次退役范围）：
+v1 随机 id 行的虚拟 entry_id 投影、legacy 事件类型
+（StrandClosed/EdgeLinked 等）的折叠读取、cutover-v2 翻译器本身。
 
 ## 8. 回滚
 

@@ -710,11 +710,10 @@ pub(crate) fn cmd_show(
             }
         }
         prev_ts = Some(&entry.ts);
-        // v2 refs render as short handles; the legacy ref_ pin only shows
-        // when no hash refs exist (dual-track fallback). A cited entry whose
-        // line gained later entries is annotated in place (ref-target-advanced
-        // is a position fact; whether it overturns anything is the reader's
-        // call — run the catch-up on the cited line to re-look).
+        // v2 refs render as short handles. A cited entry whose line gained
+        // later entries is annotated in place (ref-target-advanced is a
+        // position fact; whether it overturns anything is the reader's call —
+        // run the re-look command on the cited entry).
         let ref_str = if !entry.refs.is_empty() {
             let handles: Vec<String> = entry
                 .refs
@@ -729,19 +728,12 @@ pub(crate) fn cmd_show(
                 .collect();
             format!(" [refs: {}]", handles.join(", "))
         } else {
-            entry
-                .ref_
-                .as_ref()
-                .map(|r| format!(" [ref: {}]", r))
-                .unwrap_or_default()
+            String::new()
         };
-        // Entry handle: v2 entry hash (short), falling back to the legacy
-        // append_id for rows that predate entry ids.
         let id_str = entry
             .entry_id
             .as_deref()
             .map(shorten)
-            .or_else(|| entry.append_id.as_deref().map(shorten))
             .map(|h| format!(" [{}]", h))
             .unwrap_or_default();
         println!(

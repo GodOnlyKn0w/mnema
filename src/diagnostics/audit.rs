@@ -276,32 +276,6 @@ pub fn audit_journal(
         findings: legacy_why,
     });
 
-    let mut cur_offset: HashMap<String, usize> = HashMap::new();
-    for s in &strands {
-        cur_offset.insert(s.id.clone(), s.last_offset());
-    }
-    let mut stale_why = Vec::new();
-    for s in &strands {
-        for entry in &s.log {
-            if let Some(r) = &entry.ref_ {
-                if let Some((tgt, pin)) = r.rsplit_once('@') {
-                    if let Ok(pin_off) = pin.parse::<usize>() {
-                        if let Some(&cur) = cur_offset.get(tgt) {
-                            if cur > pin_off {
-                                stale_why.push(format!("why-staleness: strand {} cites {} pinned@{} but it advanced to @{} - may warrant review", s.id, tgt, pin_off, cur));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    sections.push(LintSection {
-        name: "why-staleness",
-        summary_label: "stale rationale refs",
-        findings: stale_why,
-    });
-
     // v2 hash refs: position fact only — the cited entry's line gained
     // entries after the citation. Whether that overturns the citing
     // conclusion is the reader's judgment, not ours.

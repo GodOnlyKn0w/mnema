@@ -86,7 +86,7 @@ Marker 语义（一行一条）：
   [decision]    已做的决定
   [constraint]  必须遵守的约束
   [friction]    阻力 / 未解决的问题
-  [fixed]       已修复；可用 fixes=<append_id前缀≥8位> 指定目标 friction
+  [fixed]       已修复；可用 fixes=<entry哈希前缀≥8位> 指定目标 friction
   [lesson]      学到的教训
   [insight]     洞见
   [observed]    观察到的事实
@@ -210,7 +210,7 @@ JSON 命名法：
   计数 = count 或 *_count（entry_count / closed_count / hidden_count）
   自身身份 = id；引用他者 = <noun>_id（如 search 的 strand_id）
   id / strand_id 一律全宽 64 hex 内容 hash，跨输出可 join
-  （append_id 例外：64 hex 内容哈希，不是 strand 把手）
+  
 
 写命令三件套：写 journal 必收 --provenance、必有 --format json
 孪生、写后回显卡片（见 tasktree explain card）。
@@ -415,7 +415,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         severity: Severity::Warning,
         category: "lifecycle",
         title: "dangling fix reference — fixes= prefix unmatched",
-        finding: "A [fixed] entry carries a fixes=<prefix> token (prefix >= 8 hex chars) that does not match any [friction] entry's append_id in the same strand. The prefix either points to a nonexistent entry or to an entry that is not a [friction].",
+        finding: "A [fixed] entry carries a fixes=<prefix> token (prefix >= 8 hex chars) that does not match any [friction] entry's entry id (or a pre-retirement append_id) in the same strand. The prefix either points to a nonexistent entry or to an entry that is not a [friction].",
         impact: "The [fixed] entry is not folded and its intended friction target remains exposed as an unresolved live debt. The pairing was silently skipped.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Edit,

@@ -366,7 +366,7 @@ fn checkpoint_explicit_id_appends_structured_entry() {
         if let Event::LogAppended {
             id: event_id,
             content,
-            append_id,
+            entry_id,
             ..
         } = e
         {
@@ -375,7 +375,7 @@ fn checkpoint_explicit_id_appends_structured_entry() {
                 && content.contains("resolved_by=\"explicit --id\"")
                 && content.contains("observed_entries_before_append=1")
                 && content.contains("action=\"git commit checkpoint work\"")
-                && append_id.is_some()
+                && entry_id.is_some()
         } else {
             false
         }
@@ -978,7 +978,7 @@ fn v2_append_chains_to_previous_entry_hash() {
 }
 
 #[test]
-fn v2_why_writes_entry_hash_ref_and_legacy_pin() {
+fn v2_why_writes_entry_hash_ref_only() {
     let _env = setup();
     let basis = create_strand("basis strand");
     cmd_append(
@@ -1040,12 +1040,8 @@ fn v2_why_writes_entry_hash_ref_and_legacy_pin() {
 
     assert_eq!(cited.0, &vec![basis_entry_id]);
     assert!(
-        cited
-            .1
-            .as_deref()
-            .unwrap_or_default()
-            .starts_with(&format!("{}@", basis)),
-        "legacy ref pin should remain during transition"
+        cited.1.is_none(),
+        "legacy ref pin retired 2026-07-04: hash refs are the only rationale storage"
     );
 }
 
@@ -1078,7 +1074,6 @@ fn v2_why_pins_exact_entry_by_hash_prefix() {
         .entry_id
         .clone()
         .expect("middle entry hash exists");
-    let citation_frontier = format!("{}@{}", basis, basis_strand.last_offset());
 
     cmd_append_with_seen_offset(
         Some("[decision] cite the middle entry exactly"),
@@ -1120,10 +1115,9 @@ fn v2_why_pins_exact_entry_by_hash_prefix() {
         vec![middle_entry_id],
         "an entry-hash prefix pins that exact entry, not the line's latest"
     );
-    assert_eq!(
-        cited.1.as_deref(),
-        Some(citation_frontier.as_str()),
-        "legacy pin records the citation-time frontier of the cited line"
+    assert!(
+        cited.1.is_none(),
+        "legacy ref pin retired 2026-07-04: staleness derives from positions, not pins"
     );
 }
 
@@ -1193,12 +1187,8 @@ fn add_from_pins_source_and_composes_with_parent() {
         "--from stores the source ref on the derived line's first entry"
     );
     assert!(
-        first_entry
-            .2
-            .as_deref()
-            .unwrap_or_default()
-            .starts_with(&format!("{}@", mother)),
-        "legacy pin should remain during transition"
+        first_entry.2.is_none(),
+        "legacy ref pin retired 2026-07-04: --from stores the hash ref only"
     );
     let has_belongs_to = after_events.iter().any(|(_, event)| {
         matches!(

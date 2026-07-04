@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub(crate) struct JournalAppendOutcome {
     pub(crate) event: Event,
-    pub(crate) append_id: Option<String>,
+    pub(crate) entry_id: Option<String>,
 }
 
 pub(crate) struct JournalEntryAppendRequest {
@@ -22,13 +22,13 @@ pub(crate) struct JournalEntryAppendRequest {
 impl JournalAppendOutcome {
     fn from_event(event: Event) -> Self {
         match &event {
-            Event::LogAppended { append_id, .. } => Self {
+            Event::LogAppended { entry_id, .. } => Self {
                 event: event.clone(),
-                append_id: append_id.clone(),
+                entry_id: entry_id.clone(),
             },
             _ => Self {
                 event: event.clone(),
-                append_id: None,
+                entry_id: None,
             },
         }
     }

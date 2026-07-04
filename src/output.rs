@@ -393,7 +393,7 @@ impl<'a> From<&'a crate::diagnostics::SeenOffsetWarning> for SeenOffsetWarningOu
 #[derive(Debug, Serialize)]
 pub(crate) struct AppendOutput<'a> {
     pub(crate) strand_id: &'a str,
-    pub(crate) append_id: &'a Option<String>,
+    pub(crate) entry_id: &'a Option<String>,
     pub(crate) content_preview: String,
     pub(crate) provenance: &'a Option<serde_json::Value>,
     pub(crate) seen_offset: Option<usize>,
@@ -438,7 +438,7 @@ pub(crate) struct CheckpointOutput<'a> {
     pub(crate) observed_entries_before_append: usize,
     pub(crate) shown_entries: usize,
     pub(crate) action: &'a str,
-    pub(crate) append_id: &'a Option<String>,
+    pub(crate) entry_id: &'a Option<String>,
     pub(crate) journal_appended: bool,
     pub(crate) diagnostics_count: usize,
     pub(crate) result: Option<OrientStrand>,
@@ -720,10 +720,12 @@ pub(crate) struct ShowEntryOutput {
 // ── show --format json ─────────────────────────────────────
 
 /// One event entry in the `events` array (projection of LogEntry, not the raw struct).
+/// The legacy `append_id`/`ref` outputs were retired 2026-07-04 with the
+/// dual-track compatibility surface (docs/MIGRATION-v1-to-v2.md §7): entry
+/// identity is `entry_id`, rationale pointers are `refs`.
 #[derive(Debug, Serialize)]
 pub struct EventOutput {
     pub ts: String,
-    pub append_id: Option<String>,
     /// v2 machine effect carried by this entry; null for ordinary notes.
     pub effect: Option<EntryEffectOutput>,
     /// v2 content-addressed identity of this entry. For retained v1 rows this is
@@ -737,10 +739,6 @@ pub struct EventOutput {
     /// Per-entry provenance (e.g. {"producer":"codex"}). Always serialised —
     /// `null` when absent — per the show JSON contract (see module header).
     pub provenance: Option<serde_json::Value>,
-    /// Legacy rationale pointer retained during the v2 migration. New callers
-    /// should use `refs`; this field stays for transition audit only.
-    #[serde(rename = "ref")]
-    pub ref_field: Option<String>,
 }
 
 /// External contract for `show --format json`.
@@ -828,14 +826,12 @@ impl From<&ProjectedStrand> for StrandDetailOutput {
                 .iter()
                 .map(|e| EventOutput {
                     ts: e.ts.clone(),
-                    append_id: e.append_id.clone(),
                     effect: e.effect.as_ref().map(EntryEffectOutput::from),
                     entry_id: e.entry_id.clone(),
                     prev_entry_id: e.prev_entry_id.clone(),
                     refs: e.refs.clone(),
                     entry: e.content.clone(),
                     provenance: e.provenance.clone(),
-                    ref_field: e.ref_.clone(),
                 })
                 .collect(),
         }
@@ -853,7 +849,6 @@ pub enum TimelineEventKindOutput {
     #[serde(rename = "log_appended")]
     LogAppended {
         content: String,
-        append_id: Option<String>,
         effect: Option<EntryEffectOutput>,
     },
     #[serde(rename = "edge_linked")]
@@ -871,7 +866,6 @@ pub enum TimelineEventKindOutput {
     CheckpointCreated {
         observed: String,
         action: String,
-        append_id: Option<String>,
     },
     #[serde(rename = "subject_bound")]
     SubjectBound {
@@ -918,15 +912,12 @@ impl From<&crate::projection::TimelineEntry> for TimelineEntryOutput {
                         summary: summary.clone(),
                     }
                 }
-                crate::projection::TimelineEventKind::LogAppended {
-                    content,
-                    append_id,
-                    effect,
-                } => TimelineEventKindOutput::LogAppended {
-                    content: content.clone(),
-                    append_id: append_id.clone(),
-                    effect: effect.as_ref().map(EntryEffectOutput::from),
-                },
+                crate::projection::TimelineEventKind::LogAppended { content, effect } => {
+                    TimelineEventKindOutput::LogAppended {
+                        content: content.clone(),
+                        effect: effect.as_ref().map(EntryEffectOutput::from),
+                    }
+                }
                 crate::projection::TimelineEventKind::EdgeLinked {
                     target_id,
                     edge_type,
@@ -945,15 +936,12 @@ impl From<&crate::projection::TimelineEntry> for TimelineEntryOutput {
                 crate::projection::TimelineEventKind::StrandUnhidden => {
                     TimelineEventKindOutput::StrandUnhidden
                 }
-                crate::projection::TimelineEventKind::CheckpointCreated {
-                    observed,
-                    action,
-                    append_id,
-                } => TimelineEventKindOutput::CheckpointCreated {
-                    observed: observed.clone(),
-                    action: action.clone(),
-                    append_id: append_id.clone(),
-                },
+                crate::projection::TimelineEventKind::CheckpointCreated { observed, action } => {
+                    TimelineEventKindOutput::CheckpointCreated {
+                        observed: observed.clone(),
+                        action: action.clone(),
+                    }
+                }
                 crate::projection::TimelineEventKind::SubjectBound {
                     subject_type,
                     subject_id,

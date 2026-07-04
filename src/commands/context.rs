@@ -32,7 +32,7 @@ pub(crate) fn cmd_context(
     for warning in &view.warnings {
         eprintln!(
             "{}: [fixed] fixes={} in strand {} does not match any [friction] entry \
-             (append_id offset {}) (tasktree explain {})",
+             (entry offset {}) (tasktree explain {})",
             warning.code,
             &warning.fixes_prefix[..warning.fixes_prefix.len().min(12)],
             shorten(&warning.strand_id),

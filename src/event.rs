@@ -483,7 +483,6 @@ pub fn make_strand_created_with_refs(
         git.as_ref(),
     );
     let id = entry_id.clone();
-    let append_id = compute_append_id(&id, &ts, content);
     let created = Event::StrandCreated {
         id: id.clone(),
         ts: ts.clone(),
@@ -498,7 +497,7 @@ pub fn make_strand_created_with_refs(
         entry_id: Some(entry_id),
         refs,
         ref_: legacy_ref.map(str::to_string),
-        append_id: Some(append_id),
+        append_id: None,
         git,
         provenance,
     };
@@ -554,7 +553,6 @@ pub fn make_log_appended_entry_with_effect(
     provenance: Option<serde_json::Value>,
 ) -> Event {
     let ts = now();
-    let append_id = compute_append_id(id, &ts, content);
     let git = get_git_context();
     let entry_id = compute_entry_id(
         prev_entry_id,
@@ -574,7 +572,9 @@ pub fn make_log_appended_entry_with_effect(
         entry_id: Some(entry_id),
         refs,
         ref_: legacy_ref.map(|s| s.to_string()),
-        append_id: Some(append_id),
+        // Legacy v1 identity, retired 2026-07-04: never written on new rows,
+        // the field survives only to read rows persisted before retirement.
+        append_id: None,
         git,
         provenance,
     }
@@ -588,14 +588,12 @@ pub fn make_checkpoint(
     provenance: Option<serde_json::Value>,
 ) -> Event {
     let ts = now();
-    let content = format!("observed={} action={}", observed, action);
-    let append_id = compute_append_id(id, &ts, &content);
     Event::CheckpointCreated {
         id: id.to_string(),
         ts,
         observed: observed.to_string(),
         action: action.to_string(),
-        append_id: Some(append_id),
+        append_id: None,
         provenance,
     }
 }

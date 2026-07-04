@@ -703,7 +703,7 @@ fn grammar_json_field_naming() {
                     errs.push(format!("count field `{}` is not a number", k));
                 }
                 // id/strand_id are full-width 64-hex content-addressed handles (join law);
-                // append_id is a 64-hex content hash, not a strand handle.
+                // entry_id is a 64-hex content hash (an entry handle, not a strand handle).
                 if (k == "id" || k == "strand_id") && val.is_string() {
                     let s = val.as_str().unwrap();
                     if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {

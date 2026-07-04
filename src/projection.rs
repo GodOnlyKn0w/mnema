@@ -59,7 +59,6 @@ pub enum TimelineEventKind {
     },
     LogAppended {
         content: String,
-        append_id: Option<String>,
         effect: Option<EntryEffect>,
     },
     EdgeLinked {
@@ -74,7 +73,6 @@ pub enum TimelineEventKind {
     CheckpointCreated {
         observed: String,
         action: String,
-        append_id: Option<String>,
     },
     SubjectBound {
         subject_type: String,
@@ -361,7 +359,10 @@ pub(crate) struct FrictionPairing {
 pub(crate) fn pair_frictions(log: &[LogEntry]) -> FrictionPairing {
     use std::collections::{HashMap, HashSet};
 
-    let mut friction_by_append_id: Vec<(String, usize)> = Vec::new();
+    // Handles a fixes=<prefix> token may target: the v2 entry hash, plus the
+    // legacy append_id on rows written before its retirement (2026-07-04) —
+    // read tolerance only, new rows carry no append_id.
+    let mut friction_handles: Vec<(String, usize)> = Vec::new();
 
     let mut paired_friction: HashSet<usize> = HashSet::new();
     let mut paired_fixed: HashSet<usize> = HashSet::new();
@@ -370,9 +371,14 @@ pub(crate) fn pair_frictions(log: &[LogEntry]) -> FrictionPairing {
 
     for (idx, entry) in log.iter().enumerate() {
         if entry.content.starts_with("[friction]") {
+            if let Some(ref eid) = entry.entry_id {
+                if !eid.is_empty() {
+                    friction_handles.push((eid.clone(), idx));
+                }
+            }
             if let Some(ref aid) = entry.append_id {
                 if !aid.is_empty() {
-                    friction_by_append_id.push((aid.clone(), idx));
+                    friction_handles.push((aid.clone(), idx));
                 }
             }
         }
@@ -402,8 +408,8 @@ pub(crate) fn pair_frictions(log: &[LogEntry]) -> FrictionPairing {
             Some(p) => p,
         };
 
-        let matched: Option<usize> = friction_by_append_id.iter().find_map(|(aid, fidx)| {
-            if aid.starts_with(prefix.as_str()) && !paired_friction.contains(fidx) {
+        let matched: Option<usize> = friction_handles.iter().find_map(|(handle, fidx)| {
+            if handle.starts_with(prefix.as_str()) && !paired_friction.contains(fidx) {
                 Some(*fidx)
             } else {
                 None
@@ -1169,13 +1175,9 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
         let kind = match event {
             Event::StrandCreated { .. } => TimelineEventKind::StrandCreated { summary: None },
             Event::LogAppended {
-                content,
-                append_id,
-                effect,
-                ..
+                content, effect, ..
             } => TimelineEventKind::LogAppended {
                 content: content.clone(),
-                append_id: append_id.clone(),
                 effect: effect.clone(),
             },
             Event::EdgeLinked { to, edge_type, .. } => TimelineEventKind::EdgeLinked {
@@ -1188,14 +1190,10 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
             Event::StrandHidden { .. } => TimelineEventKind::StrandHidden,
             Event::StrandUnhidden { .. } => TimelineEventKind::StrandUnhidden,
             Event::CheckpointCreated {
-                observed,
-                action,
-                append_id,
-                ..
+                observed, action, ..
             } => TimelineEventKind::CheckpointCreated {
                 observed: observed.clone(),
                 action: action.clone(),
-                append_id: append_id.clone(),
             },
             Event::SubjectBound {
                 subject_type,
