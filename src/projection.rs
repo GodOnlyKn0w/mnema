@@ -310,6 +310,30 @@ pub struct OrientView {
     pub hidden_count: usize,
 }
 
+/// Needs-judgment notices for orient (CORPUS §8, question ③): active,
+/// non-hidden strands whose last entry carries a closing-annotation marker
+/// (`[done]`/`[verified]`/…) yet the strand is still open. A fact for the
+/// reader — close it or keep working — not a verdict.
+pub fn orient_notices(strands: &[ProjectedStrand]) -> Vec<String> {
+    strands
+        .iter()
+        .filter(|s| !s.hidden && s.state() == "registered")
+        .filter_map(|s| {
+            let last = s.log.last()?;
+            if crate::markers::is_closing_annotation_marker(&last.content) {
+                let marker = crate::markers::leading_marker(&last.content).unwrap_or("[done]");
+                Some(format!(
+                    "{} last entry is {} but the strand is still open — close it or keep working",
+                    crate::util::shorten(&s.id),
+                    marker
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Build the orient menu view from a full strand projection.
 ///
 /// `strands` must include hidden strands so the default view can exclude them

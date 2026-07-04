@@ -325,7 +325,10 @@ fn orient_tree_json_shape_is_nested() {
         roots,
         closed_count: out.closed_count,
         hidden_count: out.hidden_count,
+        integrity: out.integrity.clone(),
+        notices: out.notices.clone(),
         remind: out.remind.clone(),
+        pause: out.pause.clone(),
     };
 
     let json_str = serde_json::to_string(&tree_out).unwrap();

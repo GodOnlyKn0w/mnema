@@ -413,11 +413,48 @@ pub(crate) fn orient_plan(events: &[(usize, Event)], req: &OrientRequest) -> Ori
     let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
     let strands = projection::project_strands(events, true);
     let view = projection::build_orient_view(&strands, req.include_hidden, req.limit, max_offset);
-    let output = output::OrientOutput::from((&view, strands.as_slice()));
+    let mut output = output::OrientOutput::from((&view, strands.as_slice()));
+    // Questions ① and ③ (CORPUS §8): the integrity glance needs the raw event
+    // stream, needs-judgment notices need the full strand set.
+    output.integrity = integrity_glance(events);
+    output.notices = projection::orient_notices(&strands);
     OrientPlan {
         strands,
         view,
         output,
+    }
+}
+
+/// Print the needs-judgment block (CORPUS §8, question ③) — nothing when clear.
+fn print_orient_notices(notices: &[String]) {
+    if notices.is_empty() {
+        return;
+    }
+    println!("needs judgment:");
+    for n in notices {
+        println!("  {}", n);
+    }
+}
+
+/// One-line integrity summary for orient (CORPUS §8, question ①). Full chain +
+/// anchor verification — O(events); fine at current scale, and can drop to a
+/// latest-anchor-only check if orient ever gets slow on huge journals.
+fn integrity_glance(events: &[(usize, Event)]) -> String {
+    let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+    let report = crate::diagnostics::verify_journal_integrity(&raw);
+    if report.has_errors() {
+        let first = report
+            .chain_errors
+            .first()
+            .or_else(|| report.anchor_errors.first())
+            .map(|s| s.as_str())
+            .unwrap_or("integrity error");
+        format!("FAIL — {}", first)
+    } else {
+        format!(
+            "ok ({} anchors, {} unanchored tail)",
+            report.anchor_count, report.unanchored_event_count
+        )
     }
 }
 pub(crate) fn cmd_orient(
@@ -455,7 +492,10 @@ pub(crate) fn cmd_orient(
             roots,
             closed_count: out.closed_count,
             hidden_count: out.hidden_count,
+            integrity: out.integrity.clone(),
+            notices: out.notices.clone(),
             remind: out.remind.clone(),
+            pause: out.pause.clone(),
         };
 
         if format == Some("json") {
@@ -468,11 +508,14 @@ pub(crate) fn cmd_orient(
                 out.closed_count,
                 out.hidden_count
             );
+            println!("integrity: {}", out.integrity);
             print_orient_forest(&tree_out.roots, 0);
             if out.active.is_empty() {
                 println!("(no active strands) — start one: tasktree add \"<summary>\"");
             }
+            print_orient_notices(&out.notices);
             println!("remind: {}", out.remind);
+            println!("{}", out.pause);
         }
     } else if format == Some("json") {
         println!("{}", serde_json::to_string(&out).expect("serialize"));
@@ -484,6 +527,7 @@ pub(crate) fn cmd_orient(
             out.closed_count,
             out.hidden_count
         );
+        println!("integrity: {}", out.integrity);
         for s in &out.active {
             let type_info = s
                 .strand_type
@@ -506,7 +550,9 @@ pub(crate) fn cmd_orient(
         if out.active.is_empty() {
             println!("(no active strands) — start one: tasktree add \"<summary>\"");
         }
+        print_orient_notices(&out.notices);
         println!("remind: {}", out.remind);
+        println!("{}", out.pause);
     }
 
     if skipped > 0 {

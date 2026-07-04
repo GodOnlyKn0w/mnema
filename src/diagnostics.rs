@@ -138,7 +138,7 @@ list（StrandListOutput.strands[]，StrandListItem）：
   state_offset / last_entry_ts / last_entry_offset
 
 orient（OrientOutput）：
-  max_offset / active / closed_count / hidden_count / remind
+  max_offset / active / closed_count / hidden_count / integrity / notices / remind / pause
   ※ active[] 是卡片数组（OrientStrand）见 tasktree explain card
 
 search（SearchOutput）：
@@ -865,7 +865,10 @@ mod tests {
             active: vec![],
             closed_count: 0,
             hidden_count: 0,
+            integrity: "".to_string(),
+            notices: vec![],
             remind: "".to_string(),
+            pause: "".to_string(),
         };
         let v = serde_json::to_value(&orient_sample).expect("serialize OrientOutput");
         for key in v.as_object().unwrap().keys() {

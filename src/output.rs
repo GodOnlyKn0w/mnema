@@ -126,6 +126,11 @@ impl<'a> ExplainUnknownOutput<'a> {
 /// Orient remind line: the operating loop surfaced by orient outputs.
 pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → echo \"[decision] ...\" | tasktree append --id <ID> | new matter → echo \"<summary>\" | tasktree add | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | read/extract → --format json | jq（id/offset/status，非文本切割）| more → tasktree --help";
 
+/// Pause guidance — the one place it can live (CORPUS §8): the tool can't stop
+/// the irreversible moment and a cold-start LLM won't go looking for it, so its
+/// full text rides on orient. Pause is discipline, not a gate.
+pub(crate) const ORIENT_PAUSE: &str = "pause（动手前停一下，是纪律不是关卡）：不可逆或收口状态的动作前，先 tasktree checkpoint --id <ID> --action \"<为什么>\" 留一条自省痕——工具拦不住动作本身，只让『停一下』留下痕迹。判据：这一步撤得回吗？撤不回，先 pause。";
+
 /// One active strand in the orient menu.
 #[derive(Debug, Serialize, Clone)]
 pub struct OrientStrand {
@@ -200,7 +205,15 @@ pub struct OrientOutput {
     /// Strands excluded solely because they are hidden (scar principle).
     /// Zero when include_hidden=true (they join the menu/closed pools instead).
     pub hidden_count: usize,
+    /// Integrity glance (CORPUS §8, question ①): "ok (...)" or a failure with
+    /// the first chain/anchor error. Empty when built without an event stream.
+    pub integrity: String,
+    /// Needs-judgment notices (question ③): active strands that look done
+    /// (closing-annotation marker on the last entry) but aren't closed.
+    pub notices: Vec<String>,
     pub remind: String,
+    /// Pause full text (question ④) — see ORIENT_PAUSE.
+    pub pause: String,
 }
 
 impl From<(&OrientView, &[ProjectedStrand])> for OrientOutput {
@@ -215,7 +228,11 @@ impl From<(&OrientView, &[ProjectedStrand])> for OrientOutput {
                 .collect(),
             closed_count: view.closed_count,
             hidden_count: view.hidden_count,
+            // Set by orient_plan, which has the event stream / full strand set.
+            integrity: String::new(),
+            notices: Vec::new(),
             remind: ORIENT_REMIND.to_string(),
+            pause: ORIENT_PAUSE.to_string(),
         }
     }
 }
@@ -231,7 +248,10 @@ pub struct OrientTreeOutput {
     pub roots: Vec<OrientForestNode>,
     pub closed_count: usize,
     pub hidden_count: usize,
+    pub integrity: String,
+    pub notices: Vec<String>,
     pub remind: String,
+    pub pause: String,
 }
 
 // ── query JSON DTOs ────────────────────────────────────────
