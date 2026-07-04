@@ -139,16 +139,18 @@ Content source:
 
 Target (choose at most one):
   (none)              Append to most recently active strand
+  --last              Append to most recently active strand (explicit form of none)
   --id <ID>           Append to a specific strand
   --new               Create a new strand from the content
 
 Rules:
   Entry content is never read from positional arguments, --stdin, or --file.
-  --new and --id are mutually exclusive.
+  --new, --id, and --last are mutually exclusive.
   Empty stdin content is rejected.
 
 Examples:
   echo \"short note\" | tasktree append
+  echo \"short note\" | tasktree append --last
   echo \"long note\" | tasktree append --id 0000019dd34b
   echo \"new strand title\" | tasktree append --new
   echo \"[metric] win_count=26\" | tasktree append --id 0000019dd34b --provenance '{\"producer\":\"pi\",\"model\":\"gpt-5\"}'
@@ -172,6 +174,10 @@ Provenance:
         /// Append to a specific strand
         #[arg(long = "id", value_name = "ID", verbatim_doc_comment)]
         explicit_id: Option<String>,
+        /// Append to the most recently active strand — the explicit form of
+        /// omitting --id. Conflicts with --id and --new.
+        #[arg(long, conflicts_with_all = ["explicit_id", "new"])]
+        last: bool,
         /// Optional provenance JSON object. Stored as metadata on the
         /// LogAppended event; the entry text is unchanged.
         #[arg(long = "provenance", value_name = "JSON")]
@@ -190,6 +196,7 @@ Provenance:
     #[command(after_help = "\
 Invocation forms:
   tasktree checkpoint --action \"<action and reason>\"
+  tasktree checkpoint --last --action \"<action and reason>\"
   tasktree checkpoint --id <STRAND_ID> --action \"<action and reason>\"
   tasktree checkpoint --id <STRAND_ID> --tail 30 --format json --action \"<action and reason>\"
 
@@ -198,6 +205,7 @@ Required:
 
 Target:
   --id <STRAND_ID>   Use explicit strand. Prefer this for git commits and destructive actions.
+  --last             Resolve to most recently active strand (explicit form of omitting --id).
   omitted --id       Resolve to most recently active strand; stdout shows resolved_by.
 
 Output:
@@ -231,6 +239,10 @@ JSON shape: tasktree explain json")]
         /// Strand ID (prefix match). Prefer explicit --id for commits and destructive actions.
         #[arg(long = "id", value_name = "STRAND_ID")]
         id: Option<String>,
+        /// Resolve to the most recently active strand — the explicit form of
+        /// omitting --id. Conflicts with --id.
+        #[arg(long, conflicts_with = "id")]
+        last: bool,
         /// Agent-supplied action and reason. Recorded, not classified.
         #[arg(long, value_name = "TEXT")]
         action: String,
@@ -823,6 +835,7 @@ fn run(command: &Commands) -> Result<(), String> {
     // stdout is flushed by the normal main() return path.
     if let Commands::Checkpoint {
         id,
+        last: _,
         action,
         tail,
         format,
@@ -875,6 +888,7 @@ fn run(command: &Commands) -> Result<(), String> {
         Commands::Append {
             new,
             explicit_id,
+            last: _,
             format,
             provenance,
             seen_offset,
