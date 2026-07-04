@@ -912,6 +912,56 @@ fn id_target_conflict_rejected() {
     );
 }
 
+// ── unified target convention ──────────────────────────────────────────
+// One rule across single-strand commands: positional <ID> / --id / --last.
+// Read+append commands default to most-recent (--last is the explicit form);
+// close/reopen are lifecycle-closing, so they stay strictly explicit — no
+// --last, no default.
+
+#[test]
+fn close_reopen_accept_positional_and_id_flag() {
+    use clap::CommandFactory;
+    for cmd in ["close", "reopen"] {
+        let pos = Cli::command().try_get_matches_from(["tasktree", cmd, "0000019dd34b"]);
+        assert!(pos.is_ok(), "`{} <ID>` must parse: {:?}", cmd, pos.err());
+        let flag = Cli::command().try_get_matches_from(["tasktree", cmd, "--id", "0000019dd34b"]);
+        assert!(flag.is_ok(), "`{} --id <ID>` must parse: {:?}", cmd, flag.err());
+    }
+}
+
+#[test]
+fn last_flag_parses_on_read_and_append_commands() {
+    use clap::CommandFactory;
+    for cmd in ["show", "find", "hide", "unhide", "tree", "depends", "append"] {
+        let r = Cli::command().try_get_matches_from(["tasktree", cmd, "--last"]);
+        assert!(r.is_ok(), "`{} --last` must parse: {:?}", cmd, r.err());
+    }
+    // checkpoint requires --action alongside --last
+    let r =
+        Cli::command().try_get_matches_from(["tasktree", "checkpoint", "--last", "--action", "x"]);
+    assert!(r.is_ok(), "`checkpoint --last --action` must parse: {:?}", r.err());
+}
+
+#[test]
+fn close_reopen_reject_last() {
+    use clap::CommandFactory;
+    for cmd in ["close", "reopen"] {
+        let r = Cli::command().try_get_matches_from(["tasktree", cmd, "--last"]);
+        assert!(
+            r.is_err(),
+            "`{} --last` must be rejected (lifecycle-closing stays explicit)",
+            cmd
+        );
+    }
+}
+
+#[test]
+fn last_conflicts_with_explicit_id() {
+    use clap::CommandFactory;
+    let r = Cli::command().try_get_matches_from(["tasktree", "show", "--id", "abc", "--last"]);
+    assert!(r.is_err(), "--id and --last are mutually exclusive");
+}
+
 // `timeline --id X` parses as `timeline --strand X` (visible_alias = "id").
 
 #[test]

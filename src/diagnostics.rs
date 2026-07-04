@@ -193,9 +193,9 @@ cutover-v2: applied / source_journal / archive_journal / map_path / source_event
     TopicInfo {
         name: "grammar",
         title: "文法契约——全 CLI 一致的参数与命名规则",
-        body: r#"目标线：主对象用位置参数；正文写入命令（add/append）的正文只走 stdin；
-checkpoint/bind 用 --id；单 id 命令两种写法等价
-（<ID> 与 --id <ID>）；timeline 的 --id 等价 --strand。
+        body: r#"目标线：单 id 命令两种写法等价（位置 <ID> 与 --id <ID>）；"最近活跃线"统一用 --last。
+读+追加命令（show/find/hide/unhide/tree/depends/append/checkpoint）缺省即 --last；
+close/reopen 收口动作强制显式指名、禁 --last/缺省；正文只走 stdin，故 add/append 无位置参数；timeline 的 --id 等价 --strand。
 
 旗标词表（同一概念只有一个名字）：
   --include-hidden  含隐藏线（list 的 --all 是兼容别名）

@@ -676,22 +676,23 @@ pub(crate) fn cmd_show(
     let events = read.events;
     let strands = projection::project_strands(&events, true);
 
-    let strand = if last {
-        // Show most recently active strand
-        if id.is_some() {
-            return Err("choose one: positional id or --last, not both".to_string());
+    // Unified target convention: an explicit id wins; otherwise (--last, or no
+    // target at all) default to the most recently active strand.
+    let strand = match id {
+        Some(id_str) => {
+            let full = find_strand(&events, id_str)
+                .ok_or_else(|| format!("strand {} not found", id_str))?;
+            strands.iter().find(|s| s.id == full).unwrap()
         }
-        if strands.is_empty() {
-            return Err("no strands found".to_string());
+        None => {
+            let _ = last; // --last is the explicit spelling of this default
+            if strands.is_empty() {
+                return Err("no strands found".to_string());
+            }
+            let mut sorted: Vec<_> = strands.iter().collect();
+            sorted.sort_by(|a, b| b.last_ts().cmp(&a.last_ts()));
+            sorted.into_iter().next().unwrap()
         }
-        let mut sorted: Vec<_> = strands.iter().collect();
-        sorted.sort_by(|a, b| b.last_ts().cmp(&a.last_ts()));
-        sorted.into_iter().next().unwrap()
-    } else {
-        let id_str = id.ok_or("provide a strand id or use --last")?;
-        let full =
-            find_strand(&events, id_str).ok_or_else(|| format!("strand {} not found", id_str))?;
-        strands.iter().find(|s| s.id == full).unwrap()
     };
 
     // --producer: narrow the view to one writer's entries — the

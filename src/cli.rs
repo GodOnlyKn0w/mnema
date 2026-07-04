@@ -92,6 +92,27 @@ impl IdTarget {
     }
 }
 
+/// Unified target resolution for read/append commands: an explicit id
+/// (positional or --id) passes through as-is (the command resolves the prefix
+/// itself); otherwise (--last, or no target at all) fall through to the most
+/// recently active strand. Returns the resolved strand id string to hand to
+/// the command. Used so `show`, `find`, `hide`, `unhide`, `tree`, `depends`
+/// share one convention: id / --id / --last, defaulting to most-recent.
+fn resolve_read_target(target: &IdTarget) -> Result<String, String> {
+    match target.get() {
+        Some(s) => Ok(s.to_string()),
+        None => {
+            let path = crate::journal::ensure_journal()?;
+            let (events, _) = crate::journal::read_events_lossy(&path);
+            resolve_most_recent_strand(&crate::projection::project_strands(&events, true))
+                .map(|s| s.id.clone())
+                .ok_or_else(|| {
+                    "no active strand to default to — pass <ID>, --id, or --last".to_string()
+                })
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize .tasktree/ directory and journal
@@ -306,7 +327,8 @@ Examples:
         #[command(flatten)]
         target: IdTarget,
         /// Show the most recently active strand instead of specifying an id
-        #[arg(long)]
+        /// (explicit form of giving no id)
+        #[arg(long, conflicts_with_all = ["id_pos", "id_flag"])]
         last: bool,
         /// Show only the last N log entries
         #[arg(long, value_name = "N")]
@@ -359,6 +381,9 @@ Examples:
     Find {
         #[command(flatten)]
         target: IdTarget,
+        /// Resolve the most recently active strand (explicit form of giving no id)
+        #[arg(long, conflicts_with_all = ["id_pos", "id_flag"])]
+        last: bool,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -426,6 +451,9 @@ Example:
     Hide {
         #[command(flatten)]
         target: IdTarget,
+        /// Hide the most recently active strand (explicit form of giving no id)
+        #[arg(long, conflicts_with_all = ["id_pos", "id_flag"])]
+        last: bool,
         /// Reason for hiding (optional). If provided, stored as '[hidden] <reason>' content on the hide effect entry.
         #[arg(long)]
         reason: Option<String>,
@@ -440,6 +468,9 @@ Example:
     Unhide {
         #[command(flatten)]
         target: IdTarget,
+        /// Unhide the most recently active strand (explicit form of giving no id)
+        #[arg(long, conflicts_with_all = ["id_pos", "id_flag"])]
+        last: bool,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -459,14 +490,17 @@ Dispositions (--as):
 
 Reason (optional): pipe a closing note on stdin; it rides on the close entry.
 
+Target: close is a lifecycle-closing action, so it never defaults — name the
+strand explicitly, positional <ID> or --id <ID>. No --last, no implicit
+most-recent.
+
 Examples:
-  tasktree close --id <ID>
+  tasktree close <ID>
   tasktree close --id <ID> --as failed
   echo \"verified in staging\" | tasktree close --id <ID> --as verified")]
     Close {
-        /// Strand ID (prefix match)
-        #[arg(long = "id", value_name = "ID")]
-        id: String,
+        #[command(flatten)]
+        target: IdTarget,
         /// Disposition: done (default), failed, cancelled, merged, verified
         #[arg(long = "as", value_name = "DISPOSITION")]
         disposition: Option<String>,
@@ -480,13 +514,15 @@ Examples:
     /// Moves the strand back to open/registered state. Reopen means undoing an
     /// erroneous close (CORPUS §6); pipe a reason on stdin to say why.
     #[command(after_help = "\
+Target: name the strand explicitly, positional <ID> or --id <ID>. Like close,
+reopen never defaults to most-recent.
+
 Examples:
-  tasktree reopen --id <ID>
+  tasktree reopen <ID>
   echo \"closed by mistake, still active\" | tasktree reopen --id <ID>")]
     Reopen {
-        /// Strand ID (prefix match)
-        #[arg(long = "id", value_name = "ID")]
-        id: String,
+        #[command(flatten)]
+        target: IdTarget,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -703,6 +739,9 @@ JSON shape: tasktree explain json")]
     Tree {
         #[command(flatten)]
         target: IdTarget,
+        /// Root the tree at the most recently active strand (explicit form of giving no id)
+        #[arg(long, conflicts_with_all = ["id_pos", "id_flag"])]
+        last: bool,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -720,6 +759,9 @@ Examples:
     Depends {
         #[command(flatten)]
         target: IdTarget,
+        /// Analyse the most recently active strand (explicit form of giving no id)
+        #[arg(long, conflicts_with_all = ["id_pos", "id_flag"])]
+        last: bool,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -981,10 +1023,14 @@ fn run(command: &Commands) -> Result<(), String> {
             let fmt = format.as_deref() == Some("json");
             cmd_search(query, fmt, *include_hidden)
         }
-        Commands::Find { target, format } => match target.get() {
-            Some(id) => cmd_find(id, format.as_deref() == Some("json")),
-            None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
-        },
+        Commands::Find {
+            target,
+            last: _,
+            format,
+        } => {
+            let id = resolve_read_target(target)?;
+            cmd_find(&id, format.as_deref() == Some("json"))
+        }
         Commands::Link {
             source,
             target,
@@ -1019,35 +1065,46 @@ fn run(command: &Commands) -> Result<(), String> {
         }
         Commands::Hide {
             target,
+            last: _,
             reason,
             format,
             provenance,
-        } => match target.get() {
-            Some(id) => cmd_hide(
-                id,
+        } => {
+            let id = resolve_read_target(target)?;
+            cmd_hide(
+                &id,
                 reason.as_deref(),
                 format.as_deref() == Some("json"),
                 provenance.as_deref(),
-            ),
-            None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
-        },
-        Commands::Unhide { target, format } => match target.get() {
-            Some(id) => cmd_unhide(id, format.as_deref() == Some("json")),
-            None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
-        },
+            )
+        }
+        Commands::Unhide {
+            target,
+            last: _,
+            format,
+        } => {
+            let id = resolve_read_target(target)?;
+            cmd_unhide(&id, format.as_deref() == Some("json"))
+        }
 
         Commands::Close {
-            id,
+            target,
             disposition,
             format,
         } => {
+            let id = target.get().ok_or(
+                "close needs an explicit target: <ID> or --id <ID> (no --last, no default)",
+            )?;
             let fmt = format.as_deref() == Some("json");
             // Optional author reason via a pipe; a bare close (no pipe) still works.
             let reason = crate::util::read_stdin_if_piped();
             cmd_close(id, disposition.as_deref(), reason.as_deref(), fmt)
         }
 
-        Commands::Reopen { id, format } => {
+        Commands::Reopen { target, format } => {
+            let id = target.get().ok_or(
+                "reopen needs an explicit target: <ID> or --id <ID> (no --last, no default)",
+            )?;
             let fmt = format.as_deref() == Some("json");
             let reason = crate::util::read_stdin_if_piped();
             cmd_reopen(id, reason.as_deref(), fmt)
@@ -1111,15 +1168,23 @@ fn run(command: &Commands) -> Result<(), String> {
             map.as_deref(),
             format.as_deref() == Some("json"),
         ),
-        Commands::Tree { target, format } => match target.get() {
-            Some(id) => cmd_tree(id, format.as_deref()),
-            None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
-        },
+        Commands::Tree {
+            target,
+            last: _,
+            format,
+        } => {
+            let id = resolve_read_target(target)?;
+            cmd_tree(&id, format.as_deref())
+        }
 
-        Commands::Depends { target, format } => match target.get() {
-            Some(id) => cmd_depends(id, format.as_deref()),
-            None => Err("missing strand id: pass <ID> or --id <ID>".to_string()),
-        },
+        Commands::Depends {
+            target,
+            last: _,
+            format,
+        } => {
+            let id = resolve_read_target(target)?;
+            cmd_depends(&id, format.as_deref())
+        }
 
         Commands::Orient {
             format,
