@@ -903,8 +903,8 @@ fn id_target_flag_and_positional_equivalent() {
     let _env = setup();
     let id = create_strand("id_target behavioral test");
     // Both should succeed and produce the same output
-    let r1 = cmd_show(Some(&id), false, None, false, false, false);
-    let r2 = cmd_show(Some(&id), false, None, false, false, false);
+    let r1 = cmd_show(Some(&id), false, None, false, false, false, None);
+    let r2 = cmd_show(Some(&id), false, None, false, false, false, None);
     assert!(r1.is_ok(), "show with positional id failed: {:?}", r1);
     assert!(r2.is_ok(), "show with --id failed: {:?}", r2);
 }

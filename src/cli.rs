@@ -314,14 +314,18 @@ Examples:
         #[arg(long = "deref", value_name = "N", requires = "entry")]
         deref: Option<usize>,
         /// With --entry: show K entries preceding each pulled entry on its
-        /// own line — the local deliberation it may lean on (text view only)
+        /// own line — the local deliberation it may lean on
         #[arg(long = "before", value_name = "K", requires = "entry")]
         before: Option<usize>,
         /// With --entry: show K entries following each pulled entry on its
         /// own line — the re-look for (advanced): what the cited line did
-        /// after the citation (text view only)
+        /// after the citation
         #[arg(long = "after", value_name = "K", requires = "entry")]
         after: Option<usize>,
+        /// Filter log entries to one writer (matches provenance.producer).
+        /// The narrowing dimension for multi-writer journals.
+        #[arg(long = "producer", value_name = "NAME")]
+        producer: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -918,15 +922,23 @@ fn run(command: &Commands) -> Result<(), String> {
             deref,
             before,
             after,
+            producer,
             format,
             locked,
         } => {
             let fmt = format.as_deref() == Some("json");
             if let Some(prefix) = entry {
-                if target.get().is_some() || *last || *digest || tail.is_some() || *locked {
+                if target.get().is_some()
+                    || *last
+                    || *digest
+                    || tail.is_some()
+                    || *locked
+                    || producer.is_some()
+                {
                     return Err(
                         "--entry reads one entry by hash; it does not combine with strand \
-                         view flags (a strand id, --last, --tail, --digest, --locked)"
+                         view flags (a strand id, --last, --tail, --digest, --locked, \
+                         --producer)"
                             .to_string(),
                     );
                 }
@@ -938,7 +950,15 @@ fn run(command: &Commands) -> Result<(), String> {
                     fmt,
                 )
             } else {
-                cmd_show(target.get(), *last, *tail, fmt, *locked, *digest)
+                cmd_show(
+                    target.get(),
+                    *last,
+                    *tail,
+                    fmt,
+                    *locked,
+                    *digest,
+                    producer.as_deref(),
+                )
             }
         }
         Commands::Search {

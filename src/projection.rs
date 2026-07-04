@@ -19,7 +19,7 @@ fn dedup_preserve_order<I: Iterator<Item = String>>(iter: I) -> Vec<String> {
 
 // ── Log Entry ──────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LogEntry {
     pub offset: usize,
     pub ts: String,
@@ -235,6 +235,35 @@ pub struct ProjectedStrand {
 }
 
 impl ProjectedStrand {
+    /// Request-scoped view with only one writer's entries (matched on
+    /// provenance.producer). Display narrowing for multi-writer journals —
+    /// the strand's durable state (lifecycle, edges) is untouched.
+    pub(crate) fn with_producer_filter(&self, name: &str) -> ProjectedStrand {
+        ProjectedStrand {
+            id: self.id.clone(),
+            log: self
+                .log
+                .iter()
+                .filter(|e| {
+                    e.provenance
+                        .as_ref()
+                        .and_then(|p| p.get("producer"))
+                        .and_then(|v| v.as_str())
+                        == Some(name)
+                })
+                .cloned()
+                .collect(),
+            edges: self.edges.clone(),
+            belongs_to_edges: self.belongs_to_edges.clone(),
+            depends_on_edges: self.depends_on_edges.clone(),
+            hidden: self.hidden,
+            strand_type: self.strand_type.clone(),
+            cached_state: self.cached_state.clone(),
+            state_marker: self.state_marker.clone(),
+            state_offset: self.state_offset,
+        }
+    }
+
     pub fn first_summary(&self) -> &str {
         self.log
             .first()

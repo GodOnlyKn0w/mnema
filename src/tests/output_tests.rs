@@ -101,7 +101,7 @@ fn show_search_context_unchanged() {
     )
     .unwrap();
     // show
-    let r = cmd_show(Some(&id), false, None, false, false, false);
+    let r = cmd_show(Some(&id), false, None, false, false, false, None);
     assert!(r.is_ok());
     // search
     let r = cmd_search("entry", false, false);
@@ -949,7 +949,7 @@ fn show_digest_returns_ok_without_dumping_log() {
     )
     .unwrap();
     // digest = true; should succeed (census path, no full log dump)
-    let r = cmd_show(Some(&id), false, None, false, false, true);
+    let r = cmd_show(Some(&id), false, None, false, false, true, None);
     assert!(r.is_ok(), "show --digest failed: {:?}", r);
 }
 

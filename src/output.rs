@@ -676,6 +676,18 @@ pub(crate) struct EntryDerefNodeOutput {
     pub(crate) content: String,
     pub(crate) effect: Option<EntryEffectOutput>,
     pub(crate) refs: Vec<String>,
+    /// Neighbourhood slices from this entry's own line (--before/--after K);
+    /// empty arrays when not requested.
+    pub(crate) before: Vec<EntryNeighbourOutput>,
+    pub(crate) after: Vec<EntryNeighbourOutput>,
+}
+
+/// One neighbourhood entry (--before/--after) on a pulled entry's own line.
+#[derive(Debug, Serialize)]
+pub(crate) struct EntryNeighbourOutput {
+    pub(crate) entry_id: Option<String>,
+    pub(crate) ts: String,
+    pub(crate) content: String,
 }
 
 /// A ref that does not resolve locally: pointer reported, target unasserted.

@@ -819,14 +819,14 @@ fn show_tail_works_with_explicit_id() {
     .unwrap();
 
     // tail with explicit id — must succeed and show only last 2 entries
-    let result = cmd_show(Some(&id), false, Some(2), false, false, false);
+    let result = cmd_show(Some(&id), false, Some(2), false, false, false, None);
     assert!(
         result.is_ok(),
         "show <ID> --tail 2 must succeed: {:?}",
         result
     );
     // --last + --tail must still work
-    let result2 = cmd_show(None, true, Some(2), false, false, false);
+    let result2 = cmd_show(None, true, Some(2), false, false, false, None);
     assert!(
         result2.is_ok(),
         "show --last --tail must still work: {:?}",
@@ -923,4 +923,51 @@ fn show_entry_deref_expands_chain_and_prices_frontier() {
         view.nodes[2].entry.content, "A2 evidence detail",
         "hop-2 node is the evidence entry itself"
     );
+}
+
+// ── show --producer: one writer's entries in a multi-writer strand ──────
+
+#[test]
+fn producer_filter_narrows_to_one_writer() {
+    let _env = setup();
+    let id = create_strand("multi-writer strand");
+    cmd_append(
+        Some("[observed] from codex"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        Some(r#"{"producer":"codex"}"#),
+    )
+    .unwrap();
+    cmd_append(
+        Some("[observed] from claude"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        Some(r#"{"producer":"claude"}"#),
+    )
+    .unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let s = strands.iter().find(|s| s.id == id).unwrap();
+
+    let filtered = s.with_producer_filter("codex");
+    assert_eq!(filtered.log.len(), 1, "only the codex entry survives");
+    assert_eq!(filtered.log[0].content, "[observed] from codex");
+    assert_eq!(filtered.id, s.id, "strand identity untouched");
+
+    let none = s.with_producer_filter("nobody");
+    assert_eq!(none.log.len(), 0, "unknown producer matches nothing");
+
+    // Smoke: the command path accepts the filter on both output forms.
+    assert!(cmd_show(Some(&id), false, None, false, false, false, Some("codex")).is_ok());
+    assert!(cmd_show(Some(&id), false, None, true, false, false, Some("codex")).is_ok());
 }

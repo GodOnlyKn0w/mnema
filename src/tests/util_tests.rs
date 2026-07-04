@@ -74,3 +74,35 @@ fn cmd_agent_context_default_excludes_hidden_via_cmd_path() {
 }
 
 // ── Subject binding tests (pi-strand V1 contract) ─────────────────
+
+#[test]
+fn display_ts_pairs_relative_with_absolute() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-07-04T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert_eq!(
+        display_ts("2026-07-01T09:30:00Z", now),
+        "3d ago(07-01 09:30)"
+    );
+    assert_eq!(
+        display_ts("2026-07-04T10:00:00Z", now),
+        "2h ago(07-04 10:00)"
+    );
+    assert_eq!(
+        display_ts("2026-07-04T11:59:30Z", now),
+        "just now(07-04 11:59)"
+    );
+    // Future timestamp (clock skew) and unparseable input: absolute only,
+    // the machine asserts nothing it cannot verify.
+    assert_eq!(display_ts("2026-07-05T00:00:00Z", now), "07-05 00:00");
+    assert_eq!(display_ts("garbage", now), "garbage");
+}
+
+#[test]
+fn ts_gap_seconds_measures_in_line_gaps() {
+    assert_eq!(
+        ts_gap_seconds("2026-06-10T00:00:00Z", "2026-06-29T00:00:00Z"),
+        Some(19 * 86_400)
+    );
+    assert_eq!(ts_gap_seconds("garbage", "2026-06-29T00:00:00Z"), None);
+}

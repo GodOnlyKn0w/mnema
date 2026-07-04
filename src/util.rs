@@ -143,6 +143,38 @@ pub(crate) fn compact_ts(ts: &str) -> String {
     }
 }
 
+/// Reader-facing time: relative and absolute together — "3d ago(06-29 13:21)".
+/// Pure relative wording expires inside a long conversation; a bare timestamp
+/// means nothing to a clock-less reader, so both travel together (CORPUS §8).
+/// `now` is injected by the command layer so rendering is deterministic under
+/// test; unparseable or future timestamps fall back to the absolute form
+/// (clock skew: assert nothing).
+pub(crate) fn display_ts(ts: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    let compact = compact_ts(ts);
+    let parsed = match chrono::DateTime::parse_from_rfc3339(ts) {
+        Ok(t) => t.with_timezone(&chrono::Utc),
+        Err(_) => return compact,
+    };
+    let secs = (now - parsed).num_seconds();
+    if secs < 0 {
+        return compact;
+    }
+    let rel = humanize_duration(secs);
+    if rel == "just now" {
+        format!("just now({})", compact)
+    } else {
+        format!("{} ago({})", rel, compact)
+    }
+}
+
+/// Seconds between two RFC3339 timestamps (later minus earlier), if both
+/// parse. Used for the in-line long-gap annotation ("gap: 19d").
+pub(crate) fn ts_gap_seconds(earlier: &str, later: &str) -> Option<i64> {
+    let e = chrono::DateTime::parse_from_rfc3339(earlier).ok()?;
+    let l = chrono::DateTime::parse_from_rfc3339(later).ok()?;
+    Some((l - e).num_seconds())
+}
+
 /// Collapse prose to a single-line preview, char-bounded by `max`.
 ///
 /// 散文预览统一走这里：先在首个换行处截断（多行 entry/brief 只露首行，

@@ -13,7 +13,7 @@ use crate::output;
 use crate::projection::{self, TimelineEventKind};
 use crate::render::*;
 use crate::tree;
-use crate::util::{compact_ts, parse_duration, shorten, truncate};
+use crate::util::{display_ts, humanize_duration, parse_duration, shorten, truncate};
 use std::time::Instant;
 
 fn corrupted_lines_error(skipped: usize) -> String {
@@ -574,6 +574,7 @@ pub(crate) fn cmd_show(
     format_json: bool,
     locked: bool,
     digest: bool,
+    producer: Option<&str>,
 ) -> Result<(), String> {
     let started = Instant::now();
     let path = ensure_journal()?;
@@ -607,6 +608,16 @@ pub(crate) fn cmd_show(
         strands.iter().find(|s| s.id == full).unwrap()
     };
 
+    // --producer: narrow the view to one writer's entries — the
+    // highest-frequency narrowing dimension in multi-writer journals.
+    let producer_filtered;
+    let strand = if let Some(name) = producer {
+        producer_filtered = strand.with_producer_filter(name);
+        &producer_filtered
+    } else {
+        strand
+    };
+
     // Summary
     let entry_count = strand.log_count();
     let last_summary = strand.last_summary();
@@ -630,6 +641,9 @@ pub(crate) fn cmd_show(
     );
     println!("summary: {}", truncate(strand.first_summary(), 60));
     println!("next: {}", truncate(last_summary, 100));
+    if let Some(name) = producer {
+        println!("producer filter: {} ({} entries match)", name, entry_count);
+    }
     if strand.hidden {
         println!("status: hidden");
     }
@@ -682,7 +696,20 @@ pub(crate) fn cmd_show(
 
     println!("log:");
     let entry_index = projection::EntryIndex::build(&strands);
+    let now = chrono::Utc::now();
+    let mut prev_ts: Option<&str> = None;
     for entry in slice {
+        // Long in-line gaps are the machine's to point out, not the reader's
+        // to compute (CORPUS §8) — annotate when consecutive entries are
+        // two or more days apart.
+        if let Some(prev) = prev_ts {
+            if let Some(gap) = crate::util::ts_gap_seconds(prev, &entry.ts) {
+                if gap >= 2 * 86_400 {
+                    println!("  (gap: {} since previous entry)", humanize_duration(gap));
+                }
+            }
+        }
+        prev_ts = Some(&entry.ts);
         // v2 refs render as short handles; the legacy ref_ pin only shows
         // when no hash refs exist (dual-track fallback). A cited entry whose
         // line gained later entries is annotated in place (ref-target-advanced
@@ -719,7 +746,7 @@ pub(crate) fn cmd_show(
             .unwrap_or_default();
         println!(
             "  [{}]{} {}{}",
-            compact_ts(&entry.ts),
+            display_ts(&entry.ts, now),
             id_str,
             entry.content,
             ref_str
@@ -766,19 +793,46 @@ pub(crate) fn cmd_show_entry(
             nodes: view
                 .nodes
                 .iter()
-                .map(|n| output::EntryDerefNodeOutput {
-                    hop: n.hop,
-                    cited_by: n.cited_by.clone(),
-                    entry_id: n.entry.entry_id.clone().unwrap_or_default(),
-                    strand_id: n.strand.id.clone(),
-                    strand_summary: truncate(n.strand.first_summary(), 70),
-                    entry_index: n.entry_index,
-                    strand_entry_count: n.strand.log.len(),
-                    later_entries: n.later_entries,
-                    ts: n.entry.ts.clone(),
-                    content: n.entry.content.clone(),
-                    effect: n.entry.effect.as_ref().map(output::EntryEffectOutput::from),
-                    refs: n.entry.refs.clone(),
+                .map(|n| {
+                    let neighbour = |e: &projection::LogEntry| output::EntryNeighbourOutput {
+                        entry_id: e.entry_id.clone(),
+                        ts: e.ts.clone(),
+                        content: e.content.clone(),
+                    };
+                    let before_slice = if before > 0 {
+                        let start = n.entry_index.saturating_sub(before);
+                        n.strand.log[start..n.entry_index]
+                            .iter()
+                            .map(neighbour)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let after_slice = if after > 0 {
+                        let end = (n.entry_index + 1 + after).min(n.strand.log.len());
+                        n.strand.log[n.entry_index + 1..end]
+                            .iter()
+                            .map(neighbour)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    output::EntryDerefNodeOutput {
+                        hop: n.hop,
+                        cited_by: n.cited_by.clone(),
+                        entry_id: n.entry.entry_id.clone().unwrap_or_default(),
+                        strand_id: n.strand.id.clone(),
+                        strand_summary: truncate(n.strand.first_summary(), 70),
+                        entry_index: n.entry_index,
+                        strand_entry_count: n.strand.log.len(),
+                        later_entries: n.later_entries,
+                        ts: n.entry.ts.clone(),
+                        content: n.entry.content.clone(),
+                        effect: n.entry.effect.as_ref().map(output::EntryEffectOutput::from),
+                        refs: n.entry.refs.clone(),
+                        before: before_slice,
+                        after: after_slice,
+                    }
                 })
                 .collect(),
             unresolved: view
@@ -802,6 +856,7 @@ pub(crate) fn cmd_show_entry(
         };
         println!("{}", serde_json::to_string(&output).unwrap());
     } else {
+        let now = chrono::Utc::now();
         let total_chars: usize = view.nodes.iter().map(|n| n.entry.content.len()).sum();
         for node in &view.nodes {
             let handle = node.entry.entry_id.as_deref().map(shorten).unwrap_or_default();
@@ -839,7 +894,7 @@ pub(crate) fn cmd_show_entry(
             };
             println!(
                 "  at: {} · tasktree show --entry {}{}",
-                compact_ts(&node.entry.ts),
+                display_ts(&node.entry.ts, now),
                 handle,
                 re_look
             );
