@@ -567,6 +567,44 @@ pub(crate) fn cmd_agent_context(
     Ok(())
 }
 
+/// Render an entry's body for reading views. An entry carrying an effect shows
+/// the canonical marker derived from that effect (CORPUS §5: `[closed(done)]`
+/// etc.) rather than the raw machine-mirror content; the author's reason
+/// (close/reopen) rides along as a trailing note.
+fn entry_display_body(entry: &projection::LogEntry) -> String {
+    use crate::event::EntryEffect;
+    let effect = match &entry.effect {
+        None => return entry.content.clone(),
+        Some(e) => e,
+    };
+    // close/reopen keep the author reason after the machine-mirror prefix.
+    let note = entry
+        .content
+        .split_once(": ")
+        .map(|(_, n)| n.trim())
+        .filter(|n| !n.is_empty());
+    let with_note = |marker: String| match note {
+        Some(n) => format!("{} {}", marker, n),
+        None => marker,
+    };
+    match effect {
+        EntryEffect::Close { disposition } => with_note(format!("[closed({})]", disposition)),
+        EntryEffect::Reopen => with_note("[reopened]".to_string()),
+        EntryEffect::Link { target, edge_type } => {
+            format!("[linked({})] -> {}", edge_type, shorten(target))
+        }
+        EntryEffect::Unlink { target, edge_type } => {
+            format!("[unlinked({})] -> {}", edge_type, shorten(target))
+        }
+        EntryEffect::Hide => entry
+            .content
+            .strip_prefix("[hidden] ")
+            .map(|r| format!("[hidden] {}", r))
+            .unwrap_or_else(|| "[hidden]".to_string()),
+        EntryEffect::Unhide => "[unhidden]".to_string(),
+    }
+}
+
 pub(crate) fn cmd_show(
     id: Option<&str>,
     last: bool,
@@ -740,7 +778,7 @@ pub(crate) fn cmd_show(
             "  [{}]{} {}{}",
             display_ts(&entry.ts, now),
             id_str,
-            entry.content,
+            entry_display_body(entry),
             ref_str
         );
     }
@@ -862,7 +900,7 @@ pub(crate) fn cmd_show_entry(
                 );
                 println!("[{}]", handle);
             }
-            println!("  {}", node.entry.content);
+            println!("  {}", entry_display_body(node.entry));
             let advanced = if node.later_entries > 0 {
                 format!(" · {} later entries (advanced)", node.later_entries)
             } else {
