@@ -639,7 +639,9 @@ fn entry_display_body(entry: &projection::LogEntry) -> String {
         EntryEffect::Link { target, edge_type } => {
             format!("[linked({})] -> {}", edge_type, shorten(target))
         }
-        EntryEffect::Unlink { target, edge_type } => {
+        EntryEffect::Unlink {
+            target, edge_type, ..
+        } => {
             format!("[unlinked({})] -> {}", edge_type, shorten(target))
         }
         EntryEffect::Hide => entry

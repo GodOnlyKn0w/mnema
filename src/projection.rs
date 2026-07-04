@@ -161,7 +161,7 @@ pub(crate) fn edge_delta(event: &Event) -> Option<EdgeDelta> {
             linked: true,
         }),
         Event::LogAppended {
-            effect: Some(EntryEffect::Unlink { target, edge_type }),
+            effect: Some(EntryEffect::Unlink { target, edge_type, .. }),
             ..
         } => Some(EdgeDelta {
             target: target.clone(),
@@ -308,6 +308,53 @@ pub struct OrientView {
     pub active_ids: Vec<String>,
     pub closed_count: usize,
     pub hidden_count: usize,
+}
+
+/// entry_ids of currently-live Link instances on `strand` to
+/// (target, edge_type), in append order (CORPUS §4). Used by unlink to name a
+/// specific live link to reverse; the most recent is the natural default.
+pub(crate) fn live_link_entry_ids(
+    strand: &ProjectedStrand,
+    target: &str,
+    edge_type: &str,
+) -> Vec<String> {
+    struct Inst {
+        id: Option<String>,
+        live: bool,
+    }
+    let mut insts: Vec<Inst> = Vec::new();
+    for e in &strand.log {
+        match &e.effect {
+            Some(EntryEffect::Link {
+                target: t,
+                edge_type: et,
+            }) if t == target && et == edge_type => insts.push(Inst {
+                id: e.entry_id.clone(),
+                live: true,
+            }),
+            Some(EntryEffect::Unlink {
+                target: t,
+                edge_type: et,
+                link_entry_id,
+            }) if t == target && et == edge_type => match link_entry_id {
+                Some(cancel) => {
+                    if let Some(i) = insts
+                        .iter_mut()
+                        .find(|i| i.live && i.id.as_deref() == Some(cancel.as_str()))
+                    {
+                        i.live = false;
+                    }
+                }
+                None => insts.iter_mut().filter(|i| i.live).for_each(|i| i.live = false),
+            },
+            _ => {}
+        }
+    }
+    insts
+        .iter()
+        .filter(|i| i.live)
+        .filter_map(|i| i.id.clone())
+        .collect()
 }
 
 /// Needs-judgment notices for orient (CORPUS §8, question ③): active,
@@ -1082,40 +1129,96 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
                 });
             }
         }
-        // Fold legacy edge events and v2 link/unlink effects into the live edge set (F5).
-        // Key is (to, edge_type); last write wins. First-occurrence
-        // order is preserved, so for a journal with no unlinks this reduces to the
-        // old first-wins dedup — belongs-to ordering (tree/orient) is unchanged.
+        // Instance-based edge fold (CORPUS §4). Each Link effect is a distinct
+        // edge instance identified by its entry_id; an Unlink cancels the one
+        // instance it names (link_entry_id), or — legacy, no id — tombstones the
+        // whole (target, edge_type) key. Two links to one target survive
+        // cancelling one of them. For a journal with at most one link per key
+        // this reduces to the old fold, so tree/orient ordering is unchanged.
         // The journal keeps every event (append-only); folding only shapes reads.
-        let mut edge_live: std::collections::HashMap<(String, Option<String>), bool> =
-            std::collections::HashMap::new();
-        let mut edge_order: Vec<(String, Option<String>)> = Vec::new();
-        for (_, e) in &node_events {
-            let Some(delta) = edge_delta(e) else {
-                continue;
-            };
-            let key = (delta.target, delta.edge_type);
-            if !edge_live.contains_key(&key) {
-                edge_order.push(key.clone());
-            }
-            edge_live.insert(key, delta.linked);
+        let offset_to_eid: std::collections::HashMap<usize, String> = logs
+            .iter()
+            .filter_map(|l| l.entry_id.clone().map(|id| (l.offset, id)))
+            .collect();
+        struct EdgeInstance {
+            id: Option<String>,
+            target: String,
+            edge_type: Option<String>,
+            live: bool,
         }
-        let live: Vec<&(String, Option<String>)> =
-            edge_order.iter().filter(|k| edge_live[*k]).collect();
+        let mut instances: Vec<EdgeInstance> = Vec::new();
+        for entry in node_events.iter() {
+            let offset = entry.0;
+            let ev: &Event = entry.1;
+            match ev {
+                Event::LogAppended {
+                    effect: Some(EntryEffect::Link { target, edge_type }),
+                    ..
+                } => instances.push(EdgeInstance {
+                    id: offset_to_eid.get(&offset).cloned(),
+                    target: target.clone(),
+                    edge_type: Some(edge_type.clone()),
+                    live: true,
+                }),
+                Event::EdgeLinked { to, edge_type, .. } => instances.push(EdgeInstance {
+                    id: None,
+                    target: to.clone(),
+                    edge_type: edge_type.clone(),
+                    live: true,
+                }),
+                Event::LogAppended {
+                    effect:
+                        Some(EntryEffect::Unlink {
+                            target,
+                            edge_type,
+                            link_entry_id,
+                        }),
+                    ..
+                } => match link_entry_id {
+                    Some(cancel) => {
+                        if let Some(inst) = instances
+                            .iter_mut()
+                            .find(|i| i.live && i.id.as_deref() == Some(cancel.as_str()))
+                        {
+                            inst.live = false;
+                        }
+                    }
+                    None => {
+                        for inst in instances.iter_mut().filter(|i| {
+                            i.live
+                                && i.target == *target
+                                && i.edge_type.as_deref() == Some(edge_type.as_str())
+                        }) {
+                            inst.live = false;
+                        }
+                    }
+                },
+                Event::EdgeUnlinked { to, edge_type, .. } => {
+                    for inst in instances
+                        .iter_mut()
+                        .filter(|i| i.live && i.target == *to && i.edge_type == *edge_type)
+                    {
+                        inst.live = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let live: Vec<&EdgeInstance> = instances.iter().filter(|i| i.live).collect();
         // edges = all live targets, deduped by target id (a target reachable via
-        // two edge types lists once).
-        let edges: Vec<String> = dedup_preserve_order(live.iter().map(|(to, _)| to.clone()));
-        let belongs_to_edges: Vec<String> = live
-            .iter()
-            .filter(|(_, et)| et.as_deref() == Some("belongs-to"))
-            .map(|(to, _)| to.clone())
-            .collect();
+        // two edge types, or two live links, lists once).
+        let edges: Vec<String> = dedup_preserve_order(live.iter().map(|i| i.target.clone()));
+        let belongs_to_edges: Vec<String> = dedup_preserve_order(
+            live.iter()
+                .filter(|i| i.edge_type.as_deref() == Some("belongs-to"))
+                .map(|i| i.target.clone()),
+        );
         // depends-on subset (F3): typed view of blockers.
-        let depends_on_edges: Vec<String> = live
-            .iter()
-            .filter(|(_, et)| et.as_deref() == Some("depends-on"))
-            .map(|(to, _)| to.clone())
-            .collect();
+        let depends_on_edges: Vec<String> = dedup_preserve_order(
+            live.iter()
+                .filter(|i| i.edge_type.as_deref() == Some("depends-on"))
+                .map(|i| i.target.clone()),
+        );
         // Extract strand_type from StrandCreated event
         let strand_type: Option<String> = node_events.iter().find_map(|(_, e)| {
             if let Event::StrandCreated { strand_type, .. } = e {

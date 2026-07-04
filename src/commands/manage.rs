@@ -137,7 +137,17 @@ pub(crate) fn cmd_unlink(
     let src_id = resolve_id(&events, source)?;
     let tgt_id = resolve_id(&events, target)?;
     let provenance = parse_provenance_arg(provenance_raw)?;
-    let (content, effect) = event::unlink_entry_parts(&tgt_id, etype);
+    // Name the specific Link entry being reversed (CORPUS §4): the most recent
+    // *live* Link on the source strand to (target, edge_type). None → a legacy
+    // key-tombstone unlink (no live link found).
+    let link_entry_id = projection::project_strands(&events, true)
+        .iter()
+        .find(|s| s.id == src_id)
+        .and_then(|s| {
+            projection::live_link_entry_ids(s, &tgt_id, etype)
+                .pop()
+        });
+    let (content, effect) = event::unlink_entry_parts(&tgt_id, etype, link_entry_id);
     append_entry_to_strand(JournalEntryAppendRequest {
         strand_id: src_id.clone(),
         content,

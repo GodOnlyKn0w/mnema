@@ -652,8 +652,17 @@ pub struct StrandListOutput {
 pub enum EntryEffectOutput {
     Close { disposition: String },
     Reopen,
-    Link { target: String, edge_type: String },
-    Unlink { target: String, edge_type: String },
+    Link {
+        target: String,
+        edge_type: String,
+    },
+    Unlink {
+        target: String,
+        edge_type: String,
+        /// entry_id of the Link entry this reverses (CORPUS §4); null for
+        /// legacy key-tombstone unlinks.
+        link_entry_id: Option<String>,
+    },
     Hide,
     Unhide,
 }
@@ -669,9 +678,14 @@ impl From<&crate::event::EntryEffect> for EntryEffectOutput {
                 target: target.clone(),
                 edge_type: edge_type.clone(),
             },
-            crate::event::EntryEffect::Unlink { target, edge_type } => EntryEffectOutput::Unlink {
+            crate::event::EntryEffect::Unlink {
+                target,
+                edge_type,
+                link_entry_id,
+            } => EntryEffectOutput::Unlink {
                 target: target.clone(),
                 edge_type: edge_type.clone(),
+                link_entry_id: link_entry_id.clone(),
             },
             crate::event::EntryEffect::Hide => EntryEffectOutput::Hide,
             crate::event::EntryEffect::Unhide => EntryEffectOutput::Unhide,

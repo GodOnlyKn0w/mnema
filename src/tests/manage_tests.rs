@@ -662,28 +662,92 @@ fn v2_link_and_unlink_write_effect_entries_and_fold_projection() {
 
     cmd_unlink(&src, &tgt, Some("depends-on"), false, None).unwrap();
     let (unlinked_events, _) = read_events_lossy(&path);
-    let unlink_prev = unlinked_events
+    let (unlink_prev, cancels) = unlinked_events
         .iter()
         .filter_map(|(_, event)| {
             if let Event::LogAppended {
                 id,
-                effect: Some(event::EntryEffect::Unlink { target, edge_type }),
+                effect:
+                    Some(event::EntryEffect::Unlink {
+                        target,
+                        edge_type,
+                        link_entry_id,
+                    }),
                 prev_entry_id,
                 ..
             } = event
             {
                 if id == &src && target == &tgt && edge_type == "depends-on" {
-                    return prev_entry_id.clone();
+                    return Some((prev_entry_id.clone(), link_entry_id.clone()));
                 }
             }
             None
         })
         .next()
         .expect("unlink effect entry exists");
-    assert_eq!(unlink_prev, link_entry_id);
+    assert_eq!(unlink_prev, Some(link_entry_id.clone()));
+    // CORPUS §4: the unlink names the specific link entry it reverses.
+    assert_eq!(
+        cancels,
+        Some(link_entry_id),
+        "unlink must record the reversed link entry id"
+    );
     let unlinked_strands = projection::project_strands(&unlinked_events, true);
     let unlinked_src = unlinked_strands.iter().find(|s| s.id == src).unwrap();
     assert!(unlinked_src.depends_on_edges.is_empty());
+}
+
+#[test]
+fn two_links_unlink_one_leaves_the_other_live() {
+    // CORPUS §4 completeness: with two live links to the same target, cancelling
+    // one link entry leaves the other — instance-based, not key-based, fold.
+    let _env = setup();
+    let src = create_strand("relation source");
+    let tgt = create_strand("relation target");
+    cmd_link(&src, &tgt, Some("depends-on"), false, None).unwrap();
+    cmd_link(&src, &tgt, Some("depends-on"), false, None).unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let s = strands.iter().find(|st| st.id == src).unwrap();
+    // Two link entries, but the edge is deduped by target for display.
+    assert_eq!(s.depends_on_edges, vec![tgt.clone()]);
+    let link_ids: Vec<String> = s
+        .log
+        .iter()
+        .filter_map(|e| match &e.effect {
+            Some(event::EntryEffect::Link { target, edge_type })
+                if target == &tgt && edge_type == "depends-on" =>
+            {
+                e.entry_id.clone()
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(link_ids.len(), 2, "two link entries recorded");
+
+    // Unlink cancels the most recent link entry (the resolver's choice); the
+    // older instance is still live, so the edge remains.
+    cmd_unlink(&src, &tgt, Some("depends-on"), false, None).unwrap();
+    let (after, _) = read_events_lossy(&path);
+    let after_s = projection::project_strands(&after, true);
+    let after_src = after_s.iter().find(|st| st.id == src).unwrap();
+    assert_eq!(
+        after_src.depends_on_edges,
+        vec![tgt.clone()],
+        "one live link remains after cancelling the other"
+    );
+
+    // A second unlink cancels the remaining instance; now the edge is gone.
+    cmd_unlink(&src, &tgt, Some("depends-on"), false, None).unwrap();
+    let (after2, _) = read_events_lossy(&path);
+    let after2_s = projection::project_strands(&after2, true);
+    let after2_src = after2_s.iter().find(|st| st.id == src).unwrap();
+    assert!(
+        after2_src.depends_on_edges.is_empty(),
+        "both links cancelled — edge gone"
+    );
 }
 
 #[test]

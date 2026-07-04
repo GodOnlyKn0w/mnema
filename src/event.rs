@@ -60,8 +60,20 @@ fn run_cmd(args: &[&str]) -> Result<String, String> {
 pub enum EntryEffect {
     Close { disposition: String },
     Reopen,
-    Link { target: String, edge_type: String },
-    Unlink { target: String, edge_type: String },
+    Link {
+        target: String,
+        edge_type: String,
+    },
+    Unlink {
+        target: String,
+        edge_type: String,
+        /// entry_id of the specific Link entry this reverses (CORPUS §4:
+        /// unlink names its target by id). `None` for legacy unlinks, which
+        /// tombstone the whole (target, edge_type) key. Optional + defaulted
+        /// so pre-2026-07-04 rows deserialize unchanged.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        link_entry_id: Option<String>,
+    },
     Hide,
     Unhide,
 }
@@ -80,10 +92,11 @@ impl EntryEffect {
         }
     }
 
-    pub(crate) fn unlink(target: &str, edge_type: &str) -> Self {
+    pub(crate) fn unlink(target: &str, edge_type: &str, link_entry_id: Option<String>) -> Self {
         EntryEffect::Unlink {
             target: target.to_string(),
             edge_type: edge_type.to_string(),
+            link_entry_id,
         }
     }
 }
@@ -615,10 +628,14 @@ pub(crate) fn link_entry_parts(target_id: &str, edge_type: &str) -> (String, Ent
     )
 }
 
-pub(crate) fn unlink_entry_parts(target_id: &str, edge_type: &str) -> (String, EntryEffect) {
+pub(crate) fn unlink_entry_parts(
+    target_id: &str,
+    edge_type: &str,
+    link_entry_id: Option<String>,
+) -> (String, EntryEffect) {
     (
         format!("unlink {} {}", edge_type, target_id),
-        EntryEffect::unlink(target_id, edge_type),
+        EntryEffect::unlink(target_id, edge_type, link_entry_id),
     )
 }
 
@@ -676,16 +693,18 @@ pub fn make_edge_linked(
 }
 
 /// Build an unlink effect entry (F5). Symmetric with `make_edge_linked`:
-/// carries edge_type (which typed edge to remove) and provenance.
+/// carries edge_type (which typed edge to remove), the reversed link entry id
+/// (CORPUS §4), and provenance.
 pub fn make_edge_unlinked(
     source_id: &str,
     prev_entry_id: Option<&str>,
     target_id: &str,
     edge_type: Option<&str>,
+    link_entry_id: Option<String>,
     provenance: Option<serde_json::Value>,
 ) -> Event {
     let edge_type = edge_type.unwrap_or("depends-on");
-    let (content, effect) = unlink_entry_parts(target_id, edge_type);
+    let (content, effect) = unlink_entry_parts(target_id, edge_type, link_entry_id);
     make_log_appended_entry_with_effect(
         source_id,
         prev_entry_id,

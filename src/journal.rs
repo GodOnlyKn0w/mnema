@@ -677,7 +677,8 @@ pub(crate) fn build_cutover_v2_plan(source: &[(usize, Event)]) -> Result<Cutover
                     id,
                     ts,
                     format!("unlink {} {}", etype, target),
-                    Some(event::EntryEffect::unlink(&target, etype)),
+                    // Legacy EdgeUnlinked had no per-link id → key tombstone.
+                    Some(event::EntryEffect::unlink(&target, etype, None)),
                     provenance.clone(),
                     &strand_meta,
                     &mut strand_map,
@@ -934,12 +935,15 @@ fn translate_effect(
             target: strand_map.get(&target).cloned().unwrap_or(target),
             edge_type,
         }),
-        Some(event::EntryEffect::Unlink { target, edge_type }) => {
-            Some(event::EntryEffect::Unlink {
-                target: strand_map.get(&target).cloned().unwrap_or(target),
-                edge_type,
-            })
-        }
+        Some(event::EntryEffect::Unlink {
+            target,
+            edge_type,
+            link_entry_id,
+        }) => Some(event::EntryEffect::Unlink {
+            target: strand_map.get(&target).cloned().unwrap_or(target),
+            edge_type,
+            link_entry_id,
+        }),
         other => other,
     }
 }
