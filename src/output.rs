@@ -658,6 +658,53 @@ impl From<&crate::event::EntryEffect> for EntryEffectOutput {
         }
     }
 }
+// ── show --entry JSON DTOs ──────────────────────────────────
+
+/// One pulled entry in `show --entry --deref` JSON. Flat by design: hop and
+/// cited_by are plain fields so jq can regroup by any dimension.
+#[derive(Debug, Serialize)]
+pub(crate) struct EntryDerefNodeOutput {
+    pub(crate) hop: usize,
+    pub(crate) cited_by: Option<String>,
+    pub(crate) entry_id: String,
+    pub(crate) strand_id: String,
+    pub(crate) strand_summary: String,
+    pub(crate) entry_index: usize,
+    pub(crate) strand_entry_count: usize,
+    pub(crate) later_entries: usize,
+    pub(crate) ts: String,
+    pub(crate) content: String,
+    pub(crate) effect: Option<EntryEffectOutput>,
+    pub(crate) refs: Vec<String>,
+}
+
+/// A ref that does not resolve locally: pointer reported, target unasserted.
+#[derive(Debug, Serialize)]
+pub(crate) struct EntryDerefStubOutput {
+    pub(crate) hop: usize,
+    pub(crate) cited_by: String,
+    pub(crate) entry_id: String,
+    pub(crate) resolved: bool,
+}
+
+/// A ref beyond the requested depth, with the price of expanding it.
+#[derive(Debug, Serialize)]
+pub(crate) struct EntryFrontierOutput {
+    pub(crate) entry_id: String,
+    pub(crate) content_len: Option<usize>,
+}
+
+/// External contract for `show --entry --format json`.
+#[derive(Debug, Serialize)]
+pub(crate) struct ShowEntryOutput {
+    pub(crate) status: &'static str,
+    pub(crate) entry_id: String,
+    pub(crate) deref: usize,
+    pub(crate) nodes: Vec<EntryDerefNodeOutput>,
+    pub(crate) unresolved: Vec<EntryDerefStubOutput>,
+    pub(crate) frontier: Vec<EntryFrontierOutput>,
+}
+
 // ── show --format json ─────────────────────────────────────
 
 /// One event entry in the `events` array (projection of LogEntry, not the raw struct).

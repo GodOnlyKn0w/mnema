@@ -838,3 +838,89 @@ fn show_tail_works_with_explicit_id() {
 
 // StrandDetailOutput (show --format json) must serialize as "entry_count",
 // not "entries".
+
+// ── show --entry --deref: rationale-chain expansion ─────────────────────
+
+#[test]
+fn show_entry_deref_expands_chain_and_prices_frontier() {
+    let _env = setup();
+    // Chain: downstream cites decision, decision cites evidence.
+    let evidence = create_strand("evidence line");
+    cmd_append(
+        Some("A2 evidence detail"),
+        None,
+        false,
+        false,
+        None,
+        Some(&evidence),
+        None,
+        None,
+    )
+    .unwrap();
+    let decision = create_strand("decision line");
+    cmd_append_with_seen_offset(
+        Some("[decision] built on evidence"),
+        None,
+        false,
+        false,
+        None,
+        Some(&decision),
+        None,
+        None,
+        None,
+        Some(&evidence),
+    )
+    .unwrap();
+    let downstream = create_strand("downstream line");
+    cmd_append_with_seen_offset(
+        Some("[decision] downstream conclusion"),
+        None,
+        false,
+        false,
+        None,
+        Some(&downstream),
+        None,
+        None,
+        None,
+        Some(&decision),
+    )
+    .unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let root_hash = strands
+        .iter()
+        .find(|s| s.id == downstream)
+        .and_then(|s| s.log.last())
+        .and_then(|entry| entry.entry_id.clone())
+        .expect("root entry hash");
+
+    // depth 1: root + the decision entry; the evidence ref sits on the
+    // frontier, priced with its content length.
+    let view = projection::build_entry_view(&strands, &root_hash[..16], 1).unwrap();
+    assert_eq!(view.nodes.len(), 2, "root plus one hop");
+    assert_eq!(view.nodes[0].hop, 0);
+    assert_eq!(view.nodes[1].hop, 1);
+    assert_eq!(
+        view.nodes[1].cited_by.as_deref(),
+        Some(root_hash.as_str()),
+        "hop-1 node records which entry pulled it in"
+    );
+    assert_eq!(view.stubs.len(), 0);
+    assert_eq!(view.frontier.len(), 1, "evidence ref waits at the boundary");
+    assert_eq!(
+        view.frontier[0].content_len,
+        Some("A2 evidence detail".len()),
+        "frontier prices the next hop"
+    );
+
+    // depth 2: the chain is fully expanded, nothing left on the frontier.
+    let view = projection::build_entry_view(&strands, &root_hash[..16], 2).unwrap();
+    assert_eq!(view.nodes.len(), 3);
+    assert_eq!(view.frontier.len(), 0);
+    assert_eq!(
+        view.nodes[2].entry.content, "A2 evidence detail",
+        "hop-2 node is the evidence entry itself"
+    );
+}

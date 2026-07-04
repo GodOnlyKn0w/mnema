@@ -203,6 +203,7 @@ checkpoint/bind 用 --id；单 id 命令两种写法等价
   --provenance / --seen-offset <N>  写命令出处 / 上次看到的目标线 offset
   --tail <N>        只限显示、不改账，对任何目标可用
   --edge-type       link 的边类型（--type 是 deprecated 别名）
+  --why / --from    引依据/记来源：线前缀=其最新条，entry 哈希前缀=精确该条；反向读取用 show --entry（--deref 展开）
 
 JSON 命名法：
   复数名词 = 数组（events / matches / strands / active / timeline）
@@ -220,9 +221,8 @@ JSON 命名法：
 exit code：0 成功 / 1 命令执行失败 / 2 journal 不可读或损坏 / 3 解析或参数非法。
 
 永久豁免（点名豁免，防"看起来漏了"的二次猜测）：
-  doctor 子命令风格（doctor journal）
-  export --out <PATH>（主对象用旗标）；cutover-v2 --apply（journal maintenance）
-  add/append 正文位置参数、--stdin、--file 已在 v2 迁移中移除"#,
+  doctor 子命令风格（doctor journal）；add/append 正文位置参数、--stdin、--file 已在 v2 迁移中移除
+  export --out <PATH>（主对象用旗标）；cutover-v2 --apply（journal maintenance）"#,
     },
 ];
 

@@ -286,6 +286,10 @@ JSON shape: tasktree explain json")]
         format: Option<String>,
     },
     /// Show full details of one strand
+    #[command(after_help = "\
+Examples:
+  tasktree show 0000019dd34b --tail 8
+  tasktree show --entry 3dfc13241d55 --deref 2")]
     Show {
         #[command(flatten)]
         target: IdTarget,
@@ -298,6 +302,19 @@ JSON shape: tasktree explain json")]
         /// One-glance digest: header + marker census, no full log dump
         #[arg(long)]
         digest: bool,
+        /// Show one entry by hash prefix instead of a strand, expanding its
+        /// rationale refs (see --deref). Cited entries arrive with their home
+        /// line, position, and whether that line has since advanced.
+        #[arg(long = "entry", value_name = "HASH")]
+        entry: Option<String>,
+        /// With --entry: expand refs N hops (default 1; 0 = list refs only).
+        /// Refs beyond the boundary are listed with their expansion cost.
+        #[arg(long = "deref", value_name = "N", requires = "entry")]
+        deref: Option<usize>,
+        /// With --entry: also show K preceding entries from each pulled
+        /// entry's own line (text view only)
+        #[arg(long = "context", value_name = "K", requires = "entry")]
+        context: Option<usize>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -890,11 +907,25 @@ fn run(command: &Commands) -> Result<(), String> {
             last,
             tail,
             digest,
+            entry,
+            deref,
+            context,
             format,
             locked,
         } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_show(target.get(), *last, *tail, fmt, *locked, *digest)
+            if let Some(prefix) = entry {
+                if target.get().is_some() || *last || *digest || tail.is_some() || *locked {
+                    return Err(
+                        "--entry reads one entry by hash; it does not combine with strand \
+                         view flags (a strand id, --last, --tail, --digest, --locked)"
+                            .to_string(),
+                    );
+                }
+                cmd_show_entry(prefix, deref.unwrap_or(1), context.unwrap_or(0), fmt)
+            } else {
+                cmd_show(target.get(), *last, *tail, fmt, *locked, *digest)
+            }
         }
         Commands::Search {
             query,

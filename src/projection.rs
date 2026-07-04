@@ -817,6 +817,143 @@ impl<'a> EntryIndex<'a> {
     }
 }
 
+// ── Entry deref view (show --entry [--deref N]) ─────────────
+
+/// One pulled entry in a deref expansion, with the mechanical coordinates a
+/// reader needs to interpret it outside its home line (CORPUS §2: the unit
+/// of self-containment is the line, so a bare entry travels with its line's
+/// identity and its position facts).
+pub(crate) struct EntryViewNode<'a> {
+    pub(crate) hop: usize,
+    /// Hash of the entry whose ref pulled this node in (None for the root).
+    pub(crate) cited_by: Option<String>,
+    pub(crate) strand: &'a ProjectedStrand,
+    pub(crate) entry: &'a LogEntry,
+    /// 0-based position within the strand's log.
+    pub(crate) entry_index: usize,
+    /// Log entries after this one on its own line — the position fact behind
+    /// the (advanced) annotation.
+    pub(crate) later_entries: usize,
+}
+
+/// A ref that does not resolve locally (cross-journal or dangling). The
+/// machine reports the pointer and asserts nothing about its target.
+pub(crate) struct EntryViewStub {
+    pub(crate) hop: usize,
+    pub(crate) cited_by: String,
+    pub(crate) hash: String,
+}
+
+/// A ref at the depth boundary, left unexpanded on purpose. `content_len`
+/// prices the next hop; None when the target is unresolvable locally.
+pub(crate) struct EntryViewFrontier {
+    pub(crate) hash: String,
+    pub(crate) content_len: Option<usize>,
+}
+
+pub(crate) struct EntryView<'a> {
+    /// Root first, then hop-ascending (BFS order).
+    pub(crate) nodes: Vec<EntryViewNode<'a>>,
+    pub(crate) stubs: Vec<EntryViewStub>,
+    pub(crate) frontier: Vec<EntryViewFrontier>,
+}
+
+/// Resolve `prefix` to an entry and expand its rationale refs `deref` hops.
+/// Pure pointer following over the projected read model: refs participate in
+/// their entry's own hash, so the ref graph is a DAG by construction and the
+/// walk terminates without cycle checks. Deduplication is by hash — the same
+/// entry cited via several paths is pulled once.
+pub(crate) fn build_entry_view<'a>(
+    strands: &'a [ProjectedStrand],
+    prefix: &str,
+    deref: usize,
+) -> Result<EntryView<'a>, String> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    let mut by_hash: HashMap<&str, (&ProjectedStrand, usize)> = HashMap::new();
+    for strand in strands {
+        for (idx, entry) in strand.log.iter().enumerate() {
+            if let Some(hash) = entry.entry_id.as_deref() {
+                by_hash.insert(hash, (strand, idx));
+            }
+        }
+    }
+
+    let root_hash = match find_entry(strands, prefix) {
+        EntryLookup::One { entry, .. } => entry
+            .entry_id
+            .clone()
+            .expect("find_entry only matches entries with ids"),
+        EntryLookup::None => {
+            return Err(format!(
+                "no entry matches {} (strand views resolve with 'tasktree show <ID>')",
+                prefix
+            ));
+        }
+        EntryLookup::Ambiguous(candidates) => {
+            let sample: Vec<String> = candidates
+                .iter()
+                .take(4)
+                .map(|c| crate::util::shorten(c))
+                .collect();
+            return Err(format!(
+                "entry prefix {} is ambiguous: {} entries match (e.g. {})",
+                prefix,
+                candidates.len(),
+                sample.join(", ")
+            ));
+        }
+    };
+
+    let mut nodes = Vec::new();
+    let mut stubs = Vec::new();
+    let mut frontier = Vec::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut frontier_seen: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<(String, usize, Option<String>)> = VecDeque::new();
+    queue.push_back((root_hash, 0, None));
+
+    while let Some((hash, hop, cited_by)) = queue.pop_front() {
+        if !visited.insert(hash.clone()) {
+            continue;
+        }
+        match by_hash.get(hash.as_str()) {
+            Some(&(strand, idx)) => {
+                let entry = &strand.log[idx];
+                for cited in &entry.refs {
+                    if hop < deref {
+                        queue.push_back((cited.clone(), hop + 1, Some(hash.clone())));
+                    } else if !visited.contains(cited) && frontier_seen.insert(cited.clone()) {
+                        frontier.push(EntryViewFrontier {
+                            hash: cited.clone(),
+                            content_len: by_hash
+                                .get(cited.as_str())
+                                .map(|&(s, i)| s.log[i].content.len()),
+                        });
+                    }
+                }
+                nodes.push(EntryViewNode {
+                    hop,
+                    cited_by,
+                    strand,
+                    entry,
+                    entry_index: idx,
+                    later_entries: strand.log.len() - idx - 1,
+                });
+            }
+            None => stubs.push(EntryViewStub {
+                hop,
+                cited_by: cited_by.unwrap_or_default(),
+                hash,
+            }),
+        }
+    }
+    Ok(EntryView {
+        nodes,
+        stubs,
+        frontier,
+    })
+}
+
 // ── Entry point: project_raw → structured ──────────────────
 
 /// Project raw event stream into a Vec<ProjectedStrand>.

@@ -737,6 +737,151 @@ pub(crate) fn cmd_show(
     Ok(())
 }
 
+/// Show one entry by hash prefix and expand its rationale refs `deref` hops.
+/// Every pulled entry travels with mechanical coordinates (home line, position,
+/// later-entry count) because the unit of self-containment is the line, not
+/// the entry. Truncation at the depth boundary is honest: the frontier is
+/// listed with retrieval commands and the size of what expanding would cost.
+pub(crate) fn cmd_show_entry(
+    prefix: &str,
+    deref: usize,
+    context: usize,
+    format_json: bool,
+) -> Result<(), String> {
+    let path = ensure_journal()?;
+    let (events, skipped) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let view = projection::build_entry_view(&strands, prefix, deref)?;
+
+    if format_json {
+        let output = output::ShowEntryOutput {
+            status: "ok",
+            entry_id: view.nodes[0]
+                .entry
+                .entry_id
+                .clone()
+                .unwrap_or_default(),
+            deref,
+            nodes: view
+                .nodes
+                .iter()
+                .map(|n| output::EntryDerefNodeOutput {
+                    hop: n.hop,
+                    cited_by: n.cited_by.clone(),
+                    entry_id: n.entry.entry_id.clone().unwrap_or_default(),
+                    strand_id: n.strand.id.clone(),
+                    strand_summary: truncate(n.strand.first_summary(), 70),
+                    entry_index: n.entry_index,
+                    strand_entry_count: n.strand.log.len(),
+                    later_entries: n.later_entries,
+                    ts: n.entry.ts.clone(),
+                    content: n.entry.content.clone(),
+                    effect: n.entry.effect.as_ref().map(output::EntryEffectOutput::from),
+                    refs: n.entry.refs.clone(),
+                })
+                .collect(),
+            unresolved: view
+                .stubs
+                .iter()
+                .map(|s| output::EntryDerefStubOutput {
+                    hop: s.hop,
+                    cited_by: s.cited_by.clone(),
+                    entry_id: s.hash.clone(),
+                    resolved: false,
+                })
+                .collect(),
+            frontier: view
+                .frontier
+                .iter()
+                .map(|f| output::EntryFrontierOutput {
+                    entry_id: f.hash.clone(),
+                    content_len: f.content_len,
+                })
+                .collect(),
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
+    } else {
+        let total_chars: usize = view.nodes.iter().map(|n| n.entry.content.len()).sum();
+        for node in &view.nodes {
+            let handle = node.entry.entry_id.as_deref().map(shorten).unwrap_or_default();
+            if node.hop == 0 {
+                println!("entry: [{}]", handle);
+            } else {
+                println!(
+                    "── hop {} · cited by {} ──",
+                    node.hop,
+                    shorten(node.cited_by.as_deref().unwrap_or("?"))
+                );
+                println!("[{}]", handle);
+            }
+            println!("  {}", node.entry.content);
+            let advanced = if node.later_entries > 0 {
+                format!(" · {} later entries (advanced)", node.later_entries)
+            } else {
+                String::new()
+            };
+            println!(
+                "  line: {} \"{}\" · entry {}/{}{}",
+                shorten(&node.strand.id),
+                truncate(node.strand.first_summary(), 60),
+                node.entry_index + 1,
+                node.strand.log.len(),
+                advanced
+            );
+            println!(
+                "  at: {} · tasktree show --entry {}",
+                compact_ts(&node.entry.ts),
+                handle
+            );
+            // --context K: preceding entries from this entry's own line, one
+            // line each — orientation for entries that lean on their thread.
+            if context > 0 && node.entry_index > 0 {
+                let start = node.entry_index.saturating_sub(context);
+                for prev in &node.strand.log[start..node.entry_index] {
+                    println!(
+                        "    ↑ [{}] {}",
+                        prev.entry_id.as_deref().map(shorten).unwrap_or_default(),
+                        truncate(&prev.content, 120)
+                    );
+                }
+            }
+        }
+        for stub in &view.stubs {
+            println!(
+                "── hop {} · cited by {} ──",
+                stub.hop,
+                shorten(&stub.cited_by)
+            );
+            println!(
+                "[{}] points elsewhere — not verifiable locally (cross-journal or missing)",
+                shorten(&stub.hash)
+            );
+        }
+        if !view.frontier.is_empty() {
+            let frontier_chars: usize = view.frontier.iter().filter_map(|f| f.content_len).sum();
+            println!(
+                "frontier (beyond depth {}): {} refs unexpanded, ~{} chars",
+                deref,
+                view.frontier.len(),
+                frontier_chars
+            );
+            for f in &view.frontier {
+                println!("  tasktree show --entry {}", shorten(&f.hash));
+            }
+        }
+        eprintln!(
+            "[tasktree] show --entry: {} entries pulled, ~{} chars, {} unresolved",
+            view.nodes.len(),
+            total_chars,
+            view.stubs.len()
+        );
+    }
+    if skipped > 0 {
+        return Err(corrupted_lines_error(skipped));
+    }
+    Ok(())
+}
+
 // ── Tree projection ─────────────────────────────────────
 
 pub(crate) fn cmd_tree(root_id: &str, format_json: Option<&str>) -> Result<(), String> {
