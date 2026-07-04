@@ -322,7 +322,6 @@ fn v2_journal_anchor_written_after_write_and_doctor_verifies() {
         read.skipped(),
         0,
         0,
-        diagnostics::DoctorPreviousState::FirstRun,
         chrono::Utc::now(),
     );
 
@@ -354,7 +353,6 @@ fn doctor_integrity_detects_tampered_anchored_entry() {
         read.skipped(),
         0,
         0,
-        diagnostics::DoctorPreviousState::FirstRun,
         chrono::Utc::now(),
     );
 

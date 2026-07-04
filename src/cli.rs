@@ -743,11 +743,7 @@ Examples:
 #[derive(Subcommand)]
 enum DoctorTarget {
     /// Check journal integrity
-    Journal {
-        /// Treat advisory warnings as blocking issues
-        #[arg(long)]
-        strict: bool,
-    },
+    Journal,
 }
 
 /// NOTE: Strand sort key is `max(log_appended.ts)` per strand.
@@ -1073,7 +1069,7 @@ fn run(command: &Commands) -> Result<(), String> {
         }
         Commands::Doctor { target } => {
             let result = match target {
-                DoctorTarget::Journal { strict } => cmd_doctor_journal(*strict),
+                DoctorTarget::Journal => cmd_doctor_journal(),
             };
             match result {
                 Ok(true) => Err("journal issues detected".to_string()),

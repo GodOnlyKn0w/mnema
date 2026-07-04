@@ -369,16 +369,6 @@ fn add_parent_and_belongs_to_alias_parse() {
         by_alias
     );
 }
-#[test]
-fn doctor_journal_strict_flag_parses() {
-    use clap::CommandFactory;
-    let result = Cli::command().try_get_matches_from(["tasktree", "doctor", "journal", "--strict"]);
-    assert!(
-        result.is_ok(),
-        "doctor journal --strict must parse: {:?}",
-        result
-    );
-}
 
 #[test]
 fn timeline_help_names_append_order_not_causal_order() {

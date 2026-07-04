@@ -313,7 +313,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         impact: "The task is overdue; downstream schedule assumptions are invalid.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
-            command_str: "verify or cancel the task; update the deadline if re-planned",
+            command_str: "re-read the deadline and current state: tasktree show --id <STRAND_ID>",
             executable: false,
             requires_human: true,
         },
@@ -374,7 +374,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         impact: "The decision and constraint may conflict — the governance signal is ambiguous.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
-            command_str: "review both entries and resolve the contradiction; append a clarifying entry",
+            command_str: "re-read both entries to judge the contradiction: tasktree show --id <STRAND_ID>",
             executable: false,
             requires_human: true,
         },
@@ -403,8 +403,8 @@ static CATALOG: &[DiagnosticInfo] = &[
         finding: "The appended entry starts with a closing annotation marker ([done], [failed], [cancelled], [merged], or [verified]). Since lifecycle-from-marker semantics were removed, these markers are annotations only — the strand's lifecycle state was NOT changed by this append.",
         impact: "If the intent was to close the strand, it remains open. Downstream tools that filter on lifecycle state (list --state done, orient closed_count) will not see this strand as closed.",
         recovery: RecoveryInfo {
-            kind: RecoveryKind::AppendMarker,
-            command_str: "tasktree close --id <STRAND_ID> [--as done|failed|cancelled|merged|verified]",
+            kind: RecoveryKind::Manual,
+            command_str: "re-check whether it should be closed: tasktree show --id <STRAND_ID>",
             executable: false,
             requires_human: false,
         },
@@ -418,8 +418,8 @@ static CATALOG: &[DiagnosticInfo] = &[
         finding: "A [fixed] entry carries a fixes=<prefix> token (prefix >= 8 hex chars) that does not match any [friction] entry's entry id (or a pre-retirement append_id) in the same strand. The prefix either points to a nonexistent entry or to an entry that is not a [friction].",
         impact: "The [fixed] entry is not folded and its intended friction target remains exposed as an unresolved live debt. The pairing was silently skipped.",
         recovery: RecoveryInfo {
-            kind: RecoveryKind::Edit,
-            command_str: "check the fixes= prefix against tasktree show --id <STRAND_ID> and correct it",
+            kind: RecoveryKind::Manual,
+            command_str: "re-check the fixes= prefix: tasktree show --id <STRAND_ID>",
             executable: false,
             requires_human: true,
         },

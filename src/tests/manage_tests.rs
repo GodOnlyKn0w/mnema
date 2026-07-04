@@ -953,7 +953,6 @@ fn cutover_v2_apply_archives_v1_and_imports_pure_v2_journal() {
         read.skipped(),
         0,
         0,
-        diagnostics::DoctorPreviousState::FirstRun,
         chrono::Utc::now(),
     );
     assert!(!report.integrity.has_errors(), "{:?}", report.integrity);

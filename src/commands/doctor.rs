@@ -7,7 +7,7 @@ use crate::journal::*;
 use crate::{diagnostics, projection};
 use std::time::Instant;
 
-pub(crate) fn cmd_doctor_journal(strict: bool) -> Result<bool, String> {
+pub(crate) fn cmd_doctor_journal() -> Result<bool, String> {
     let journal_dir = resolve_journal_dir()?;
     let path = journal_dir.join("journal.jsonl");
 
@@ -18,17 +18,13 @@ pub(crate) fn cmd_doctor_journal(strict: bool) -> Result<bool, String> {
     let (events, corrupted) = parse_journal_lines(&lines);
     let (git_head_count, git_context_event_count) = count_git_context_events(&events);
 
-    let state_path = journal_dir.join("doctor-state.json");
-    let previous_state = read_previous_state(&state_path);
-    write_current_state(&state_path, total_lines);
-
+    // CORPUS §9: doctor keeps no cross-run state (no doctor-state.json).
     let report = diagnostics::build_doctor_journal_report(
         &events,
         total_lines,
         corrupted,
         git_head_count,
         git_context_event_count,
-        previous_state,
         chrono::Utc::now(),
     );
 
@@ -44,7 +40,9 @@ pub(crate) fn cmd_doctor_journal(strict: bool) -> Result<bool, String> {
     println!("  total_lines: {}", total_lines);
     println!("  total_events: {}", journal_events.len());
 
-    Ok(report.has_errors() || (strict && report.has_advisories()))
+    // CORPUS §9: only integrity/parse failures make doctor fail. Advisories
+    // are surfaced, never blocking — the reader decides.
+    Ok(report.has_errors())
 }
 
 fn parse_journal_lines(lines: &[&str]) -> (Vec<Event>, usize) {
@@ -76,39 +74,6 @@ fn count_git_context_events(events: &[Event]) -> (usize, usize) {
     (with_head, capable)
 }
 
-fn read_previous_state(path: &std::path::Path) -> diagnostics::DoctorPreviousState {
-    if !path.exists() {
-        return diagnostics::DoctorPreviousState::FirstRun;
-    }
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(_) => return diagnostics::DoctorPreviousState::Unreadable,
-    };
-    #[derive(serde::Deserialize)]
-    struct DoctorState {
-        line_count: usize,
-    }
-    match serde_json::from_str::<DoctorState>(&content) {
-        Ok(state) => diagnostics::DoctorPreviousState::LineCount(state.line_count),
-        Err(_) => diagnostics::DoctorPreviousState::Invalid,
-    }
-}
-
-fn write_current_state(path: &std::path::Path, total_lines: usize) {
-    #[derive(serde::Serialize)]
-    struct DoctorStateOut {
-        line_count: usize,
-        updated_at: String,
-    }
-    let state = DoctorStateOut {
-        line_count: total_lines,
-        updated_at: chrono::Utc::now().to_rfc3339(),
-    };
-    if let Ok(json) = serde_json::to_string_pretty(&state) {
-        let _ = std::fs::write(path, json);
-    }
-}
-
 fn render_doctor_report(path: &std::path::Path, report: &diagnostics::DoctorJournalReport) {
     println!("Doctor Journal Report");
     println!("  journal: {}", path.display());
@@ -137,9 +102,6 @@ fn render_doctor_report(path: &std::path::Path, report: &diagnostics::DoctorJour
         "    entries with git.head: {}/{} ({:.0}%)",
         report.git_head_count, report.git_context_event_count, pct
     );
-    println!();
-    println!("  timeline:");
-    println!("    {}", report.timeline_status);
     println!();
     println!("  integrity:");
     println!("    anchors: {}", report.integrity.anchor_count);

@@ -408,14 +408,6 @@ pub fn verify_journal_integrity(events: &[crate::event::Event]) -> IntegrityRepo
     report
 }
 #[derive(Debug, Clone)]
-pub enum DoctorPreviousState {
-    FirstRun,
-    Unreadable,
-    Invalid,
-    LineCount(usize),
-}
-
-#[derive(Debug, Clone)]
 pub struct DoctorJournalReport {
     pub total_lines: usize,
     pub corrupted: usize,
@@ -425,19 +417,15 @@ pub struct DoctorJournalReport {
     pub noise_strands_count: usize,
     pub git_head_count: usize,
     pub git_context_event_count: usize,
-    pub timeline_status: String,
-    pub timeline_warning: bool,
     pub integrity: IntegrityReport,
     pub audit: JournalAudit,
 }
 
 impl DoctorJournalReport {
+    /// Integrity/parse failures — the only class doctor is allowed to fail on
+    /// (CORPUS §9). Advisories never block; doctor keeps no cross-run state.
     pub fn has_errors(&self) -> bool {
         self.corrupted > 0 || !self.orphans.is_empty() || self.integrity.has_errors()
-    }
-
-    pub fn has_advisories(&self) -> bool {
-        self.timeline_warning || self.audit.lint_count() > 0 || !self.audit.diagnostics.is_empty()
     }
 }
 
@@ -447,7 +435,6 @@ pub fn build_doctor_journal_report(
     corrupted: usize,
     git_head_count: usize,
     git_context_event_count: usize,
-    previous_state: DoctorPreviousState,
     now: chrono::DateTime<chrono::Utc>,
 ) -> DoctorJournalReport {
     use crate::event::Event;
@@ -476,28 +463,6 @@ pub fn build_doctor_journal_report(
         .collect();
     orphans.sort();
 
-    let timeline_status = match previous_state {
-        DoctorPreviousState::FirstRun => {
-            "monotonic: yes (first run, no previous state)".to_string()
-        }
-        DoctorPreviousState::Unreadable => {
-            "monotonic: yes (cannot read previous state)".to_string()
-        }
-        DoctorPreviousState::Invalid => "monotonic: yes (no previous state)".to_string(),
-        DoctorPreviousState::LineCount(previous) => {
-            if total_lines < previous {
-                format!(
-                    "warning: {}->{} jump detected (lines decreased)",
-                    previous, total_lines
-                )
-            } else if total_lines > previous {
-                format!("monotonic: yes ({}->{})", previous, total_lines)
-            } else {
-                "monotonic: yes (unchanged)".to_string()
-            }
-        }
-    };
-    let timeline_warning = timeline_status.contains("warning");
     let integrity = verify_journal_integrity(events);
 
     DoctorJournalReport {
@@ -515,8 +480,6 @@ pub fn build_doctor_journal_report(
             .count(),
         git_head_count,
         git_context_event_count,
-        timeline_status,
-        timeline_warning,
         integrity,
         audit: audit_journal(events, now),
     }
