@@ -93,6 +93,8 @@ CLI grammar, help text, text rendering, and exit-code policy do not define durab
 
 Audit findings are projections. The audit pass derives findings from events; diagnostic catalog/explain output belongs to the public contract surface; command-specific presentation and exit behavior belong to the CLI Adapter.
 
+Diagnostics keep no cross-run state. The doctor pass rebuilds every health fact from the current journal on each run; it does not persist a prior-run state file to diff against. Only integrity and parse failures fail the command — every other finding is surfaced as advisory, never blocking.
+
 ## Conventions
 
 Complex commands use request/outcome types between parsed CLI arguments and rendering. Parsed CLI arguments are not core requests.
@@ -124,3 +126,5 @@ Keep the architecture at four modules: Journal Core, Projection Core, Contract S
 Keep DTOs separate from internal projection models. Scripts and agents consume JSON output as a stable contract, while internal read models can change behind that boundary.
 
 Treat audit diagnostics as read-side projections. Findings are derived from events; command-specific presentation and exit behavior remain outside Projection Core.
+
+Keep diagnostics stateless. The doctor command derives its findings from the current journal each run instead of caching a prior-run state file, so there is no second store that can drift from the journal. This is the same rule as the projection invariant applied to the diagnostic path: the journal is the only durable fact, everything else is recomputed.
