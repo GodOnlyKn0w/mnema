@@ -770,7 +770,11 @@ pub(crate) struct CheckpointPlan {
     pub(crate) strand_state: String,
     pub(crate) resolved_by: &'static str,
     pub(crate) action: String,
-    pub(crate) event: Event,
+    // The planned entry's request fields (no fake Event: the real entry is
+    // constructed once at commit, which recomputes ts/entry_id).
+    pub(crate) content: String,
+    pub(crate) prev_entry_id: Option<String>,
+    pub(crate) provenance: Option<serde_json::Value>,
     pub(crate) entry_id: Option<String>,
     pub(crate) observed_entries_before_append: usize,
     pub(crate) shown_entries: Vec<CheckpointShownEntry>,
@@ -893,19 +897,7 @@ pub(crate) fn plan_checkpoint(
     let prev_entry_id = strand
         .log
         .last()
-        .and_then(|entry| entry.entry_id.as_deref());
-    let event = event::make_log_appended_entry(
-        &strand.id,
-        prev_entry_id,
-        &content,
-        Vec::new(),
-        None,
-        provenance_val,
-    );
-    let entry_id = match &event {
-        Event::LogAppended { entry_id, .. } => entry_id.clone(),
-        _ => None,
-    };
+        .and_then(|entry| entry.entry_id.clone());
 
     let shown_entries: Vec<CheckpointShownEntry> = if let Some(n) = req.tail {
         let skip = strand.log.len().saturating_sub(n);
@@ -976,8 +968,10 @@ pub(crate) fn plan_checkpoint(
         strand_state: strand.state().to_string(),
         resolved_by,
         action: req.action.to_string(),
-        event,
-        entry_id,
+        content,
+        prev_entry_id,
+        provenance: provenance_val,
+        entry_id: None,
         observed_entries_before_append,
         shown_entries,
         staleness_seconds,
@@ -994,35 +988,17 @@ pub(crate) fn plan_checkpoint(
 }
 
 pub(crate) fn commit_checkpoint(plan: &mut CheckpointPlan) -> Result<(), CheckpointFailure> {
-    let Event::LogAppended {
-        content,
-        refs,
-        ref_,
-        effect,
-        provenance,
-        prev_entry_id,
-        ..
-    } = &plan.event
-    else {
-        return Err(checkpoint_failure(
-            2,
-            "journal append failed: checkpoint plan did not contain a log entry".to_string(),
-            plan.requested_strand.clone(),
-            Some(plan.strand_id.clone()),
-            false,
-        ));
-    };
-    let planned_prev_entry_id = prev_entry_id.clone();
+    let planned_prev_entry_id = plan.prev_entry_id.clone();
     let planned_max_offset = plan.max_offset_before;
     let validate_id = plan.strand_id.clone();
     let appended = append_entry_to_strand_checked(
         JournalEntryAppendRequest {
             strand_id: plan.strand_id.clone(),
-            content: content.clone(),
-            refs: refs.clone(),
-            legacy_ref: ref_.clone(),
-            effect: effect.clone(),
-            provenance: provenance.clone(),
+            content: plan.content.clone(),
+            refs: Vec::new(),
+            legacy_ref: None,
+            effect: None,
+            provenance: plan.provenance.clone(),
         },
         move |events| {
             let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
@@ -1051,7 +1027,6 @@ pub(crate) fn commit_checkpoint(plan: &mut CheckpointPlan) -> Result<(), Checkpo
             false,
         )
     })?;
-    plan.event = appended.event;
     plan.entry_id = appended.entry_id;
     Ok(())
 }
