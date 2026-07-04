@@ -203,7 +203,7 @@ checkpoint/bind 用 --id；单 id 命令两种写法等价
   --provenance / --seen-offset <N>  写命令出处 / 上次看到的目标线 offset
   --tail <N>        只限显示、不改账，对任何目标可用
   --edge-type       link 的边类型（--type 是 deprecated 别名）
-  --why / --from    引依据/记来源：线前缀=其最新条，entry 哈希前缀=精确该条；反向读取用 show --entry（--deref 展开）
+  --why / --from    引依据/记来源：线前缀=其最新条，entry 哈希前缀=精确该条；读取用 show --entry（--deref 展开链，--before/--after 邻域）
 
 JSON 命名法：
   复数名词 = 数组（events / matches / strands / active / timeline）

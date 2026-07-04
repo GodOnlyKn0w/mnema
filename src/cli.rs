@@ -289,7 +289,8 @@ JSON shape: tasktree explain json")]
     #[command(after_help = "\
 Examples:
   tasktree show 0000019dd34b --tail 8
-  tasktree show --entry 3dfc13241d55 --deref 2")]
+  tasktree show --entry 3dfc13241d55 --deref 2
+  tasktree show --entry 3dfc13241d55 --after 3")]
     Show {
         #[command(flatten)]
         target: IdTarget,
@@ -304,17 +305,23 @@ Examples:
         digest: bool,
         /// Show one entry by hash prefix instead of a strand, expanding its
         /// rationale refs (see --deref). Cited entries arrive with their home
-        /// line, position, and whether that line has since advanced.
+        /// line, position, and whether that line has since advanced; --before/
+        /// --after read the neighbourhood on that line without pulling it whole.
         #[arg(long = "entry", value_name = "HASH")]
         entry: Option<String>,
         /// With --entry: expand refs N hops (default 1; 0 = list refs only).
         /// Refs beyond the boundary are listed with their expansion cost.
         #[arg(long = "deref", value_name = "N", requires = "entry")]
         deref: Option<usize>,
-        /// With --entry: also show K preceding entries from each pulled
-        /// entry's own line (text view only)
-        #[arg(long = "context", value_name = "K", requires = "entry")]
-        context: Option<usize>,
+        /// With --entry: show K entries preceding each pulled entry on its
+        /// own line — the local deliberation it may lean on (text view only)
+        #[arg(long = "before", value_name = "K", requires = "entry")]
+        before: Option<usize>,
+        /// With --entry: show K entries following each pulled entry on its
+        /// own line — the re-look for (advanced): what the cited line did
+        /// after the citation (text view only)
+        #[arg(long = "after", value_name = "K", requires = "entry")]
+        after: Option<usize>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -909,7 +916,8 @@ fn run(command: &Commands) -> Result<(), String> {
             digest,
             entry,
             deref,
-            context,
+            before,
+            after,
             format,
             locked,
         } => {
@@ -922,7 +930,13 @@ fn run(command: &Commands) -> Result<(), String> {
                             .to_string(),
                     );
                 }
-                cmd_show_entry(prefix, deref.unwrap_or(1), context.unwrap_or(0), fmt)
+                cmd_show_entry(
+                    prefix,
+                    deref.unwrap_or(1),
+                    before.unwrap_or(0),
+                    after.unwrap_or(0),
+                    fmt,
+                )
             } else {
                 cmd_show(target.get(), *last, *tail, fmt, *locked, *digest)
             }

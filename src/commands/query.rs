@@ -745,7 +745,8 @@ pub(crate) fn cmd_show(
 pub(crate) fn cmd_show_entry(
     prefix: &str,
     deref: usize,
-    context: usize,
+    before: usize,
+    after: usize,
     format_json: bool,
 ) -> Result<(), String> {
     let path = ensure_journal()?;
@@ -828,20 +829,41 @@ pub(crate) fn cmd_show_entry(
                 node.strand.log.len(),
                 advanced
             );
+            // For advanced entries the retrieval command doubles as the
+            // re-look: it prices the follow-up (--after <exact count>) and
+            // the reader may lower it.
+            let re_look = if node.later_entries > 0 {
+                format!(" --after {}", node.later_entries)
+            } else {
+                String::new()
+            };
             println!(
-                "  at: {} · tasktree show --entry {}",
+                "  at: {} · tasktree show --entry {}{}",
                 compact_ts(&node.entry.ts),
-                handle
+                handle,
+                re_look
             );
-            // --context K: preceding entries from this entry's own line, one
-            // line each — orientation for entries that lean on their thread.
-            if context > 0 && node.entry_index > 0 {
-                let start = node.entry_index.saturating_sub(context);
+            // --before K: preceding entries from this entry's own line, one
+            // line each — the local deliberation an entry may lean on.
+            if before > 0 && node.entry_index > 0 {
+                let start = node.entry_index.saturating_sub(before);
                 for prev in &node.strand.log[start..node.entry_index] {
                     println!(
                         "    ↑ [{}] {}",
                         prev.entry_id.as_deref().map(shorten).unwrap_or_default(),
                         truncate(&prev.content, 120)
+                    );
+                }
+            }
+            // --after K: following entries from this entry's own line — what
+            // the line did after this point (the substance behind (advanced)).
+            if after > 0 && node.entry_index + 1 < node.strand.log.len() {
+                let end = (node.entry_index + 1 + after).min(node.strand.log.len());
+                for next in &node.strand.log[node.entry_index + 1..end] {
+                    println!(
+                        "    ↓ [{}] {}",
+                        next.entry_id.as_deref().map(shorten).unwrap_or_default(),
+                        truncate(&next.content, 120)
                     );
                 }
             }
