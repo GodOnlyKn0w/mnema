@@ -116,7 +116,7 @@ fn context_folds_friction_on_closed_strand() {
         None,
     )
     .unwrap();
-    cmd_close(&id, Some("done"), false).unwrap();
+    cmd_close(&id, Some("done"), None, false).unwrap();
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, false);

@@ -26,7 +26,7 @@ fn w068_fires_on_overdue_deadline_and_respects_closing() {
     );
 
     // Closing the strand silences the warning (precision over recall).
-    cmd_close(&id, Some("cancelled"), false).unwrap();
+    cmd_close(&id, Some("cancelled"), None, false).unwrap();
     let (events, _) = read_events_lossy(&path);
     let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
     let diags = diagnostics::run_journal_diagnostics(&raw, chrono::Utc::now());
@@ -330,7 +330,7 @@ fn w070_silent_when_last_entry_producer_absent() {
 fn w071_fires_on_closed_strand() {
     let _env = setup();
     let id = create_strand("closed work");
-    cmd_close(&id, Some("done"), false).unwrap();
+    cmd_close(&id, Some("done"), None, false).unwrap();
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);

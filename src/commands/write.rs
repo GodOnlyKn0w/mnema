@@ -610,6 +610,7 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
 pub(crate) fn cmd_close(
     id: &str,
     disposition: Option<&str>,
+    reason: Option<&str>,
     format_json: bool,
 ) -> Result<(), String> {
     let disp = disposition.unwrap_or("done");
@@ -622,7 +623,7 @@ pub(crate) fn cmd_close(
     }
     let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
     let validate_id = strand_id.clone();
-    let (content, effect) = event::close_entry_parts(disp);
+    let (content, effect) = event::close_entry_parts(disp, reason);
     append_entry_to_strand_checked(
         JournalEntryAppendRequest {
             strand_id: strand_id.clone(),
@@ -666,10 +667,14 @@ pub(crate) fn cmd_close(
 }
 
 /// Reopen a closed strand by writing a reopen effect entry.
-pub(crate) fn cmd_reopen(id: &str, format_json: bool) -> Result<(), String> {
+pub(crate) fn cmd_reopen(
+    id: &str,
+    reason: Option<&str>,
+    format_json: bool,
+) -> Result<(), String> {
     let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
     let validate_id = strand_id.clone();
-    let (content, effect) = event::reopen_entry_parts();
+    let (content, effect) = event::reopen_entry_parts(reason);
     append_entry_to_strand_checked(
         JournalEntryAppendRequest {
             strand_id: strand_id.clone(),

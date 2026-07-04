@@ -623,15 +623,23 @@ pub(crate) fn unlink_entry_parts(target_id: &str, edge_type: &str) -> (String, E
 }
 
 /// `disposition` must be in `CLOSE_DISPOSITIONS`; callers validate before building.
-pub(crate) fn close_entry_parts(disposition: &str) -> (String, EntryEffect) {
-    (
-        format!("close disposition={}", disposition),
-        EntryEffect::close(disposition),
-    )
+pub(crate) fn close_entry_parts(disposition: &str, reason: Option<&str>) -> (String, EntryEffect) {
+    // effect carries the machine truth; the author's reason (CORPUS §6: close
+    // is written when understanding is most complete) rides in the content
+    // after the machine-mirror prefix. Old reason-less rows stay byte-identical.
+    let content = match reason {
+        Some(r) => format!("close disposition={}: {}", disposition, r),
+        None => format!("close disposition={}", disposition),
+    };
+    (content, EntryEffect::close(disposition))
 }
 
-pub(crate) fn reopen_entry_parts() -> (String, EntryEffect) {
-    ("reopen erroneous close".to_string(), EntryEffect::Reopen)
+pub(crate) fn reopen_entry_parts(reason: Option<&str>) -> (String, EntryEffect) {
+    let content = match reason {
+        Some(r) => format!("reopen erroneous close: {}", r),
+        None => "reopen erroneous close".to_string(),
+    };
+    (content, EntryEffect::Reopen)
 }
 
 pub(crate) fn hide_entry_parts(reason: Option<&str>) -> (String, EntryEffect) {
@@ -697,7 +705,7 @@ pub fn make_strand_closed(
     disposition: &str,
     provenance: Option<serde_json::Value>,
 ) -> Event {
-    let (content, effect) = close_entry_parts(disposition);
+    let (content, effect) = close_entry_parts(disposition, None);
     make_log_appended_entry_with_effect(
         id,
         prev_entry_id,
@@ -715,7 +723,7 @@ pub fn make_strand_reopened(
     prev_entry_id: Option<&str>,
     provenance: Option<serde_json::Value>,
 ) -> Event {
-    let (content, effect) = reopen_entry_parts();
+    let (content, effect) = reopen_entry_parts(None);
     make_log_appended_entry_with_effect(
         id,
         prev_entry_id,

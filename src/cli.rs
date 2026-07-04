@@ -445,10 +445,12 @@ Dispositions (--as):
   merged     Work merged into another strand
   verified   Work completed and independently verified
 
+Reason (optional): pipe a closing note on stdin; it rides on the close entry.
+
 Examples:
   tasktree close --id <ID>
   tasktree close --id <ID> --as failed
-  tasktree close --id <ID> --as cancelled")]
+  echo \"verified in staging\" | tasktree close --id <ID> --as verified")]
     Close {
         /// Strand ID (prefix match)
         #[arg(long = "id", value_name = "ID")]
@@ -463,11 +465,12 @@ Examples:
 
     /// Reopen a closed strand (write a reopen effect entry)
     ///
-    /// Moves the strand back to open/registered state.
+    /// Moves the strand back to open/registered state. Reopen means undoing an
+    /// erroneous close (CORPUS §6); pipe a reason on stdin to say why.
     #[command(after_help = "\
 Examples:
   tasktree reopen --id <ID>
-  tasktree reopen --id <ID> --format json")]
+  echo \"closed by mistake, still active\" | tasktree reopen --id <ID>")]
     Reopen {
         /// Strand ID (prefix match)
         #[arg(long = "id", value_name = "ID")]
@@ -1025,12 +1028,15 @@ fn run(command: &Commands) -> Result<(), String> {
             format,
         } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_close(id, disposition.as_deref(), fmt)
+            // Optional author reason via a pipe; a bare close (no pipe) still works.
+            let reason = crate::util::read_stdin_if_piped();
+            cmd_close(id, disposition.as_deref(), reason.as_deref(), fmt)
         }
 
         Commands::Reopen { id, format } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_reopen(id, fmt)
+            let reason = crate::util::read_stdin_if_piped();
+            cmd_reopen(id, reason.as_deref(), fmt)
         }
 
         Commands::Timeline {

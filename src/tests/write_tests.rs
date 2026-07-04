@@ -507,7 +507,7 @@ fn checkpoint_empty_action_returns_invalid_arguments() {
 fn checkpoint_on_closed_strand_still_succeeds() {
     let _env = setup();
     let id = create_strand("done work");
-    cmd_close(&id, Some("done"), false).unwrap();
+    cmd_close(&id, Some("done"), None, false).unwrap();
     // Checkpoint must still succeed — W071 is a warning, not a gate.
     let result = cmd_checkpoint(Some(&id), "tag the release", None, false, false, None);
     assert!(
@@ -1219,7 +1219,7 @@ fn v2_close_and_reopen_write_lifecycle_effect_entries() {
         .and_then(|entry| entry.entry_id.clone())
         .expect("first entry hash exists");
 
-    cmd_close(&id, Some("done"), false).unwrap();
+    cmd_close(&id, Some("done"), None, false).unwrap();
     let (closed_events, _) = read_events_lossy(&path);
     let close_prev = closed_events
         .iter()
@@ -1249,7 +1249,7 @@ fn v2_close_and_reopen_write_lifecycle_effect_entries() {
         .and_then(|entry| entry.entry_id.clone())
         .expect("close entry hash exists");
 
-    cmd_reopen(&id, false).unwrap();
+    cmd_reopen(&id, None, false).unwrap();
     let (reopened_events, _) = read_events_lossy(&path);
     let reopen_prev = reopened_events
         .iter()
@@ -1273,4 +1273,54 @@ fn v2_close_and_reopen_write_lifecycle_effect_entries() {
     let reopened_strands = projection::project_strands(&reopened_events, true);
     let reopened = reopened_strands.iter().find(|s| s.id == id).unwrap();
     assert_eq!(reopened.state(), "registered");
+}
+
+#[test]
+fn close_with_reason_stores_it_in_content() {
+    let _env = setup();
+    let id = create_strand("target for reasoned close");
+    cmd_close(&id, Some("verified"), Some("checked in staging"), false).unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let closed = events.iter().find_map(|(_, e)| {
+        if let Event::LogAppended {
+            id: eid,
+            content,
+            effect: Some(event::EntryEffect::Close { disposition }),
+            ..
+        } = e
+        {
+            if eid == &id {
+                return Some((content.clone(), disposition.clone()));
+            }
+        }
+        None
+    });
+    let (content, disp) = closed.expect("close effect entry exists");
+    assert_eq!(disp, "verified", "effect carries the machine disposition");
+    assert_eq!(
+        content, "close disposition=verified: checked in staging",
+        "author reason rides in content after the machine-mirror prefix"
+    );
+
+    // A reason-less close stays byte-identical to the pre-reason format.
+    let id2 = create_strand("target for bare close");
+    cmd_close(&id2, None, None, false).unwrap();
+    let (events2, _) = read_events_lossy(&path);
+    let bare = events2.iter().find_map(|(_, e)| {
+        if let Event::LogAppended {
+            id: eid,
+            content,
+            effect: Some(event::EntryEffect::Close { .. }),
+            ..
+        } = e
+        {
+            if eid == &id2 {
+                return Some(content.clone());
+            }
+        }
+        None
+    });
+    assert_eq!(bare.unwrap(), "close disposition=done");
 }

@@ -462,7 +462,7 @@ fn append_subtask_done_leaves_strand_open() {
 fn close_default_sets_closed_done() {
     let _env = setup();
     let id = create_strand("work to close");
-    cmd_close(&id, None, false).unwrap();
+    cmd_close(&id, None, None, false).unwrap();
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
@@ -480,7 +480,7 @@ fn close_default_sets_closed_done() {
 fn close_as_failed_sets_closed_failed() {
     let _env = setup();
     let id = create_strand("work that failed");
-    cmd_close(&id, Some("failed"), false).unwrap();
+    cmd_close(&id, Some("failed"), None, false).unwrap();
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
@@ -498,8 +498,8 @@ fn close_as_failed_sets_closed_failed() {
 fn reopen_after_close_restores_registered() {
     let _env = setup();
     let id = create_strand("work to reopen");
-    cmd_close(&id, None, false).unwrap();
-    cmd_reopen(&id, false).unwrap();
+    cmd_close(&id, None, None, false).unwrap();
+    cmd_reopen(&id, None, false).unwrap();
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
@@ -517,7 +517,7 @@ fn reopen_after_close_restores_registered() {
 fn close_as_cancelled_sets_closed_cancelled() {
     let _env = setup();
     let id = create_strand("cancelled plan");
-    cmd_close(&id, Some("cancelled"), false).unwrap();
+    cmd_close(&id, Some("cancelled"), None, false).unwrap();
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
@@ -531,8 +531,8 @@ fn close_as_cancelled_sets_closed_cancelled() {
 fn close_already_closed_errors() {
     let _env = setup();
     let id = create_strand("once-closed work");
-    cmd_close(&id, None, false).unwrap();
-    let result = cmd_close(&id, None, false);
+    cmd_close(&id, None, None, false).unwrap();
+    let result = cmd_close(&id, None, None, false);
     assert!(
         result.is_err(),
         "closing an already-closed strand must error"
@@ -549,7 +549,7 @@ fn close_already_closed_errors() {
 fn reopen_already_open_errors() {
     let _env = setup();
     let id = create_strand("never closed");
-    let result = cmd_reopen(&id, false);
+    let result = cmd_reopen(&id, None, false);
     assert!(
         result.is_err(),
         "reopening an already-open strand must error"

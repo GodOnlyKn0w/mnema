@@ -76,6 +76,25 @@ pub(crate) fn read_stdin_content() -> Result<String, String> {
     Ok(buf)
 }
 
+/// Read an optional note from stdin: `None` when stdin is a terminal (no pipe)
+/// or the piped content is blank. Used for close/reopen reasons, which are
+/// optional — a bare `tasktree close --id X` (no pipe) must still work.
+pub(crate) fn read_stdin_if_piped() -> Option<String> {
+    if atty::is(atty::Stream::Stdin) {
+        return None;
+    }
+    let mut buf = String::new();
+    if std::io::stdin().read_to_string(&mut buf).is_err() {
+        return None;
+    }
+    let trimmed = buf.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 pub(crate) fn read_file_content(path: &str) -> Result<String, String> {
     let p = std::path::Path::new(path);
     if !p.exists() {

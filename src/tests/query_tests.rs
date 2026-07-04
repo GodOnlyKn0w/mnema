@@ -5,7 +5,7 @@ fn orient_menu_shows_active_folds_closed() {
     let _env = setup();
     let open_id = create_strand("open line of work");
     let done_id = create_strand("finished line");
-    cmd_close(&done_id, None, false).unwrap();
+    cmd_close(&done_id, None, None, false).unwrap();
 
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
