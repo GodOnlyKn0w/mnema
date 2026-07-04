@@ -686,12 +686,8 @@ pub(crate) fn cmd_show(
         }
         None => {
             let _ = last; // --last is the explicit spelling of this default
-            if strands.is_empty() {
-                return Err("no strands found".to_string());
-            }
-            let mut sorted: Vec<_> = strands.iter().collect();
-            sorted.sort_by(|a, b| b.last_ts().cmp(&a.last_ts()));
-            sorted.into_iter().next().unwrap()
+            crate::commands::write::resolve_most_recent_strand(&strands)
+                .ok_or("no active strand to show — pass <ID> or --id")?
         }
     };
 

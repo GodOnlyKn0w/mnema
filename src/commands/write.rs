@@ -474,11 +474,8 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         })?
     } else {
         let visible_strands = projection::project_strands(&events, false);
-        let mut sorted: Vec<_> = visible_strands.iter().collect();
-        sorted.sort_by(|a, b| b.last_ts().cmp(&a.last_ts()));
-        let recent = sorted
-            .first()
-            .ok_or("no strands found — use 'add' or 'append --new' first")?;
+        let recent = resolve_most_recent_strand(&visible_strands)
+            .ok_or("no active strand — use 'add', 'append --new', or pass --id")?;
         recent.id.clone()
     };
 
@@ -735,10 +732,18 @@ pub(crate) fn checkpoint_error_json(failure: &CheckpointFailure) {
     println!("{}", serde_json::to_string(&output).unwrap());
 }
 
+/// The single definition of "most recently active strand" behind --last and
+/// the default target. "Active" excludes closed strands: a closed strand is
+/// never what --last/default should land on — writing a closed line takes an
+/// explicit --id (and still trips W071). Hidden filtering is the caller's
+/// call, via the strand set it passes in.
 pub(crate) fn resolve_most_recent_strand(
     strands: &[projection::ProjectedStrand],
 ) -> Option<&projection::ProjectedStrand> {
-    let mut sorted: Vec<_> = strands.iter().collect();
+    let mut sorted: Vec<_> = strands
+        .iter()
+        .filter(|s| !s.state().starts_with("closed"))
+        .collect();
     sorted.sort_by(|a, b| b.last_ts().cmp(a.last_ts()));
     sorted.into_iter().next()
 }
@@ -853,7 +858,7 @@ pub(crate) fn plan_checkpoint(
         let strand = resolve_most_recent_strand(&visible_strands).ok_or_else(|| {
             checkpoint_failure(
                 1,
-                "strand resolve/show failed: no strands found".to_string(),
+                "strand resolve/show failed: no active strand — pass --id".to_string(),
                 None,
                 None,
                 false,

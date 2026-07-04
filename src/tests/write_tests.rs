@@ -52,6 +52,33 @@ fn positional_append_most_recent() {
 }
 
 #[test]
+fn append_default_skips_closed_strand() {
+    // The most-recently-touched strand is closed; --last/default must fall
+    // through to the newest OPEN strand, not land on the closed one.
+    let _env = setup();
+    let open_id = create_strand("still open");
+    let closed_id = create_strand("about to close"); // newest by ts
+    let closed = cmd_close(&closed_id, Some("done"), None, false);
+    assert!(closed.is_ok(), "close failed: {:?}", closed);
+
+    let result = cmd_append(Some("lands on open"), None, false, false, None, None, None, None);
+    assert!(result.is_ok());
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let on_open = events.iter().any(|(_, e)| {
+        matches!(e, Event::LogAppended { id, content, .. }
+            if id == &open_id && content == "lands on open")
+    });
+    let on_closed = events.iter().any(|(_, e)| {
+        matches!(e, Event::LogAppended { id, content, .. }
+            if id == &closed_id && content == "lands on open")
+    });
+    assert!(on_open, "append should land on the newest open strand");
+    assert!(!on_closed, "append must not land on the closed strand");
+}
+
+#[test]
 fn legacy_positional_id_is_rejected() {
     let _env = setup();
     let id1 = create_strand("first strand");
