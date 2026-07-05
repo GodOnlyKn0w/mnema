@@ -1,5 +1,5 @@
 /// Manage/metadata command family: cmd_find, cmd_link, cmd_hide/cmd_unhide,
-/// cmd_bind/cmd_current, cmd_export.
+/// cmd_export.
 /// Moved from main.rs (Layer 4d-manage refactor).
 use crate::event::{self, Event, find_strand, resolve_id};
 use crate::journal::*;
@@ -11,7 +11,7 @@ use crate::{
     visibility_ledger_json,
 };
 use serde_json::json;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
 pub(crate) fn cmd_find(id: &str, format_json: bool) -> Result<(), String> {
@@ -266,166 +266,6 @@ pub(crate) fn cmd_unhide(id: &str, format_json: bool) -> Result<(), String> {
             print_handle_line(&card, &state);
         }
         print_visibility_ledger();
-    }
-    Ok(())
-}
-
-/// Parse a binding input from a single JSON object on stdin.
-/// Schema: { "subject_type": "...", "subject_id": "...", "strand_id": "..." }
-pub(crate) fn read_stdin_binding() -> Result<(String, String, String), String> {
-    let mut buf = String::new();
-    std::io::stdin()
-        .read_to_string(&mut buf)
-        .map_err(|e| format!("cannot read stdin: {}", e))?;
-    let trimmed = buf.trim();
-    if trimmed.is_empty() {
-        return Err("stdin is empty".to_string());
-    }
-    let v: serde_json::Value =
-        serde_json::from_str(trimmed).map_err(|e| format!("stdin is not valid JSON: {}", e))?;
-    let obj = v
-        .as_object()
-        .ok_or_else(|| "stdin JSON must be an object".to_string())?;
-    let subject_type = obj
-        .get("subject_type")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| "stdin JSON missing string field 'subject_type'".to_string())?
-        .to_string();
-    let subject_id = obj
-        .get("subject_id")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| "stdin JSON missing string field 'subject_id'".to_string())?
-        .to_string();
-    let strand_id = obj
-        .get("strand_id")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| "stdin JSON missing string field 'strand_id'".to_string())?
-        .to_string();
-    if subject_type.is_empty() || subject_id.is_empty() || strand_id.is_empty() {
-        return Err("stdin JSON has empty subject_type/subject_id/strand_id".to_string());
-    }
-    Ok((subject_type, subject_id, strand_id))
-}
-
-/// Record a subject binding. Append-only. Resolves `--id` against the
-/// existing journal so the caller can use prefix matches; never creates
-/// a strand. Returns the binding's own event id.
-#[cfg(test)]
-pub(crate) fn cmd_bind(
-    subject_type: Option<&str>,
-    subject_id: Option<&str>,
-    explicit_id: Option<&str>,
-    stdin: bool,
-    format_json: bool,
-) -> Result<(), String> {
-    cmd_bind_with_provenance(
-        subject_type,
-        subject_id,
-        explicit_id,
-        stdin,
-        format_json,
-        None,
-    )
-}
-
-pub(crate) fn cmd_bind_with_provenance(
-    subject_type: Option<&str>,
-    subject_id: Option<&str>,
-    explicit_id: Option<&str>,
-    stdin: bool,
-    format_json: bool,
-    provenance_raw: Option<&str>,
-) -> Result<(), String> {
-    let (st, sid, raw_strand) = if stdin {
-        read_stdin_binding()?
-    } else {
-        let st = subject_type
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "--subject-type is required and non-empty".to_string())?;
-        let sid = subject_id
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "--subject-id is required and non-empty".to_string())?;
-        let sid_str = explicit_id
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "--id is required and non-empty".to_string())?;
-        (st.to_string(), sid.to_string(), sid_str.to_string())
-    };
-
-    // Resolve --id to a full strand id. The strand must already exist
-    // in the journal; bind never auto-creates a strand.
-    let path = ensure_journal()?;
-    let (events, _) = read_events_lossy(&path);
-    let full_strand = find_strand(&events, &raw_strand)
-        .ok_or_else(|| format!("strand {} not found", raw_strand))?;
-
-    let provenance = parse_provenance_arg(provenance_raw)?;
-    let event = event::make_subject_bound(&st, &sid, &full_strand, provenance);
-    let binding_id = match &event {
-        Event::SubjectBound { id, .. } => id.clone(),
-        _ => unreachable!(),
-    };
-    with_journal_write_lock(|journal| append_event_unlocked(journal, &event))?;
-
-    if format_json {
-        let output = output::BindOutput {
-            binding_id: binding_id.clone(),
-            subject_type: st.clone(),
-            subject_id: sid.clone(),
-            strand_id: full_strand.clone(),
-            result: strand_card_fresh(&full_strand),
-        };
-        println!("{}", serde_json::to_string(&output).unwrap());
-    } else {
-        println!("{}", binding_id);
-        if let Some((card, state)) = strand_card_fresh_with_state(&full_strand) {
-            print_handle_line(&card, &state);
-        }
-    }
-    Ok(())
-}
-
-/// Project the latest effective binding for `(subject_type, subject_id)`.
-/// Walks the journal once, keeps the most-recent match. No binding ->
-/// exit 1 with stderr message; stdout stays empty so callers can branch
-/// on the absence of a payload.
-pub(crate) fn cmd_current(
-    subject_type: Option<&str>,
-    subject_id: Option<&str>,
-    format_json: bool,
-) -> Result<(), String> {
-    let st = subject_type
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "--subject-type is required and non-empty".to_string())?;
-    let sid = subject_id
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "--subject-id is required and non-empty".to_string())?;
-
-    let path = ensure_journal()?;
-    let (events, _) = read_events_lossy(&path);
-    let binding = match projection::current_binding(&events, st, sid) {
-        Some(binding) => binding,
-        None => {
-            eprintln!("no binding for subject_type={} subject_id={}", st, sid);
-            return Err("no current binding".to_string());
-        }
-    };
-
-    if format_json {
-        let output = output::CurrentOutput {
-            binding_id: binding.binding_id,
-            subject_type: st.to_string(),
-            subject_id: sid.to_string(),
-            strand_id: binding.strand_id.clone(),
-            ts: binding.ts,
-        };
-        println!("{}", serde_json::to_string(&output).unwrap());
-    } else {
-        println!("{}", binding.strand_id);
     }
     Ok(())
 }

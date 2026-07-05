@@ -809,45 +809,6 @@ pub(crate) fn hide_balance(events: &[(usize, Event)], strand_id: &str) -> i32 {
     count
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CurrentBinding {
-    pub(crate) binding_id: String,
-    pub(crate) ts: String,
-    pub(crate) strand_id: String,
-}
-
-pub(crate) fn current_binding(
-    events: &[(usize, Event)],
-    subject_type: &str,
-    subject_id: &str,
-) -> Option<CurrentBinding> {
-    let mut latest: Option<CurrentBinding> = None;
-    for (_offset, event) in events {
-        if let Event::SubjectBound {
-            id,
-            ts,
-            subject_type: event_subject_type,
-            subject_id: event_subject_id,
-            strand_id,
-            ..
-        } = event
-        {
-            if event_subject_type == subject_type && event_subject_id == subject_id {
-                match &latest {
-                    Some(prev) if ts.as_str() <= prev.ts.as_str() => {}
-                    _ => {
-                        latest = Some(CurrentBinding {
-                            binding_id: id.clone(),
-                            ts: ts.clone(),
-                            strand_id: strand_id.clone(),
-                        })
-                    }
-                }
-            }
-        }
-    }
-    latest
-}
 // ── Entry lookup by hash prefix ─────────────────────────────
 
 /// Result of resolving an entry-hash prefix against projected strands.

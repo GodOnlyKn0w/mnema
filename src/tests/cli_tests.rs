@@ -451,17 +451,6 @@ fn grammar_write_commands_accept_id_flag_without_content_position() {
         "checkpoint --id must parse: {:?}",
         checkpoint
     );
-    let bind = Cli::command().try_get_matches_from([
-        "tasktree",
-        "bind",
-        "--subject-type",
-        "pi-session",
-        "--subject-id",
-        "abc",
-        "--id",
-        id,
-    ]);
-    assert!(bind.is_ok(), "bind --id must parse: {:?}", bind);
 }
 
 #[test]
@@ -503,18 +492,6 @@ fn grammar_write_commands_accept_provenance() {
             id,
             "--action",
             "before",
-            "--provenance",
-            provenance,
-        ],
-        vec![
-            "tasktree",
-            "bind",
-            "--subject-type",
-            "pi-session",
-            "--subject-id",
-            "abc",
-            "--id",
-            id,
             "--provenance",
             provenance,
         ],

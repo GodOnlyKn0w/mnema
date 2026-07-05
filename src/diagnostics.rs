@@ -52,7 +52,7 @@ static TOPICS: &[TopicInfo] = &[
 
 语义：
   回显即预付的验证——写后输出卡片，调用方无需再跑 show/orient 确认。
-  所有写命令（append/add/checkpoint/bind/hide/unhide/link/close/reopen）
+  所有写命令（append/add/checkpoint/hide/unhide/link/close/reopen）
   都在写后回显受影响线的卡片。
 
 JSON 形态（OrientStrand，写命令 result 字段 / orient active[]）：
@@ -111,9 +111,6 @@ Marker 语义（一行一条）：
   init     已存在时跳过文件创建；总是打印初始化消息；目录幂等
 
 不可盲目重试（有副作用）：
-  bind     append-only；重复调用写入新的 SubjectBound 事件；
-           后绑定对 current 投影生效（覆盖语义在投影层，
-           不在写入层）；超时后先 current 查账再决定
   append   重复写入新的 LogAppended 事件；
            超时后先 show/orient 查账再决定
   add      每次创建新 strand；不检查内容重复

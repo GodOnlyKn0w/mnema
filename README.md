@@ -176,7 +176,7 @@ flowchart TB
 
 ```
 看   orient  show  list  timeline  search  find  tree  depends
-做   add  append  close  reopen  checkpoint  link  unlink  bind
+做   add  append  close  reopen  checkpoint  link  unlink
 管   init  hide  unhide  doctor  export  explain  cutover-v2
 ```
 

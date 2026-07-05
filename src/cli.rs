@@ -37,7 +37,6 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   find          Resolve a strand id
   tree          Strand forest (belongs-to nesting)
   depends       depends-on analysis: blockers / readiness / critical path
-  current       Latest effective subject binding
   agent-context Machine-readable active-strand context
   context       Project a typed context slice
 
@@ -49,7 +48,6 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   checkpoint    Record context before an irreversible action
   link          Link strands (belongs-to / depends-on)
   unlink        Remove a link (unlink effect entry; projection drops the edge)
-  bind          Record a subject binding
 
 管 / manage:
   init          Initialize .tasktree/ journal
@@ -523,59 +521,6 @@ Examples:
     Reopen {
         #[command(flatten)]
         target: IdTarget,
-        /// Output format: text (default) or json
-        #[arg(long, value_name = "FORMAT")]
-        format: Option<String>,
-    },
-
-    /// Record a subject binding. Append-only. Newer bindings supersede
-    /// older ones for the same (subject-type, subject-id) pair.
-    #[command(after_help = "\
-Examples:
-  tasktree bind --subject-type pi-session --subject-id abc123 --id 0000019dd34b
-  tasktree bind --subject-type ci-run --subject-id run-42 --id 0000019dd34b --format json
-  echo '{\"subject_type\":\"pi-session\",\"subject_id\":\"abc\",\"strand_id\":\"0000019dd34b\"}' | tasktree bind --stdin
-
-Rules:
-  --subject-type and --subject-id are required, non-empty strings.
-  --id is required and must be a strand id (prefix match).
-  --stdin reads the same fields as a JSON object from standard input.")]
-    Bind {
-        /// Subject type discriminator (generic string, e.g. pi-session, ci-run).
-        #[arg(long = "subject-type", value_name = "TYPE")]
-        subject_type: Option<String>,
-        /// Subject id within the chosen type.
-        #[arg(long = "subject-id", value_name = "ID")]
-        subject_id: Option<String>,
-        /// Target strand id (prefix match). Must already exist in the journal.
-        #[arg(long = "id", value_name = "STRAND_ID")]
-        id: Option<String>,
-        /// Read binding from a single JSON object on stdin.
-        /// Schema: { "subject_type": "...", "subject_id": "...", "strand_id": "..." }
-        #[arg(long)]
-        stdin: bool,
-        /// Optional provenance JSON object. Stored on the SubjectBound event.
-        #[arg(long = "provenance", value_name = "JSON")]
-        provenance: Option<String>,
-        /// Output format: text (default) or json
-        #[arg(long, value_name = "FORMAT")]
-        format: Option<String>,
-    },
-    /// Project the latest effective subject binding.
-    #[command(after_help = "\
-Examples:
-  tasktree current --subject-type pi-session --subject-id abc123
-  tasktree current --subject-type pi-session --subject-id abc123 --format json
-
-Rules:
-  --subject-type and --subject-id are required, non-empty strings.
-  Returns the strand_id of the latest SubjectBound event for the pair.
-  No binding -> exit 1 with stderr message, no stdout payload.")]
-    Current {
-        #[arg(long = "subject-type", value_name = "TYPE")]
-        subject_type: Option<String>,
-        #[arg(long = "subject-id", value_name = "ID")]
-        subject_id: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -1215,33 +1160,6 @@ fn run(command: &Commands) -> Result<(), String> {
             *include_hidden,
             *include_observations,
         ),
-
-        Commands::Bind {
-            subject_type,
-            subject_id,
-            id,
-            stdin,
-            format,
-            provenance,
-        } => {
-            let fmt = format.as_deref() == Some("json");
-            cmd_bind_with_provenance(
-                subject_type.as_deref(),
-                subject_id.as_deref(),
-                id.as_deref(),
-                *stdin,
-                fmt,
-                provenance.as_deref(),
-            )
-        }
-        Commands::Current {
-            subject_type,
-            subject_id,
-            format,
-        } => {
-            let fmt = format.as_deref() == Some("json");
-            cmd_current(subject_type.as_deref(), subject_id.as_deref(), fmt)
-        }
 
         Commands::Checkpoint { .. } => unreachable!(),
     }

@@ -511,25 +511,6 @@ pub(crate) struct VisibilityLedgerOutput {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct BindOutput {
-    pub(crate) binding_id: String,
-    pub(crate) subject_type: String,
-    pub(crate) subject_id: String,
-    pub(crate) strand_id: String,
-    pub(crate) result: Option<OrientStrand>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct CurrentOutput {
-    pub(crate) binding_id: String,
-    pub(crate) subject_type: String,
-    pub(crate) subject_id: String,
-    pub(crate) strand_id: String,
-    pub(crate) ts: String,
-}
-// ── context --format json ──────────────────────────────────
-
-#[derive(Debug, Serialize)]
 pub(crate) struct CutoverV2ReportOutput {
     pub(crate) applied: bool,
     pub(crate) source_journal: String,

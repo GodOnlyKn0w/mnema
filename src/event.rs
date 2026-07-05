@@ -789,26 +789,6 @@ pub fn make_strand_unhidden(
     )
 }
 
-/// Build a `SubjectBound` event. The `id` is the binding's own event id;
-/// `strand_id` is the target strand the subject is bound to. `bind` is
-/// append-only — newer bindings supersede older ones for the same
-/// `(subject_type, subject_id)` pair; there is no unbind event in v1.
-pub fn make_subject_bound(
-    subject_type: &str,
-    subject_id: &str,
-    strand_id: &str,
-    provenance: Option<serde_json::Value>,
-) -> Event {
-    Event::SubjectBound {
-        id: generate_id(),
-        ts: now(),
-        subject_type: subject_type.to_string(),
-        subject_id: subject_id.to_string(),
-        strand_id: strand_id.to_string(),
-        provenance,
-    }
-}
-
 /// Resolve a strand-id prefix to the first matching full strand id, scanning
 /// `StrandCreated` events in order. Lives here (not util.rs) because it is the
 /// one resolver that depends on the `Event` type. Moved from main.rs in the
