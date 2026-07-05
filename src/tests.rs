@@ -1,5 +1,4 @@
 use crate::cli::{Cli, exit_code_for};
-use crate::commands::context::*;
 use crate::commands::manage::*;
 use crate::commands::query::*;
 use crate::commands::write::*;
@@ -14,7 +13,6 @@ use crate::markers::{
 use crate::output;
 use crate::output::ORIENT_REMIND;
 use crate::projection;
-use crate::projection::{build_context_strands, pair_frictions};
 use crate::tree;
 use crate::util::*;
 use std::fs;
@@ -32,7 +30,6 @@ mod support;
 use support::*;
 
 mod cli_tests;
-mod context_tests;
 mod diagnostics_tests;
 mod journal_tests;
 mod manage_tests;

@@ -1,4 +1,3 @@
-use crate::commands::context::*;
 use crate::commands::doctor::*;
 use crate::commands::explain::cmd_explain;
 use crate::commands::manage::*;
@@ -37,8 +36,6 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   find          Resolve a strand id
   tree          Strand forest (belongs-to nesting)
   depends       depends-on analysis: blockers / readiness / critical path
-  agent-context Machine-readable active-strand context
-  context       Project a typed context slice
 
 做 / change:
   add           Create a new strand
@@ -671,15 +668,6 @@ JSON shape: tasktree explain json")]
         #[arg(long)]
         tree: bool,
     },
-    /// Render one-shot startup context for agents.
-    AgentContext {
-        /// Output format: text (default) or json
-        #[arg(long, value_name = "FORMAT")]
-        format: Option<String>,
-        /// Include hidden strands in the result set (default: exclude)
-        #[arg(long)]
-        include_hidden: bool,
-    },
     /// Build nested tree projection from strand edges
     Tree {
         #[command(flatten)]
@@ -710,35 +698,6 @@ Examples:
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
-    },
-    /// Render strand context for system prompt injection.
-    /// Projects prompt-strands into text or JSON suitable for APPEND_SYSTEM.md.
-    Context {
-        /// Strand type to project (default: prompt-strand)
-        #[arg(long = "type", value_name = "TYPE")]
-        context_type: Option<String>,
-        /// Filter by [covers] scope (string match on [covers] entries, v1)
-        #[arg(long, value_name = "PATH")]
-        covers: Vec<String>,
-        /// Only include strands with last_entry_offset > N
-        #[arg(long, value_name = "N")]
-        since_offset: Option<usize>,
-        /// Output format: text (default) or json
-        #[arg(long, value_name = "FORMAT")]
-        format: Option<String>,
-        /// Exclude [friction] entries. Default exposes them: an unresolved
-        /// friction still binds future action (exposure axis, scaffolding
-        /// ADR-0002). Hiding is an explicit choice, exposure is the default.
-        #[arg(long)]
-        exclude_friction: bool,
-        /// Include hidden strands in the result set (default: exclude)
-        #[arg(long)]
-        include_hidden: bool,
-        /// Disable observation-class folding: expose [progress]/[observed]/[check]
-        /// entries full-text instead of tail-folding. Folding is the default;
-        /// full exposure is an explicit choice (exposure axis, ADR-0002).
-        #[arg(long)]
-        include_observations: bool,
     },
 }
 
@@ -1137,29 +1096,6 @@ fn run(command: &Commands) -> Result<(), String> {
             limit,
             tree,
         } => cmd_orient(format.as_deref(), *include_hidden, *limit, *tree),
-
-        Commands::AgentContext {
-            format,
-            include_hidden,
-        } => cmd_agent_context(format.as_deref(), *include_hidden),
-
-        Commands::Context {
-            context_type,
-            covers,
-            since_offset,
-            format,
-            exclude_friction,
-            include_hidden,
-            include_observations,
-        } => cmd_context(
-            context_type.as_deref(),
-            &covers,
-            *since_offset,
-            format.as_deref(),
-            *exclude_friction,
-            *include_hidden,
-            *include_observations,
-        ),
 
         Commands::Checkpoint { .. } => unreachable!(),
     }

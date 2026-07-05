@@ -1,4 +1,3 @@
-pub(crate) mod context;
 pub(crate) mod doctor;
 pub(crate) mod explain;
 pub(crate) mod manage;

@@ -1,7 +1,7 @@
 use crate::event::{Event, find_strand};
 use crate::graph;
 /// Query-command family: cmd_list, cmd_show, cmd_search, cmd_timeline,
-/// cmd_orient, cmd_agent_context, cmd_tree (+ print_tree_text helper).
+/// cmd_orient, cmd_tree (+ print_tree_text helper).
 /// Moved from main.rs (Layer 4b refactor); function bodies are byte-identical to
 /// the originals (only cross-module path qualification added where required).
 ///
@@ -559,57 +559,6 @@ pub(crate) fn cmd_orient(
         return Err(corrupted_lines_error(skipped));
     }
     eprintln!("[tasktree] orient: {:.0?}", started.elapsed());
-    Ok(())
-}
-
-pub(crate) fn cmd_agent_context(
-    format_json: Option<&str>,
-    include_hidden: bool,
-) -> Result<(), String> {
-    let path = ensure_journal()?;
-    let (events, _skipped) = read_events_lossy(&path);
-    let strands = projection::project_strands(&events, include_hidden);
-
-    let mut prompt_strands: Vec<_> = strands
-        .iter()
-        .filter(|s| s.strand_type.as_deref() == Some("prompt-strand"))
-        .collect();
-    prompt_strands.sort_by(|a, b| b.last_offset().cmp(&a.last_offset()));
-
-    let last_session_offset = strands
-        .iter()
-        .filter(|s| s.strand_type.as_deref() == Some("session"))
-        .map(|s| s.last_offset())
-        .max()
-        .unwrap_or(0);
-
-    let timeline_since_last_session: Vec<_> = projection::project_timeline(&events)
-        .into_iter()
-        .filter(|e| e.journal_offset > last_session_offset)
-        .collect();
-
-    if format_json == Some("json") {
-        let output = output::AgentContextOutput {
-            prompt_strands: prompt_strands
-                .iter()
-                .map(|s| output::AgentContextPromptStrandOutput::from(*s))
-                .collect(),
-            last_session_offset,
-            timeline_since_last_session: timeline_since_last_session
-                .iter()
-                .map(output::TimelineEntryOutput::from)
-                .collect(),
-        };
-        println!("{}", serde_json::to_string(&output).expect("serialize"));
-    } else {
-        println!("prompt_strands: {}", prompt_strands.len());
-        println!("last_session_offset: {}", last_session_offset);
-        println!(
-            "timeline_since_last_session: {}",
-            timeline_since_last_session.len()
-        );
-        println!("\nUse JSON for machine startup context:\n  tasktree agent-context --format json");
-    }
     Ok(())
 }
 

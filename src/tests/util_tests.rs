@@ -49,32 +49,6 @@ fn single_unhide_restores_visibility() {
     assert_eq!(count_hide_events(&events, &id, "unhidden"), 1);
 }
 
-// Repeated `cmd_unhide` on an already-visible strand is a no-op.
-
-#[test]
-fn cmd_agent_context_default_excludes_hidden_via_cmd_path() {
-    let _env = setup();
-    let (c, a) = event::make_strand_created("[covers] audit2/", Some("prompt-strand"));
-    let id = c.strand_id().expect("strand-scoped event").to_string();
-    with_journal_write_lock(|j| {
-        append_event_unlocked(j, &c)?;
-        append_event_unlocked(j, &a)
-    })
-    .unwrap();
-    cmd_hide(&id, Some("noise"), false, None).unwrap();
-    let result = cmd_agent_context(None, false);
-    assert!(result.is_ok());
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    let visible = projection::project_strands(&events, false);
-    assert!(
-        !visible.iter().any(|s| s.id == id),
-        "cmd_agent_context default must use include_hidden=false in projection"
-    );
-}
-
-// ── Subject binding tests (pi-strand V1 contract) ─────────────────
-
 #[test]
 fn display_ts_pairs_relative_with_absolute() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-07-04T12:00:00Z")

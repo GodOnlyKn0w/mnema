@@ -707,11 +707,6 @@ fn checkpoint_explicit_id_finds_hidden_strand() {
     assert!(result.is_ok(), "explicit --id must resolve a hidden strand");
 }
 
-// cmd_context default (include_hidden=false) MUST NOT surface hidden
-// prompt-strands via the cmd_context call path. Regression for the
-// 'flag plumbed but projection ignores it' bug caught during
-// hygiene review of 66f668e.
-
 #[test]
 fn append_new_stores_provenance_on_initial_entry() {
     let _env = setup();

@@ -257,40 +257,6 @@ pub struct OrientTreeOutput {
 // ── query JSON DTOs ────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
-pub(crate) struct AgentContextPromptStrandOutput {
-    pub(crate) id: String,
-    pub(crate) entry_count: usize,
-    pub(crate) first_summary: String,
-    pub(crate) last_summary: String,
-    pub(crate) last_entry_offset: usize,
-    pub(crate) last_entry_ts: String,
-    pub(crate) status: String,
-    pub(crate) hidden: bool,
-}
-
-impl From<&ProjectedStrand> for AgentContextPromptStrandOutput {
-    fn from(strand: &ProjectedStrand) -> Self {
-        AgentContextPromptStrandOutput {
-            id: strand.id.clone(),
-            entry_count: strand.log_count(),
-            first_summary: strand.first_summary().to_string(),
-            last_summary: strand.last_summary().to_string(),
-            last_entry_offset: strand.last_offset(),
-            last_entry_ts: strand.last_ts().to_string(),
-            status: strand.state().to_string(),
-            hidden: strand.hidden,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct AgentContextOutput {
-    pub(crate) prompt_strands: Vec<AgentContextPromptStrandOutput>,
-    pub(crate) last_session_offset: usize,
-    pub(crate) timeline_since_last_session: Vec<TimelineEntryOutput>,
-}
-
-#[derive(Debug, Serialize)]
 pub(crate) struct TreeOutput {
     pub(crate) root: TreeNodeOutput,
 }
@@ -523,81 +489,7 @@ pub(crate) struct CutoverV2ReportOutput {
     pub(crate) anchor_count: usize,
     pub(crate) unresolved_ref_count: usize,
 }
-#[derive(Debug, Serialize)]
-pub(crate) struct ContextOutput {
-    pub(crate) strands: Vec<ContextStrandOutput>,
-}
 
-impl From<&crate::projection::ContextView> for ContextOutput {
-    fn from(view: &crate::projection::ContextView) -> Self {
-        ContextOutput {
-            strands: view.strands.iter().map(ContextStrandOutput::from).collect(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct FoldedCountsOutput {
-    pub(crate) progress: usize,
-    pub(crate) observed: usize,
-    pub(crate) check: usize,
-}
-
-impl From<&crate::projection::FoldedCounts> for FoldedCountsOutput {
-    fn from(counts: &crate::projection::FoldedCounts) -> Self {
-        FoldedCountsOutput {
-            progress: counts.progress,
-            observed: counts.observed,
-            check: counts.check,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct ContextStrandOutput {
-    pub(crate) id: String,
-    pub(crate) covers: Vec<String>,
-    pub(crate) entries: Vec<ContextEntryOutput>,
-    pub(crate) friction_folded: usize,
-    pub(crate) friction_paired: usize,
-    pub(crate) folded_counts: FoldedCountsOutput,
-}
-
-impl From<&crate::projection::ContextStrand> for ContextStrandOutput {
-    fn from(strand: &crate::projection::ContextStrand) -> Self {
-        ContextStrandOutput {
-            id: strand.id.clone(),
-            covers: strand.covers.clone(),
-            entries: strand
-                .entries
-                .iter()
-                .map(ContextEntryOutput::from)
-                .collect(),
-            friction_folded: strand.friction_folded,
-            friction_paired: strand.friction_paired,
-            folded_counts: FoldedCountsOutput::from(&strand.folded_counts),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct ContextEntryOutput {
-    pub(crate) marker: String,
-    pub(crate) content: String,
-    pub(crate) offset: usize,
-    pub(crate) ts: String,
-}
-
-impl From<&crate::projection::ContextEntry> for ContextEntryOutput {
-    fn from(entry: &crate::projection::ContextEntry) -> Self {
-        ContextEntryOutput {
-            marker: entry.marker.clone(),
-            content: entry.content.clone(),
-            offset: entry.offset,
-            ts: entry.ts.clone(),
-        }
-    }
-}
 // ── list --format json ─────────────────────────────────────
 
 /// External contract for `list --format json`. One element in the `strands` array.

@@ -792,8 +792,6 @@ fn search_include_hidden_projection_reports_hidden() {
     assert!(cmd_search("needle", false, true).is_ok());
 }
 
-// cmd_agent_context default does not surface hidden prompt-strands.
-
 #[test]
 fn show_tail_works_with_explicit_id() {
     let _env = setup();

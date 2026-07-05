@@ -85,8 +85,8 @@ fn humanize_duration_days() {
 // ── W070: strand moved under you ───────────────────────────────────────
 
 #[test]
-fn show_search_context_unchanged() {
-    // Smoke test that existing cmd_show, cmd_search, cmd_context still work.
+fn show_search_unchanged() {
+    // Smoke test that existing cmd_show, cmd_search still work.
     let _env = setup();
     let id = create_strand("show me");
     cmd_append(
@@ -105,9 +105,6 @@ fn show_search_context_unchanged() {
     assert!(r.is_ok());
     // search
     let r = cmd_search("entry", false, false);
-    assert!(r.is_ok());
-    // context
-    let r = cmd_context(None, &[], None, None, false, false, false);
     assert!(r.is_ok());
 }
 
