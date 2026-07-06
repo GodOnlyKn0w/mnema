@@ -19,7 +19,7 @@ pub(crate) fn cmd_doctor_journal() -> Result<bool, String> {
     let (git_head_count, git_context_event_count) = count_git_context_events(&events);
 
     // CORPUS §9: doctor keeps no cross-run state (no doctor-state.json).
-    let report = diagnostics::build_doctor_journal_report(
+    let mut report = diagnostics::build_doctor_journal_report(
         &events,
         total_lines,
         corrupted,
@@ -27,6 +27,7 @@ pub(crate) fn cmd_doctor_journal() -> Result<bool, String> {
         git_context_event_count,
         chrono::Utc::now(),
     );
+    report.cutover_certificate = check_cutover_certificate(&journal_dir, &path, &raw);
 
     render_doctor_report(&path, &report);
 
@@ -74,6 +75,170 @@ fn count_git_context_events(events: &[Event]) -> (usize, usize) {
     (with_head, capable)
 }
 
+fn check_cutover_certificate(
+    journal_dir: &std::path::Path,
+    journal_path: &std::path::Path,
+    journal_raw: &str,
+) -> diagnostics::CutoverCertificateReport {
+    let map_path = journal_dir.join("migration-v1-to-v2.json");
+    let archive_path = journal_dir.join("journal.v1.jsonl");
+    let certificate_path = cutover_certificate_path_for_map(&map_path);
+    let mut report = diagnostics::CutoverCertificateReport {
+        checked: false,
+        path: Some(certificate_path.display().to_string()),
+        errors: Vec::new(),
+        warnings: Vec::new(),
+    };
+
+    if !certificate_path.exists() {
+        if archive_path.exists() || map_path.exists() {
+            report.warnings.push(format!(
+                "cutover certificate missing: {}",
+                certificate_path.display()
+            ));
+        }
+        return report;
+    }
+
+    report.checked = true;
+    let cert_bytes = match std::fs::read(&certificate_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            report.errors.push(format!(
+                "cannot read cutover certificate {}: {}",
+                certificate_path.display(),
+                e
+            ));
+            return report;
+        }
+    };
+    let certificate: CutoverV2Certificate = match serde_json::from_slice(&cert_bytes) {
+        Ok(certificate) => certificate,
+        Err(e) => {
+            report
+                .errors
+                .push(format!("cannot parse cutover certificate: {}", e));
+            return report;
+        }
+    };
+
+    if certificate.schema != "tasktree-v2-cutover-certificate-v1" {
+        report.errors.push(format!(
+            "cutover certificate schema {} is not supported",
+            certificate.schema
+        ));
+    }
+
+    match std::fs::read(&archive_path) {
+        Ok(bytes) => {
+            let actual = sha256_bytes(&bytes);
+            if actual != certificate.source_journal_sha256 {
+                report.errors.push(format!(
+                    "source journal hash mismatch: expected {}, got {}",
+                    certificate.source_journal_sha256, actual
+                ));
+            }
+        }
+        Err(e) => report.errors.push(format!(
+            "cannot read archived v1 journal {}: {}",
+            archive_path.display(),
+            e
+        )),
+    }
+
+    let map_bytes = match std::fs::read(&map_path) {
+        Ok(bytes) => {
+            let actual = sha256_bytes(&bytes);
+            if actual != certificate.map_sha256 {
+                report.errors.push(format!(
+                    "migration map hash mismatch: expected {}, got {}",
+                    certificate.map_sha256, actual
+                ));
+            }
+            Some(bytes)
+        }
+        Err(e) => {
+            report.errors.push(format!(
+                "cannot read migration map {}: {}",
+                map_path.display(),
+                e
+            ));
+            None
+        }
+    };
+
+    if let Some(prefix) =
+        first_jsonl_lines_bytes(journal_raw.as_bytes(), certificate.imported_event_count)
+    {
+        let actual = sha256_bytes(&prefix);
+        if actual != certificate.target_journal_initial_sha256 {
+            report.errors.push(format!(
+                "initial v2 journal prefix hash mismatch: expected {}, got {}",
+                certificate.target_journal_initial_sha256, actual
+            ));
+        }
+    } else {
+        report.errors.push(format!(
+            "current journal {} has fewer than {} lines recorded by cutover certificate",
+            journal_path.display(),
+            certificate.imported_event_count
+        ));
+    }
+
+    if let Some(bytes) = map_bytes {
+        match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(map) => {
+                let source_count = map.get("source_event_count").and_then(|v| v.as_u64());
+                if source_count != Some(certificate.source_event_count as u64) {
+                    report.errors.push(format!(
+                        "migration map source_event_count {:?} does not match certificate {}",
+                        source_count, certificate.source_event_count
+                    ));
+                }
+                let imported_count = map.get("imported_event_count").and_then(|v| v.as_u64());
+                if imported_count != Some(certificate.imported_event_count as u64) {
+                    report.errors.push(format!(
+                        "migration map imported_event_count {:?} does not match certificate {}",
+                        imported_count, certificate.imported_event_count
+                    ));
+                }
+                let source_digest = map.get("source_digest").and_then(|v| v.as_str());
+                if source_digest != Some(certificate.source_event_digest.as_str()) {
+                    report.errors.push(format!(
+                        "migration map source_digest {:?} does not match certificate {}",
+                        source_digest, certificate.source_event_digest
+                    ));
+                }
+            }
+            Err(e) => report
+                .errors
+                .push(format!("cannot parse migration map JSON: {}", e)),
+        }
+    }
+
+    report
+}
+
+fn first_jsonl_lines_bytes(bytes: &[u8], line_count: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut seen = 0usize;
+    for (idx, b) in bytes.iter().enumerate() {
+        if *b == b'\n' {
+            out.extend_from_slice(&bytes[start..=idx]);
+            start = idx + 1;
+            seen += 1;
+            if seen == line_count {
+                return Some(out);
+            }
+        }
+    }
+    if start < bytes.len() && seen + 1 == line_count {
+        out.extend_from_slice(&bytes[start..]);
+        return Some(out);
+    }
+    if line_count == 0 { Some(out) } else { None }
+}
 fn render_doctor_report(path: &std::path::Path, report: &diagnostics::DoctorJournalReport) {
     println!("Doctor Journal Report");
     println!("  journal: {}", path.display());
@@ -119,6 +284,25 @@ fn render_doctor_report(path: &std::path::Path, report: &diagnostics::DoctorJour
     }
     for finding in &report.integrity.anchor_errors {
         eprintln!("[integrity] {}", finding);
+    }
+    let cutover_status = if report.cutover_certificate.checked {
+        "checked"
+    } else if !report.cutover_certificate.warnings.is_empty() {
+        "missing"
+    } else {
+        "not present"
+    };
+    println!("    cutover certificate: {}", cutover_status);
+    if let Some(path) = &report.cutover_certificate.path {
+        if report.cutover_certificate.checked || !report.cutover_certificate.warnings.is_empty() {
+            println!("      path: {}", path);
+        }
+    }
+    for finding in &report.cutover_certificate.errors {
+        eprintln!("[integrity] cutover-certificate: {}", finding);
+    }
+    for finding in &report.cutover_certificate.warnings {
+        eprintln!("[integrity-warning] {}", finding);
     }
     if !report.orphans.is_empty() {
         println!();

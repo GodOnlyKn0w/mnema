@@ -40,6 +40,20 @@ impl IntegrityReport {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CutoverCertificateReport {
+    pub checked: bool,
+    pub path: Option<String>,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+impl CutoverCertificateReport {
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+}
+
 pub fn audit_journal(
     events: &[crate::event::Event],
     now: chrono::DateTime<chrono::Utc>,
@@ -418,6 +432,7 @@ pub struct DoctorJournalReport {
     pub git_head_count: usize,
     pub git_context_event_count: usize,
     pub integrity: IntegrityReport,
+    pub cutover_certificate: CutoverCertificateReport,
     pub audit: JournalAudit,
 }
 
@@ -425,7 +440,10 @@ impl DoctorJournalReport {
     /// Integrity/parse failures — the only class doctor is allowed to fail on
     /// (CORPUS §9). Advisories never block; doctor keeps no cross-run state.
     pub fn has_errors(&self) -> bool {
-        self.corrupted > 0 || !self.orphans.is_empty() || self.integrity.has_errors()
+        self.corrupted > 0
+            || !self.orphans.is_empty()
+            || self.integrity.has_errors()
+            || self.cutover_certificate.has_errors()
     }
 }
 
@@ -481,6 +499,7 @@ pub fn build_doctor_journal_report(
         git_head_count,
         git_context_event_count,
         integrity,
+        cutover_certificate: CutoverCertificateReport::default(),
         audit: audit_journal(events, now),
     }
 }

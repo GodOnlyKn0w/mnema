@@ -143,10 +143,7 @@ pub(crate) fn cmd_unlink(
     let link_entry_id = projection::project_strands(&events, true)
         .iter()
         .find(|s| s.id == src_id)
-        .and_then(|s| {
-            projection::live_link_entry_ids(s, &tgt_id, etype)
-                .pop()
-        });
+        .and_then(|s| projection::live_link_entry_ids(s, &tgt_id, etype).pop());
     let (content, effect) = event::unlink_entry_parts(&tgt_id, etype, link_entry_id);
     append_entry_to_strand(JournalEntryAppendRequest {
         strand_id: src_id.clone(),
@@ -325,6 +322,7 @@ pub(crate) fn cmd_cutover_v2(
     let map_path = map
         .map(PathBuf::from)
         .unwrap_or_else(|| journal_dir.join("migration-v1-to-v2.json"));
+    let certificate_path = cutover_certificate_path_for_map(&map_path);
 
     let read = read_journal_lossy(&journal_path);
     if let Some(error) = read.read_error {
@@ -344,6 +342,7 @@ pub(crate) fn cmd_cutover_v2(
         source_journal: journal_path.display().to_string(),
         archive_journal: archive_path.display().to_string(),
         map_path: map_path.display().to_string(),
+        certificate_path: certificate_path.display().to_string(),
         source_event_count,
         imported_event_count: plan.events.len(),
         strand_count: plan.map.strands.len(),
@@ -370,6 +369,7 @@ pub(crate) fn cmd_cutover_v2(
         println!("  source: {}", report.source_journal);
         println!("  archive: {}", report.archive_journal);
         println!("  map: {}", report.map_path);
+        println!("  certificate: {}", report.certificate_path);
         println!(
             "  events: {} -> {}",
             report.source_event_count, report.imported_event_count

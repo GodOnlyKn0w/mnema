@@ -686,6 +686,44 @@ fn v2_hide_and_unhide_write_effect_entries_and_fold_projection() {
     assert!(!visible.hidden);
 }
 
+#[test]
+fn cutover_v2_certificate_detects_tampered_v1_archive() {
+    let env = setup();
+    let old_id = "0000019dd34b000000000000";
+    let events = vec![
+        Event::StrandCreated {
+            id: old_id.to_string(),
+            ts: "2026-01-01T00:00:00Z".to_string(),
+            strand_type: Some("task".to_string()),
+        },
+        Event::LogAppended {
+            id: old_id.to_string(),
+            ts: "2026-01-01T00:00:01Z".to_string(),
+            content: "legacy root".to_string(),
+            effect: None,
+            prev_entry_id: None,
+            entry_id: None,
+            refs: Vec::new(),
+            ref_: None,
+            append_id: None,
+            git: None,
+            provenance: None,
+        },
+    ];
+    write_legacy_journal(&events);
+
+    cmd_cutover_v2(true, None, None, false).unwrap();
+
+    let tasktree_dir = env.path().join(".tasktree");
+    let archive = tasktree_dir.join("journal.v1.jsonl");
+    fs::write(&archive, "tampered\n").unwrap();
+
+    let doctor_failed = crate::commands::doctor::cmd_doctor_journal().unwrap();
+    assert!(
+        doctor_failed,
+        "tampered v1 archive must fail cutover certificate verification"
+    );
+}
 fn write_legacy_journal(events: &[Event]) {
     let path = ensure_journal().unwrap();
     let mut lines = Vec::new();
@@ -803,6 +841,12 @@ fn cutover_v2_apply_archives_v1_and_imports_pure_v2_journal() {
     let tasktree_dir = env.path().join(".tasktree");
     assert!(tasktree_dir.join("journal.v1.jsonl").exists());
     assert!(tasktree_dir.join("migration-v1-to-v2.json").exists());
+    let certificate_path = tasktree_dir.join("migration-v1-to-v2.certificate.json");
+    assert!(certificate_path.exists());
+    let certificate: CutoverV2Certificate =
+        serde_json::from_str(&fs::read_to_string(&certificate_path).unwrap()).unwrap();
+    assert_eq!(certificate.schema, "tasktree-v2-cutover-certificate-v1");
+    assert_eq!(certificate.source_event_count, events.len());
 
     let read = read_journal_lossy(&ensure_journal().unwrap());
     assert!(read.diagnostics.is_empty());

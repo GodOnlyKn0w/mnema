@@ -482,6 +482,7 @@ pub(crate) struct CutoverV2ReportOutput {
     pub(crate) source_journal: String,
     pub(crate) archive_journal: String,
     pub(crate) map_path: String,
+    pub(crate) certificate_path: String,
     pub(crate) source_event_count: usize,
     pub(crate) imported_event_count: usize,
     pub(crate) strand_count: usize,
@@ -523,7 +524,9 @@ pub struct StrandListOutput {
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EntryEffectOutput {
-    Close { disposition: String },
+    Close {
+        disposition: String,
+    },
     Reopen,
     Link {
         target: String,
@@ -770,10 +773,7 @@ pub enum TimelineEventKindOutput {
     #[serde(rename = "strand_unhidden")]
     StrandUnhidden,
     #[serde(rename = "checkpoint")]
-    CheckpointCreated {
-        observed: String,
-        action: String,
-    },
+    CheckpointCreated { observed: String, action: String },
     #[serde(rename = "subject_bound")]
     SubjectBound {
         subject_type: String,

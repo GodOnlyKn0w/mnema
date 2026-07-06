@@ -444,6 +444,34 @@ pub(crate) struct CutoverV2EntryMap {
     pub(crate) new_entry_id: String,
 }
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct CutoverV2Certificate {
+    pub(crate) schema: String,
+    pub(crate) created_at: String,
+    pub(crate) tool_version: String,
+    pub(crate) tool_commit: String,
+    pub(crate) source_journal: String,
+    pub(crate) archive_journal: String,
+    pub(crate) target_journal: String,
+    pub(crate) map_path: String,
+    pub(crate) source_event_count: usize,
+    pub(crate) source_event_digest: String,
+    pub(crate) imported_event_count: usize,
+    pub(crate) source_journal_sha256: String,
+    pub(crate) target_journal_initial_sha256: String,
+    pub(crate) map_sha256: String,
+}
+
+pub(crate) fn cutover_certificate_path_for_map(map_path: &std::path::Path) -> PathBuf {
+    map_path.with_extension("certificate.json")
+}
+
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
 pub(crate) struct CutoverV2Plan {
     pub(crate) events: Vec<Event>,
     pub(crate) map: CutoverV2Map,
@@ -989,8 +1017,11 @@ pub(crate) fn apply_cutover_v2(
 
     let tmp_path = journal_path.with_extension("jsonl.v2tmp");
     let tmp_map_path = map_path.with_extension("json.tmp");
+    let certificate_path = cutover_certificate_path_for_map(map_path);
+    let tmp_certificate_path = certificate_path.with_extension("json.tmp");
     let mut archived_v1 = false;
     let mut installed_v2 = false;
+    let mut installed_certificate = false;
     let result = (|| {
         if archive_path.exists() {
             return Err(format!(
@@ -1004,6 +1035,12 @@ pub(crate) fn apply_cutover_v2(
                 map_path.display()
             ));
         }
+        if certificate_path.exists() {
+            return Err(format!(
+                "cutover certificate already exists: {}",
+                certificate_path.display()
+            ));
+        }
 
         let current = read_journal_lossy(&journal_path.to_path_buf());
         if let Some(error) = current.read_error {
@@ -1015,6 +1052,8 @@ pub(crate) fn apply_cutover_v2(
                 current.diagnostics.len()
             ));
         }
+        let source_journal_bytes =
+            std::fs::read(journal_path).map_err(|e| format!("read source journal bytes: {}", e))?;
         let current_digest = source_events_digest(&current.events)?;
         if current.events.len() != plan.map.source_event_count
             || current_digest != plan.map.source_digest
@@ -1033,6 +1072,30 @@ pub(crate) fn apply_cutover_v2(
             .map_err(|e| format!("serialize migration map: {}", e))?;
         std::fs::write(&tmp_map_path, map_json)
             .map_err(|e| format!("write migration map: {}", e))?;
+        let target_journal_bytes =
+            std::fs::read(&tmp_path).map_err(|e| format!("read v2 journal bytes: {}", e))?;
+        let map_bytes =
+            std::fs::read(&tmp_map_path).map_err(|e| format!("read migration map bytes: {}", e))?;
+        let certificate = CutoverV2Certificate {
+            schema: "tasktree-v2-cutover-certificate-v1".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            tool_commit: env!("TASKTREE_COMMIT").to_string(),
+            source_journal: journal_path.display().to_string(),
+            archive_journal: archive_path.display().to_string(),
+            target_journal: journal_path.display().to_string(),
+            map_path: map_path.display().to_string(),
+            source_event_count: plan.map.source_event_count,
+            source_event_digest: plan.map.source_digest.clone(),
+            imported_event_count: plan.map.imported_event_count,
+            source_journal_sha256: sha256_bytes(&source_journal_bytes),
+            target_journal_initial_sha256: sha256_bytes(&target_journal_bytes),
+            map_sha256: sha256_bytes(&map_bytes),
+        };
+        let certificate_json = serde_json::to_string_pretty(&certificate)
+            .map_err(|e| format!("serialize cutover certificate: {}", e))?;
+        std::fs::write(&tmp_certificate_path, certificate_json)
+            .map_err(|e| format!("write cutover certificate: {}", e))?;
         std::fs::rename(journal_path, archive_path)
             .map_err(|e| format!("archive v1 journal: {}", e))?;
         archived_v1 = true;
@@ -1041,6 +1104,9 @@ pub(crate) fn apply_cutover_v2(
         installed_v2 = true;
         std::fs::rename(&tmp_map_path, map_path)
             .map_err(|e| format!("install migration map: {}", e))?;
+        std::fs::rename(&tmp_certificate_path, &certificate_path)
+            .map_err(|e| format!("install cutover certificate: {}", e))?;
+        installed_certificate = true;
         Ok(())
     })();
 
@@ -1048,6 +1114,10 @@ pub(crate) fn apply_cutover_v2(
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp_path);
         let _ = std::fs::remove_file(&tmp_map_path);
+        let _ = std::fs::remove_file(&tmp_certificate_path);
+        if installed_certificate {
+            let _ = std::fs::remove_file(&certificate_path);
+        }
         if archived_v1 {
             if installed_v2 {
                 let _ = std::fs::remove_file(journal_path);
