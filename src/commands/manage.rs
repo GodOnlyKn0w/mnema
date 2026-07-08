@@ -1,7 +1,7 @@
 /// Manage/metadata command family: cmd_find, cmd_link, cmd_hide/cmd_unhide,
 /// cmd_export.
 /// Moved from main.rs (Layer 4d-manage refactor).
-use crate::event::{self, Event, find_strand, resolve_id};
+use crate::event::{self, Event};
 use crate::journal::*;
 use crate::output;
 use crate::projection;
@@ -17,8 +17,14 @@ use std::path::PathBuf;
 pub(crate) fn cmd_find(id: &str, format_json: bool) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _) = read_events_lossy(&path);
-    match find_strand(&events, id) {
-        Some(full_id) => {
+    let strands = projection::project_strands(&events, true);
+    match crate::reference::resolve_strand_with_selection(
+        &strands,
+        id,
+        !format_json,
+        events.last().map(|(offset, _)| *offset).unwrap_or(0),
+    ) {
+        Ok(full_id) => {
             if format_json {
                 println!(
                     "{}",
@@ -28,7 +34,7 @@ pub(crate) fn cmd_find(id: &str, format_json: bool) -> Result<(), String> {
                 println!("{}", full_id);
             }
         }
-        None => return Err(format!("strand {} not found", id)),
+        Err(e) => return Err(e),
     }
     Ok(())
 }
@@ -65,8 +71,20 @@ pub(crate) fn cmd_link(
         }
     }
     let events = read_events_strict(&ensure_journal()?)?;
-    let src_id = resolve_id(&events, source)?;
-    let tgt_id = resolve_id(&events, target)?;
+    let all_strands = projection::project_strands(&events, true);
+    let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+    let src_id = crate::reference::resolve_strand_with_selection(
+        &all_strands,
+        source,
+        !format_json,
+        current_max_offset,
+    )?;
+    let tgt_id = crate::reference::resolve_strand_with_selection(
+        &all_strands,
+        target,
+        !format_json,
+        current_max_offset,
+    )?;
     let provenance = parse_provenance_arg(provenance_raw)?;
     let (content, effect) = event::link_entry_parts(&tgt_id, etype);
     append_entry_to_strand(JournalEntryAppendRequest {
@@ -134,8 +152,20 @@ pub(crate) fn cmd_unlink(
         }
     }
     let events = read_events_strict(&ensure_journal()?)?;
-    let src_id = resolve_id(&events, source)?;
-    let tgt_id = resolve_id(&events, target)?;
+    let all_strands = projection::project_strands(&events, true);
+    let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+    let src_id = crate::reference::resolve_strand_with_selection(
+        &all_strands,
+        source,
+        !format_json,
+        current_max_offset,
+    )?;
+    let tgt_id = crate::reference::resolve_strand_with_selection(
+        &all_strands,
+        target,
+        !format_json,
+        current_max_offset,
+    )?;
     let provenance = parse_provenance_arg(provenance_raw)?;
     // Name the specific Link entry being reversed (CORPUS §4): the most recent
     // *live* Link on the source strand to (target, edge_type). None → a legacy
@@ -186,7 +216,14 @@ pub(crate) fn cmd_hide(
     format_json: bool,
     provenance_raw: Option<&str>,
 ) -> Result<(), String> {
-    let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
+    let events = read_events_strict(&ensure_journal()?)?;
+    let all_strands = projection::project_strands(&events, true);
+    let strand_id = crate::reference::resolve_strand_with_selection(
+        &all_strands,
+        id,
+        !format_json,
+        events.last().map(|(offset, _)| *offset).unwrap_or(0),
+    )?;
     let provenance = parse_provenance_arg(provenance_raw)?;
     let (content, effect) = event::hide_entry_parts(reason);
     // The gate reads current state and the append happens under the same
@@ -230,7 +267,14 @@ pub(crate) fn cmd_hide(
 /// no event is written. The current state read and the append happen inside the
 /// same journal write lock so concurrent hide/unhide calls are serialised.
 pub(crate) fn cmd_unhide(id: &str, format_json: bool) -> Result<(), String> {
-    let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
+    let events = read_events_strict(&ensure_journal()?)?;
+    let all_strands = projection::project_strands(&events, true);
+    let strand_id = crate::reference::resolve_strand_with_selection(
+        &all_strands,
+        id,
+        !format_json,
+        events.last().map(|(offset, _)| *offset).unwrap_or(0),
+    )?;
     let (content, effect) = event::unhide_entry_parts();
     let outcome = append_entry_to_strand_gated(
         JournalEntryAppendRequest {

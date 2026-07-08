@@ -34,6 +34,7 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   timeline      Chronological entries across strands (+linked)
   search        Full-text search across entries
   find          Resolve a strand id
+  pick          Pick a strand through fzf or a numbered menu
   tree          Strand forest (belongs-to nesting)
   depends       depends-on analysis: blockers / readiness / critical path
 
@@ -138,6 +139,9 @@ Examples:
         /// --parent: derivation may carry either, both, or neither.
         #[arg(long = "from", value_name = "REF")]
         from: Option<String>,
+        /// Human alias for the new strand. Must be unique and not pure hex.
+        #[arg(long = "slug", value_name = "SLUG")]
+        slug: Option<String>,
         /// Strand type: task, dag, why, session (default: auto-detect)
         #[arg(long = "type", value_name = "TYPE")]
         strand_type: Option<String>,
@@ -382,6 +386,29 @@ Examples:
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
+    },
+    /// Pick a strand, then run a read/manage command on it
+    #[command(after_help = "\
+Examples:
+  tasktree pick show
+  tasktree pick tree
+  tasktree pick --print-id
+
+Rules:
+  Uses fzf when available in an interactive terminal; otherwise falls back to
+  a numbered menu. In non-TTY contexts it exits with an error instead of
+  waiting for input. append is intentionally not supported here because append
+  content belongs on stdin; use --print-id and pass the id explicitly.")]
+    Pick {
+        /// Command to run with the selected strand: show, tree, depends, close, reopen, hide, unhide
+        #[arg(value_name = "COMMAND", default_value = "show")]
+        command: String,
+        /// Print the selected canonical full strand id instead of running a command
+        #[arg(long = "print-id")]
+        print_id: bool,
+        /// Include hidden strands in the picker
+        #[arg(long = "include-hidden", alias = "all")]
+        include_hidden: bool,
     },
     /// Create a directed link between two strands
     #[command(after_help = "\
@@ -819,6 +846,7 @@ fn run(command: &Commands) -> Result<(), String> {
             format,
             parent,
             from,
+            slug,
             strand_type,
             provenance,
         } => {
@@ -827,6 +855,7 @@ fn run(command: &Commands) -> Result<(), String> {
                 fmt,
                 parent.as_deref(),
                 from.as_deref(),
+                slug.as_deref(),
                 strand_type.as_deref(),
                 provenance.as_deref(),
             )
@@ -935,6 +964,11 @@ fn run(command: &Commands) -> Result<(), String> {
             let id = resolve_read_target(target)?;
             cmd_find(&id, format.as_deref() == Some("json"))
         }
+        Commands::Pick {
+            command,
+            print_id,
+            include_hidden,
+        } => cmd_pick(command, *print_id, *include_hidden),
         Commands::Link {
             source,
             target,

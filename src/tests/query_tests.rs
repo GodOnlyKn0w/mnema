@@ -972,3 +972,61 @@ fn producer_filter_narrows_to_one_writer() {
     assert!(cmd_show(Some(&id), false, None, false, false, false, Some("codex")).is_ok());
     assert!(cmd_show(Some(&id), false, None, true, false, false, Some("codex")).is_ok());
 }
+
+#[test]
+fn list_selection_cache_resolves_and_fails_closed_after_journal_moves() {
+    let _env = setup();
+    let first = create_strand("first cache target");
+    let _second = create_strand("second cache target");
+    cmd_list(false, None, None, None, None, None, None, None, false).unwrap();
+
+    let events = read_events_lossy(&ensure_journal().unwrap()).0;
+    let strands = projection::project_strands(&events, true);
+    let max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+    let selected =
+        crate::reference::resolve_strand_with_selection(&strands, "@1", true, max_offset)
+            .expect("@1 should resolve after text list");
+    assert!(strands.iter().any(|s| s.id == selected));
+
+    cmd_append_with_seen_offset(
+        Some("move first after list"),
+        None,
+        false,
+        false,
+        None,
+        Some(&first),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let moved_events = read_events_lossy(&ensure_journal().unwrap()).0;
+    let moved_strands = projection::project_strands(&moved_events, true);
+    let moved_max = moved_events.last().map(|(offset, _)| *offset).unwrap_or(0);
+    let err =
+        crate::reference::resolve_strand_with_selection(&moved_strands, "@1", true, moved_max)
+            .unwrap_err();
+    assert!(err.contains("stale"), "{err}");
+}
+
+#[test]
+fn json_list_does_not_write_selection_cache() {
+    let env = setup();
+    create_strand("json list target");
+    cmd_list(false, None, None, None, None, None, None, None, true).unwrap();
+    assert!(
+        !env.path()
+            .join(".tasktree")
+            .join("selection-state.json")
+            .exists()
+    );
+}
+
+#[test]
+fn pick_fails_in_non_tty_instead_of_waiting() {
+    let _env = setup();
+    create_strand("pick target");
+    let err = cmd_pick("show", false, false).unwrap_err();
+    assert!(err.contains("interactive TTY"), "{err}");
+}

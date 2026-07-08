@@ -711,7 +711,7 @@ fn grammar_format_json_coverage() {
     use clap::CommandFactory;
     // doctor/export are permanently exempt in the grammar contract;
     // init is pending judgment.
-    const EXEMPT: &[&str] = &["init", "doctor", "export"];
+    const EXEMPT: &[&str] = &["init", "doctor", "export", "pick"];
     for sub in Cli::command().get_subcommands() {
         if EXEMPT.contains(&sub.get_name()) || sub.get_name() == "help" {
             continue;
@@ -902,21 +902,32 @@ fn close_reopen_accept_positional_and_id_flag() {
         let pos = Cli::command().try_get_matches_from(["tasktree", cmd, "0000019dd34b"]);
         assert!(pos.is_ok(), "`{} <ID>` must parse: {:?}", cmd, pos.err());
         let flag = Cli::command().try_get_matches_from(["tasktree", cmd, "--id", "0000019dd34b"]);
-        assert!(flag.is_ok(), "`{} --id <ID>` must parse: {:?}", cmd, flag.err());
+        assert!(
+            flag.is_ok(),
+            "`{} --id <ID>` must parse: {:?}",
+            cmd,
+            flag.err()
+        );
     }
 }
 
 #[test]
 fn last_flag_parses_on_read_and_append_commands() {
     use clap::CommandFactory;
-    for cmd in ["show", "find", "hide", "unhide", "tree", "depends", "append"] {
+    for cmd in [
+        "show", "find", "hide", "unhide", "tree", "depends", "append",
+    ] {
         let r = Cli::command().try_get_matches_from(["tasktree", cmd, "--last"]);
         assert!(r.is_ok(), "`{} --last` must parse: {:?}", cmd, r.err());
     }
     // checkpoint requires --action alongside --last
     let r =
         Cli::command().try_get_matches_from(["tasktree", "checkpoint", "--last", "--action", "x"]);
-    assert!(r.is_ok(), "`checkpoint --last --action` must parse: {:?}", r.err());
+    assert!(
+        r.is_ok(),
+        "`checkpoint --last --action` must parse: {:?}",
+        r.err()
+    );
 }
 
 #[test]

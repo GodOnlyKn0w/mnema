@@ -695,6 +695,7 @@ fn cutover_v2_certificate_detects_tampered_v1_archive() {
             id: old_id.to_string(),
             ts: "2026-01-01T00:00:00Z".to_string(),
             strand_type: Some("task".to_string()),
+            slug: None,
         },
         Event::LogAppended {
             id: old_id.to_string(),
@@ -742,6 +743,7 @@ fn cutover_v2_dry_run_does_not_rewrite_journal() {
             id: old_id.to_string(),
             ts: "2026-01-01T00:00:00Z".to_string(),
             strand_type: Some("task".to_string()),
+            slug: None,
         },
         Event::LogAppended {
             id: old_id.to_string(),
@@ -788,6 +790,7 @@ fn cutover_v2_apply_archives_v1_and_imports_pure_v2_journal() {
             id: parent.to_string(),
             ts: "2026-01-01T00:00:00Z".to_string(),
             strand_type: Some("task".to_string()),
+            slug: None,
         },
         Event::LogAppended {
             id: parent.to_string(),
@@ -806,6 +809,7 @@ fn cutover_v2_apply_archives_v1_and_imports_pure_v2_journal() {
             id: child.to_string(),
             ts: "2026-01-01T00:00:02Z".to_string(),
             strand_type: Some("task".to_string()),
+            slug: None,
         },
         Event::LogAppended {
             id: child.to_string(),

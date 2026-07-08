@@ -383,8 +383,7 @@ fn handles_orient_text_complete() {
         // The embedded handle is the short prefix, not the full 64-hex hash:
         // human-facing views spend prefixes, resolution accepts them.
         assert!(
-            card.catch_up
-                .contains(&crate::util::shorten(&card.id)),
+            card.catch_up.contains(&crate::util::shorten(&card.id)),
             "catch_up must embed the strand's own id handle (link points to self): '{}'",
             card.catch_up
         );

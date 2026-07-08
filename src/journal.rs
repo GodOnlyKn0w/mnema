@@ -509,8 +509,10 @@ fn source_events_digest(source: &[(usize, Event)]) -> Result<String, String> {
 // historical events, kept literal on purpose; new writes must go through the
 // event factory constructors, never copy these strings.
 pub(crate) fn build_cutover_v2_plan(source: &[(usize, Event)]) -> Result<CutoverV2Plan, String> {
-    let mut strand_meta: std::collections::BTreeMap<String, (String, Option<String>)> =
-        std::collections::BTreeMap::new();
+    let mut strand_meta: std::collections::BTreeMap<
+        String,
+        (String, Option<String>, Option<String>),
+    > = std::collections::BTreeMap::new();
     let mut first_log: std::collections::BTreeMap<String, LegacyLogView> =
         std::collections::BTreeMap::new();
 
@@ -520,8 +522,9 @@ pub(crate) fn build_cutover_v2_plan(source: &[(usize, Event)]) -> Result<Cutover
                 id,
                 ts,
                 strand_type,
+                slug,
             } => {
-                strand_meta.insert(id.clone(), (ts.clone(), strand_type.clone()));
+                strand_meta.insert(id.clone(), (ts.clone(), strand_type.clone(), slug.clone()));
             }
             Event::LogAppended {
                 id,
@@ -836,7 +839,7 @@ fn import_effect_entry(
     content: String,
     effect: Option<event::EntryEffect>,
     provenance: Option<serde_json::Value>,
-    strand_meta: &std::collections::BTreeMap<String, (String, Option<String>)>,
+    strand_meta: &std::collections::BTreeMap<String, (String, Option<String>, Option<String>)>,
     strand_map: &mut std::collections::BTreeMap<String, String>,
     created_new: &mut std::collections::HashSet<String>,
     heads_by_old: &mut std::collections::BTreeMap<String, String>,
@@ -876,7 +879,7 @@ fn import_effect_entry(
 fn import_log_view(
     offset: usize,
     view: LegacyLogView,
-    strand_meta: &std::collections::BTreeMap<String, (String, Option<String>)>,
+    strand_meta: &std::collections::BTreeMap<String, (String, Option<String>, Option<String>)>,
     strand_map: &mut std::collections::BTreeMap<String, String>,
     created_new: &mut std::collections::HashSet<String>,
     heads_by_old: &mut std::collections::BTreeMap<String, String>,
@@ -912,14 +915,15 @@ fn import_log_view(
     };
 
     if !created_new.contains(&new_strand_id) {
-        let (created_ts, strand_type) = strand_meta
+        let (created_ts, strand_type, slug) = strand_meta
             .get(&view.id)
             .cloned()
-            .unwrap_or_else(|| (view.ts.clone(), None));
+            .unwrap_or_else(|| (view.ts.clone(), None, None));
         out.push(Event::StrandCreated {
             id: new_strand_id.clone(),
             ts: created_ts,
             strand_type,
+            slug,
         });
         created_new.insert(new_strand_id.clone());
     }

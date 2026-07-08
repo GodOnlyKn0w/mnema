@@ -7,6 +7,7 @@ mod journal_view;
 mod markers;
 mod output;
 mod projection;
+mod reference;
 mod render;
 mod tree;
 mod util;

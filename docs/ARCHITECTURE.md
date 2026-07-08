@@ -79,6 +79,8 @@ Contract Surface owns the public machine-readable contract. It maps projection o
 
 CLI Adapter owns user interaction and orchestration. It parses CLI grammar, resolves input sources, builds command requests, runs command workflows, calls core modules, renders human-readable text, emits JSON through the Contract Surface, and maps outcomes to exit codes. It is allowed to be wide, but it must stay shallow: it coordinates core behavior rather than owning event schema, projection folds, DTO compatibility, or audit generation.
 
+Human reference resolution belongs at this CLI boundary. User-facing handles such as unique hash prefixes, slugs, `@last`, `@1`/`@2`, and picker selections are parsed before command workflows call the core modules. The resolver reads the canonical full strand projection, including hidden and closed strands, to prove uniqueness, then returns canonical strand ids to the workflow. Graph/tree/depends code must not own a second resolver with different ambiguity semantics. The resolver must not create a second durable source of truth for strand identity.
+
 ## Boundaries
 
 Durable facts end at the append-only journal. Anything computed from the journal is a projection and must be reproducible from journal events.
@@ -90,6 +92,8 @@ Projection Core functions take event streams plus explicit request parameters an
 Contract Surface maps projection outputs to DTOs. It may map and preserve compatibility fields, but nontrivial computation belongs in Projection Core. CLI code may select a DTO, but it must not reshape public JSON ad hoc.
 
 CLI grammar, help text, text rendering, and exit-code policy do not define durable facts. They may call core modules, but Journal Core and Projection Core do not depend on CLI syntax or stdout/stderr behavior.
+
+Slug durability and selection cache state have different ownership. A slug is a human alias for a strand and must be represented in the journal/projection path if it is meant to survive clone, backup, and later sessions. By contrast, `@last` and `@1`/`@2` are CLI-local selection caches under `.tasktree/`: they are directory-level shared state, not per-agent cursors, so concurrent writers may overwrite them. They are allowed to be stale, missing, or corrupt, and consumers must fail closed instead of guessing. Projection Core must not consume the selection cache.
 
 Audit findings are projections. The audit pass derives findings from events; diagnostic catalog/explain output belongs to the public contract surface; command-specific presentation and exit behavior belong to the CLI Adapter.
 
@@ -104,6 +108,8 @@ JSON output fields are compatibility commitments: fields may be added, but exist
 Deprecated JSON fields stay in DTOs and contract documentation. They must not force internal projection models to keep obsolete concepts as primary design.
 
 Human-readable text is CLI behavior, not the machine contract. Help examples are parse-contracts and must remain executable; other text output may evolve without changing JSON DTO semantics.
+
+Picker integrations are optional CLI affordances. They may call external tools such as `fzf` only when an interactive terminal is available; in non-TTY contexts they must either run from explicit parameters or fail with a usage error. No feature may require the picker as its only entry point.
 
 Review projections report facts and evidence. They do not decide whether a task is valid, whether an agent should stop, or whether a process exits successfully.
 

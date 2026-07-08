@@ -24,9 +24,15 @@ pub(crate) fn print_handle_line(card: &output::OrientStrand, state: &str) {
         .as_deref()
         .map(|t| format!(" [{}]", t))
         .unwrap_or_default();
+    let slug_info = card
+        .slug
+        .as_deref()
+        .map(|slug| format!(" ({})", slug))
+        .unwrap_or_default();
     eprintln!(
-        "  {}{} | {} entries | {}",
+        "  {}{}{} | {} entries | {}",
         shorten(&card.id),
+        slug_info,
         type_info,
         card.entry_count,
         state
@@ -45,10 +51,16 @@ pub(crate) fn print_orient_forest(nodes: &[output::OrientForestNode], depth: usi
             .as_deref()
             .map(|t| format!(" [{}]", t))
             .unwrap_or_default();
+        let slug_info = s
+            .slug
+            .as_deref()
+            .map(|slug| format!(" ({})", slug))
+            .unwrap_or_default();
         println!(
-            "{}  {}{}  {} entries | last_offset {}",
+            "{}  {}{}{}  {} entries | last_offset {}",
             indent,
             shorten(&s.id),
+            slug_info,
             type_info,
             s.entry_count,
             s.last_offset

@@ -58,7 +58,9 @@ fn run_cmd(args: &[&str]) -> Result<String, String> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EntryEffect {
-    Close { disposition: String },
+    Close {
+        disposition: String,
+    },
     Reopen,
     Link {
         target: String,
@@ -110,6 +112,8 @@ pub enum Event {
         ts: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         strand_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        slug: Option<String>,
     },
     #[serde(rename = "log_appended")]
     LogAppended {
@@ -484,6 +488,17 @@ pub fn make_strand_created_with_refs(
     legacy_ref: Option<&str>,
     provenance: Option<serde_json::Value>,
 ) -> (Event, Event) {
+    make_strand_created_with_refs_and_slug(content, strand_type, refs, legacy_ref, provenance, None)
+}
+
+pub fn make_strand_created_with_refs_and_slug(
+    content: &str,
+    strand_type: Option<&str>,
+    refs: Vec<String>,
+    legacy_ref: Option<&str>,
+    provenance: Option<serde_json::Value>,
+    slug: Option<&str>,
+) -> (Event, Event) {
     let ts = now();
     let git = get_git_context();
     let entry_id = compute_entry_id(
@@ -500,6 +515,7 @@ pub fn make_strand_created_with_refs(
         id: id.clone(),
         ts: ts.clone(),
         strand_type: strand_type.map(|s| s.to_string()),
+        slug: slug.map(|s| s.to_string()),
     };
     let appended = Event::LogAppended {
         id,
@@ -789,18 +805,14 @@ pub fn make_strand_unhidden(
     )
 }
 
-/// Resolve a strand-id prefix to the first matching full strand id, scanning
-/// `StrandCreated` events in order. Lives here (not util.rs) because it is the
-/// one resolver that depends on the `Event` type. Moved from main.rs in the
-/// Layer 5-shape refactor.
+/// Resolve a strand-id prefix to a unique full strand id, scanning
+/// `StrandCreated` events. This legacy event-only helper knows nothing about
+/// slugs or selection handles; command paths should prefer `reference`.
 pub(crate) fn find_strand(events: &[(usize, Event)], id: &str) -> Option<String> {
-    // Empty/whitespace id must not resolve: starts_with("") matches every
-    // strand, which would silently target the first one (data-integrity footgun).
     if id.trim().is_empty() {
         return None;
     }
-    // Prefix match: first strand whose id starts with the given string
-    events
+    let matches: Vec<String> = events
         .iter()
         .filter_map(|(_, e)| {
             if let Event::StrandCreated { id: nid, .. } = e {
@@ -809,10 +821,43 @@ pub(crate) fn find_strand(events: &[(usize, Event)], id: &str) -> Option<String>
                 None
             }
         })
-        .find(|nid| nid.starts_with(id))
+        .filter(|nid| nid.starts_with(id))
+        .collect();
+    if matches.len() == 1 {
+        Some(matches[0].clone())
+    } else {
+        None
+    }
 }
 
 /// Resolve a strand ID prefix to a full strand ID, returning Result.
 pub(crate) fn resolve_id(events: &[(usize, Event)], id: &str) -> Result<String, String> {
-    find_strand(events, id).ok_or_else(|| format!("strand {} not found", id))
+    let matches: Vec<String> = events
+        .iter()
+        .filter_map(|(_, e)| {
+            if let Event::StrandCreated { id: nid, .. } = e {
+                Some(nid.clone())
+            } else {
+                None
+            }
+        })
+        .filter(|nid| nid.starts_with(id))
+        .collect();
+    match matches.len() {
+        1 => Ok(matches[0].clone()),
+        0 => Err(format!("strand {} not found", id)),
+        _ => {
+            let sample: Vec<String> = matches
+                .iter()
+                .take(4)
+                .map(|candidate| crate::util::shorten(candidate))
+                .collect();
+            Err(format!(
+                "strand prefix {} is ambiguous: {} strands match (e.g. {})",
+                id,
+                matches.len(),
+                sample.join(", ")
+            ))
+        }
+    }
 }

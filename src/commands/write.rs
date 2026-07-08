@@ -5,7 +5,7 @@
 /// Dependency direction: write → journal, event, projection, diagnostics, render (via crate::*)
 /// write ← main.rs (mod commands; pub(crate) use commands::write::*)
 use crate::diagnostics;
-use crate::event::{self, Event, find_strand, resolve_id};
+use crate::event::{self, Event};
 use crate::journal::{
     JournalEntryAppendRequest, append_entry_to_strand, append_entry_to_strand_checked,
     append_events, ensure_journal, read_events_lossy, read_events_strict,
@@ -67,17 +67,31 @@ fn resolve_rationale_ref(
     events: &[(usize, Event)],
     all_strands: &[projection::ProjectedStrand],
     input: &str,
+    allow_selection: bool,
 ) -> Result<String, String> {
-    if let Some(tgt) = find_strand(events, input) {
-        let target_basis = all_strands
-            .iter()
-            .find(|s| s.id == tgt)
-            .ok_or_else(|| format!("rationale target strand {} not found", input))?;
-        return target_basis
-            .log
-            .last()
-            .and_then(|entry| entry.entry_id.clone())
-            .ok_or_else(|| format!("rationale target strand {} has no entry hash", input));
+    let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+    match crate::reference::lookup_strand_with_selection(
+        all_strands,
+        input,
+        allow_selection,
+        current_max_offset,
+    ) {
+        crate::reference::StrandLookup::One(tgt) => {
+            let target_basis = all_strands
+                .iter()
+                .find(|s| s.id == tgt)
+                .ok_or_else(|| format!("rationale target strand {} not found", input))?;
+            return target_basis
+                .log
+                .last()
+                .and_then(|entry| entry.entry_id.clone())
+                .ok_or_else(|| format!("rationale target strand {} has no entry hash", input));
+        }
+        crate::reference::StrandLookup::Ambiguous(candidates) => {
+            return Err(crate::reference::ambiguous_message(input, &candidates));
+        }
+        crate::reference::StrandLookup::Invalid(message) => return Err(message),
+        crate::reference::StrandLookup::NotFound => {}
     }
     match projection::find_entry(all_strands, input) {
         projection::EntryLookup::One { entry, .. } => Ok(entry
@@ -104,17 +118,19 @@ pub(crate) fn cmd_add_from_stdin(
     format_json: bool,
     parent: Option<&str>,
     from: Option<&str>,
+    slug: Option<&str>,
     strand_type: Option<&str>,
     provenance_raw: Option<&str>,
 ) -> Result<(), String> {
     let raw = read_stdin_content()?;
-    cmd_add_with_parent(
+    cmd_add_with_parent_and_slug(
         Some(&raw),
         false,
         None,
         format_json,
         parent,
         from,
+        slug,
         strand_type,
         provenance_raw,
     )
@@ -127,6 +143,31 @@ pub(crate) fn cmd_add_with_parent(
     format_json: bool,
     parent: Option<&str>,
     from: Option<&str>,
+    strand_type: Option<&str>,
+    provenance_raw: Option<&str>,
+) -> Result<(), String> {
+    cmd_add_with_parent_and_slug(
+        content,
+        stdin,
+        file,
+        format_json,
+        parent,
+        from,
+        None,
+        strand_type,
+        provenance_raw,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cmd_add_with_parent_and_slug(
+    content: Option<&str>,
+    stdin: bool,
+    file: Option<&str>,
+    format_json: bool,
+    parent: Option<&str>,
+    from: Option<&str>,
+    slug: Option<&str>,
     strand_type: Option<&str>,
     provenance_raw: Option<&str>,
 ) -> Result<(), String> {
@@ -186,21 +227,41 @@ pub(crate) fn cmd_add_with_parent(
     let provenance = parse_provenance_arg(provenance_raw)?;
     // --parent (belongs-to) and --from (source ref) are orthogonal: a child
     // can carry either, both, or neither (CORPUS §6 归属与来源正交).
-    let needs_events = parent.is_some() || from.is_some();
+    let needs_events = parent.is_some() || from.is_some() || slug.is_some();
     let events = if needs_events {
         let path = ensure_journal()?;
         read_events_lossy(&path).0
     } else {
         Vec::new()
     };
+    let slug = if let Some(raw_slug) = slug {
+        let trimmed = raw_slug.trim();
+        crate::reference::validate_slug(trimmed)?;
+        let all_strands = projection::project_strands(&events, true);
+        if all_strands
+            .iter()
+            .any(|s| s.slug.as_deref() == Some(trimmed))
+        {
+            return Err(format!("slug {} already exists", trimmed));
+        }
+        Some(trimmed.to_string())
+    } else {
+        None
+    };
+
     let parent_id = if let Some(parent_raw) = parent {
         let parent_raw = parent_raw.trim();
         if parent_raw.is_empty() {
             return Err("--parent cannot be empty".to_string());
         }
         Some(
-            find_strand(&events, parent_raw)
-                .ok_or_else(|| format!("parent strand {} not found", parent_raw))?,
+            crate::reference::resolve_strand_with_selection(
+                &projection::project_strands(&events, true),
+                parent_raw,
+                !format_json,
+                events.last().map(|(offset, _)| *offset).unwrap_or(0),
+            )
+            .map_err(|e| format!("parent {}", e))?,
         )
     } else {
         None
@@ -211,17 +272,23 @@ pub(crate) fn cmd_add_with_parent(
             return Err("--from cannot be empty".to_string());
         }
         let all_strands = projection::project_strands(&events, true);
-        vec![resolve_rationale_ref(&events, &all_strands, from_raw)?]
+        vec![resolve_rationale_ref(
+            &events,
+            &all_strands,
+            from_raw,
+            !format_json,
+        )?]
     } else {
         Vec::new()
     };
 
-    let (created, appended) = event::make_strand_created_with_refs(
+    let (created, appended) = event::make_strand_created_with_refs_and_slug(
         &stored,
         resolved_type,
         from_refs,
         None,
         provenance.clone(),
+        slug.as_deref(),
     );
     let id = created
         .strand_id()
@@ -247,6 +314,7 @@ pub(crate) fn cmd_add_with_parent(
             id: id.clone(),
             status: "ok",
             provenance: provenance.as_ref(),
+            slug: slug.clone(),
             parent_id: parent_id.clone(),
             edge_type: parent_id.as_ref().map(|_| "belongs-to"),
             result: strand_card_fresh(&id),
@@ -256,6 +324,9 @@ pub(crate) fn cmd_add_with_parent(
         println!("{}", id);
         if let Some((card, state)) = strand_card_fresh_with_state(&id) {
             print_card_with_state(&card, &state);
+        }
+        if let Err(e) = crate::reference::remember_last_touched_current(&id) {
+            eprintln!("[tasktree] warning: {}", e);
         }
     }
     Ok(())
@@ -271,6 +342,7 @@ pub(crate) struct AppendRequest<'a> {
     pub(crate) provenance_raw: Option<&'a str>,
     pub(crate) seen_offset: Option<usize>,
     pub(crate) why: Option<&'a str>,
+    pub(crate) allow_selection: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,6 +439,7 @@ pub(crate) fn cmd_append_with_seen_offset(
         provenance_raw,
         seen_offset,
         why,
+        allow_selection: format != Some("json"),
     })?;
     render_append_outcome(&outcome, format);
     Ok(())
@@ -463,8 +536,13 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
     let all_strands = projection::project_strands(&events, true);
     let target_id = req.explicit_id.or(req.legacy_id);
     let full_id = if let Some(id) = target_id {
-        find_strand(&events, id).ok_or_else(|| {
-            let mut msg = format!("strand {} not found", id);
+        crate::reference::resolve_strand_with_selection(
+            &all_strands,
+            id,
+            req.allow_selection,
+            events.last().map(|(offset, _)| *offset).unwrap_or(0),
+        ).map_err(|e| {
+            let mut msg = e;
             if id == "-" {
                 msg.push_str(
                     ". If you meant to pipe content from stdin, use:\n  echo \"...\" | tasktree append --id <id>",
@@ -489,7 +567,12 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         diagnostics::check_w076_seen_offset(&full_id, req.seen_offset, strand_last_offset);
     let mut refs: Vec<String> = Vec::new();
     if let Some(w) = req.why {
-        refs.push(resolve_rationale_ref(&events, &all_strands, w)?);
+        refs.push(resolve_rationale_ref(
+            &events,
+            &all_strands,
+            w,
+            req.allow_selection,
+        )?);
     }
     let appended = append_entry_to_strand(JournalEntryAppendRequest {
         strand_id: full_id.clone(),
@@ -540,6 +623,9 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
         println!("{}", outcome.strand_id);
         if let Some((card, state)) = &outcome.card_state {
             print_card_with_state(card, state);
+        }
+        if let Err(e) = crate::reference::remember_last_touched_current(&outcome.strand_id) {
+            eprintln!("[tasktree] warning: {}", e);
         }
         return;
     }
@@ -599,6 +685,9 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
         } else {
             println!("appended to {}{}", shorten(&outcome.strand_id), prod);
         }
+        if let Err(e) = crate::reference::remember_last_touched_current(&outcome.strand_id) {
+            eprintln!("[tasktree] warning: {}", e);
+        }
     }
 }
 
@@ -618,7 +707,14 @@ pub(crate) fn cmd_close(
             disp, valid
         ));
     }
-    let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
+    let events = read_events_strict(&ensure_journal()?)?;
+    let all_strands = projection::project_strands(&events, true);
+    let strand_id = crate::reference::resolve_strand_with_selection(
+        &all_strands,
+        id,
+        !format_json,
+        events.last().map(|(offset, _)| *offset).unwrap_or(0),
+    )?;
     let validate_id = strand_id.clone();
     let (content, effect) = event::close_entry_parts(disp, reason);
     append_entry_to_strand_checked(
@@ -664,12 +760,15 @@ pub(crate) fn cmd_close(
 }
 
 /// Reopen a closed strand by writing a reopen effect entry.
-pub(crate) fn cmd_reopen(
-    id: &str,
-    reason: Option<&str>,
-    format_json: bool,
-) -> Result<(), String> {
-    let strand_id = resolve_id(&read_events_strict(&ensure_journal()?)?, id)?;
+pub(crate) fn cmd_reopen(id: &str, reason: Option<&str>, format_json: bool) -> Result<(), String> {
+    let events = read_events_strict(&ensure_journal()?)?;
+    let all_strands = projection::project_strands(&events, true);
+    let strand_id = crate::reference::resolve_strand_with_selection(
+        &all_strands,
+        id,
+        !format_json,
+        events.last().map(|(offset, _)| *offset).unwrap_or(0),
+    )?;
     let validate_id = strand_id.clone();
     let (content, effect) = event::reopen_entry_parts(reason);
     append_entry_to_strand_checked(
@@ -759,6 +858,7 @@ pub(crate) struct CheckpointRequest<'a> {
     pub(crate) include_hidden: bool,
     pub(crate) provenance_raw: Option<&'a str>,
     pub(crate) seen_offset: Option<usize>,
+    pub(crate) allow_selection: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -835,10 +935,16 @@ pub(crate) fn plan_checkpoint(
     let visible_strands = projection::project_strands(events, req.include_hidden);
 
     let (strand, resolved_by) = if let Some(id) = req.requested_id {
-        let full = find_strand(events, id).ok_or_else(|| {
+        let full = crate::reference::resolve_strand_with_selection(
+            &all_strands,
+            id,
+            req.allow_selection,
+            events.last().map(|(offset, _)| *offset).unwrap_or(0),
+        )
+        .map_err(|e| {
             checkpoint_failure(
                 1,
-                format!("strand resolve/show failed: strand {} not found", id),
+                format!("strand resolve/show failed: {}", e),
                 Some(id.to_string()),
                 None,
                 false,
@@ -899,10 +1005,7 @@ pub(crate) fn plan_checkpoint(
         "[checkpoint] ok resolved_by=\"{}\" observed_entries_before_append={} action=\"{}\"",
         resolved_by, observed_entries_before_append, escaped_action
     );
-    let prev_entry_id = strand
-        .log
-        .last()
-        .and_then(|entry| entry.entry_id.clone());
+    let prev_entry_id = strand.log.last().and_then(|entry| entry.entry_id.clone());
 
     let shown_entries: Vec<CheckpointShownEntry> = if let Some(n) = req.tail {
         let skip = strand.log.len().saturating_sub(n);
@@ -1179,6 +1282,7 @@ pub(crate) fn cmd_checkpoint_with_seen_offset(
         include_hidden,
         provenance_raw,
         seen_offset,
+        allow_selection: !format_json,
     };
     let mut plan = plan_checkpoint(&events, request, chrono::Utc::now())?;
     commit_checkpoint(&mut plan)?;

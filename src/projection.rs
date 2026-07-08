@@ -161,7 +161,9 @@ pub(crate) fn edge_delta(event: &Event) -> Option<EdgeDelta> {
             linked: true,
         }),
         Event::LogAppended {
-            effect: Some(EntryEffect::Unlink { target, edge_type, .. }),
+            effect: Some(EntryEffect::Unlink {
+                target, edge_type, ..
+            }),
             ..
         } => Some(EdgeDelta {
             target: target.clone(),
@@ -216,6 +218,7 @@ pub fn compute_state(log: &[LogEntry]) -> (String, String, usize) {
 #[derive(Debug)]
 pub struct ProjectedStrand {
     pub id: String,
+    pub slug: Option<String>,
     pub log: Vec<LogEntry>,
     pub edges: Vec<String>,
     /// Target IDs of edges whose edge_type is "belongs-to". Subset of `edges`.
@@ -239,6 +242,7 @@ impl ProjectedStrand {
     pub(crate) fn with_producer_filter(&self, name: &str) -> ProjectedStrand {
         ProjectedStrand {
             id: self.id.clone(),
+            slug: self.slug.clone(),
             log: self
                 .log
                 .iter()
@@ -345,7 +349,10 @@ pub(crate) fn live_link_entry_ids(
                         i.live = false;
                     }
                 }
-                None => insts.iter_mut().filter(|i| i.live).for_each(|i| i.live = false),
+                None => insts
+                    .iter_mut()
+                    .filter(|i| i.live)
+                    .for_each(|i| i.live = false),
             },
             _ => {}
         }
@@ -825,14 +832,20 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
                 .filter(|i| i.edge_type.as_deref() == Some("depends-on"))
                 .map(|i| i.target.clone()),
         );
-        // Extract strand_type from StrandCreated event
-        let strand_type: Option<String> = node_events.iter().find_map(|(_, e)| {
-            if let Event::StrandCreated { strand_type, .. } = e {
-                strand_type.clone()
-            } else {
-                None
-            }
-        });
+        // Extract durable strand metadata from the creation event.
+        let (strand_type, slug): (Option<String>, Option<String>) = node_events
+            .iter()
+            .find_map(|(_, e)| {
+                if let Event::StrandCreated {
+                    strand_type, slug, ..
+                } = e
+                {
+                    Some((strand_type.clone(), slug.clone()))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or((None, None));
         let strand_id_str = node_events[0]
             .1
             .strand_id()
@@ -844,6 +857,7 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
         }
         nodes.push(ProjectedStrand {
             id: strand_id_str,
+            slug,
             log: logs,
             edges,
             belongs_to_edges,

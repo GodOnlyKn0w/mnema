@@ -1,4 +1,4 @@
-use crate::event::{Event, find_strand};
+use crate::event::Event;
 use crate::graph;
 /// Query-command family: cmd_list, cmd_show, cmd_search, cmd_timeline,
 /// cmd_orient, cmd_tree (+ print_tree_text helper).
@@ -32,6 +32,7 @@ pub(crate) struct ListRequest<'a> {
     pub(crate) stale: Option<&'a str>,
     pub(crate) stale_offset: Option<usize>,
     pub(crate) since_offset: Option<usize>,
+    pub(crate) allow_selection: bool,
 }
 
 pub(crate) fn list_strands(
@@ -39,22 +40,45 @@ pub(crate) fn list_strands(
     req: &ListRequest<'_>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<projection::ProjectedStrand>, String> {
+    let canonical_strands = projection::project_strands(events, true);
+    let links_id = req
+        .links
+        .map(|src| {
+            crate::reference::resolve_strand_with_selection(
+                &canonical_strands,
+                src,
+                req.allow_selection,
+                events.last().map(|(offset, _)| *offset).unwrap_or(0),
+            )
+        })
+        .transpose()?;
+    let backlinks_id = req
+        .backlinks
+        .map(|tgt| {
+            crate::reference::resolve_strand_with_selection(
+                &canonical_strands,
+                tgt,
+                req.allow_selection,
+                events.last().map(|(offset, _)| *offset).unwrap_or(0),
+            )
+        })
+        .transpose()?;
     let mut strands = projection::project_strands(events, req.include_hidden);
     strands.sort_by(|a, b| b.last_ts().cmp(a.last_ts()));
 
     if let Some(type_filter) = req.list_type {
         strands.retain(|n| n.strand_type.as_deref() == Some(type_filter));
     }
-    if let Some(src) = req.links {
-        let source_edges: Vec<String> = strands
+    if let Some(src) = links_id {
+        let source_edges: Vec<String> = canonical_strands
             .iter()
-            .filter(|n| n.id.starts_with(src))
+            .filter(|n| n.id == src)
             .flat_map(|n| n.edges.iter().cloned())
             .collect();
-        strands.retain(|n| source_edges.iter().any(|e| n.id.starts_with(e)));
+        strands.retain(|n| source_edges.iter().any(|e| n.id == *e));
     }
-    if let Some(tgt) = req.backlinks {
-        strands.retain(|n| n.edges.iter().any(|e| e.starts_with(tgt)));
+    if let Some(tgt) = backlinks_id {
+        strands.retain(|n| n.edges.iter().any(|e| e == &tgt));
     }
     if let Some(state_filter) = req.state {
         strands.retain(|n| match state_filter {
@@ -107,6 +131,7 @@ pub(crate) fn cmd_list(
         stale,
         stale_offset,
         since_offset,
+        allow_selection: !format_json,
     };
     let strands = list_strands(&events, &request, chrono::Utc::now())?;
 
@@ -147,6 +172,10 @@ pub(crate) fn cmd_list(
     }
     if strands.is_empty() {
         println!("(no strands)");
+    }
+    let max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+    if let Err(e) = crate::reference::remember_list(&strands, max_offset) {
+        eprintln!("[tasktree] warning: {}", e);
     }
     if skipped > 0 {
         return Err(corrupted_lines_error(skipped));
@@ -274,20 +303,30 @@ pub(crate) fn cmd_timeline(
     }
 
     // Filter by strand or links
+    let canonical_strands = projection::project_strands(&events, true);
+    let allow_selection = format_json != Some("json");
+    let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
     if let Some(sid) = strand {
-        let full_id =
-            find_strand(&events, sid).ok_or_else(|| format!("strand {} not found", sid))?;
+        let full_id = crate::reference::resolve_strand_with_selection(
+            &canonical_strands,
+            sid,
+            allow_selection,
+            current_max_offset,
+        )?;
         entries.retain(|e| e.strand_id == full_id);
     }
     if let Some(lid) = links {
-        let full_id =
-            find_strand(&events, lid).ok_or_else(|| format!("strand {} not found", lid))?;
+        let full_id = crate::reference::resolve_strand_with_selection(
+            &canonical_strands,
+            lid,
+            allow_selection,
+            current_max_offset,
+        )?;
         // Collect currently linked strand IDs from the projection so v2 effect
         // entries and unlink folds use the same semantics as list/tree/orient.
         let mut linked_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         linked_ids.insert(full_id.clone());
-        let strands = projection::project_strands(&events, true);
-        if let Some(source) = strands.iter().find(|s| s.id == full_id) {
+        if let Some(source) = canonical_strands.iter().find(|s| s.id == full_id) {
             linked_ids.extend(source.edges.iter().cloned());
         }
         entries.retain(|e| linked_ids.contains(&e.strand_id));
@@ -295,8 +334,13 @@ pub(crate) fn cmd_timeline(
 
     // Filter by subtree — only events from strands reachable from root via edges
     if let Some(root_id) = tree_root {
-        let strands = projection::project_strands(&events, true);
-        if let Some(tree_ids) = tree::subtree_ids(root_id, &strands) {
+        let full_root = crate::reference::resolve_strand_with_selection(
+            &canonical_strands,
+            root_id,
+            allow_selection,
+            current_max_offset,
+        )?;
+        if let Some(tree_ids) = tree::subtree_ids(&full_root, &canonical_strands) {
             entries.retain(|e| tree_ids.contains(&e.strand_id));
         }
     }
@@ -534,9 +578,15 @@ pub(crate) fn cmd_orient(
                 .as_deref()
                 .map(|t| format!(" [{}]", t))
                 .unwrap_or_default();
+            let slug_info = s
+                .slug
+                .as_deref()
+                .map(|slug| format!(" ({})", slug))
+                .unwrap_or_default();
             println!(
-                "  {}{}  {} entries | last_offset {}",
+                "  {}{}{}  {} entries | last_offset {}",
                 shorten(&s.id),
+                slug_info,
                 type_info,
                 s.entry_count,
                 s.last_offset
@@ -629,8 +679,13 @@ pub(crate) fn cmd_show(
     // target at all) default to the most recently active strand.
     let strand = match id {
         Some(id_str) => {
-            let full = find_strand(&events, id_str)
-                .ok_or_else(|| format!("strand {} not found", id_str))?;
+            let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+            let full = crate::reference::resolve_strand_with_selection(
+                &strands,
+                id_str,
+                !format_json,
+                current_max_offset,
+            )?;
             strands.iter().find(|s| s.id == full).unwrap()
         }
         None => {
@@ -664,9 +719,15 @@ pub(crate) fn cmd_show(
         return Ok(());
     }
 
+    let slug_info = strand
+        .slug
+        .as_deref()
+        .map(|slug| format!(" | slug: {}", slug))
+        .unwrap_or_default();
     println!(
-        "strand: {} | {} entries | state: {} | last_entry_offset: {}",
+        "strand: {}{} | {} entries | state: {} | last_entry_offset: {}",
         shorten(&strand.id),
+        slug_info,
         entry_count,
         canonical_state,
         strand.last_offset()
@@ -710,6 +771,9 @@ pub(crate) fn cmd_show(
             started.elapsed(),
             entry_count
         );
+        if let Err(e) = crate::reference::remember_last_touched_current(&strand.id) {
+            eprintln!("[tasktree] warning: {}", e);
+        }
         if skipped > 0 {
             return Err(corrupted_lines_error(skipped));
         }
@@ -782,6 +846,9 @@ pub(crate) fn cmd_show(
         entry_count,
         shown
     );
+    if let Err(e) = crate::reference::remember_last_touched_current(&strand.id) {
+        eprintln!("[tasktree] warning: {}", e);
+    }
     if skipped > 0 {
         return Err(corrupted_lines_error(skipped));
     }
@@ -808,11 +875,7 @@ pub(crate) fn cmd_show_entry(
     if format_json {
         let output = output::ShowEntryOutput {
             status: "ok",
-            entry_id: view.nodes[0]
-                .entry
-                .entry_id
-                .clone()
-                .unwrap_or_default(),
+            entry_id: view.nodes[0].entry.entry_id.clone().unwrap_or_default(),
             deref,
             nodes: view
                 .nodes
@@ -883,7 +946,12 @@ pub(crate) fn cmd_show_entry(
         let now = chrono::Utc::now();
         let total_chars: usize = view.nodes.iter().map(|n| n.entry.content.len()).sum();
         for node in &view.nodes {
-            let handle = node.entry.entry_id.as_deref().map(shorten).unwrap_or_default();
+            let handle = node
+                .entry
+                .entry_id
+                .as_deref()
+                .map(shorten)
+                .unwrap_or_default();
             if node.hop == 0 {
                 println!("entry: [{}]", handle);
             } else {
@@ -983,6 +1051,141 @@ pub(crate) fn cmd_show_entry(
     Ok(())
 }
 
+// ── Human picker ─────────────────────────────────────────
+
+pub(crate) fn cmd_pick(command: &str, print_id: bool, include_hidden: bool) -> Result<(), String> {
+    let path = ensure_journal()?;
+    let (events, _skipped) = read_events_lossy(&path);
+    let mut strands = projection::project_strands(&events, include_hidden);
+    strands.sort_by(|a, b| b.last_ts().cmp(a.last_ts()));
+    if strands.is_empty() {
+        return Err("no strands to pick".to_string());
+    }
+    let selected = pick_strand_id(&strands)?;
+    if print_id {
+        println!("{}", selected);
+        return Ok(());
+    }
+    match command {
+        "show" => cmd_show(Some(&selected), false, None, false, false, false, None),
+        "tree" => cmd_tree(&selected, None),
+        "depends" => cmd_depends(&selected, None),
+        "close" => crate::commands::write::cmd_close(&selected, None, None, false),
+        "reopen" => crate::commands::write::cmd_reopen(&selected, None, false),
+        "hide" => crate::commands::manage::cmd_hide(&selected, None, false, None),
+        "unhide" => crate::commands::manage::cmd_unhide(&selected, false),
+        other => Err(format!(
+            "pick command '{}' is unsupported; valid commands: show, tree, depends, close, reopen, hide, unhide, --print-id",
+            other
+        )),
+    }
+}
+
+fn pick_strand_id(strands: &[projection::ProjectedStrand]) -> Result<String, String> {
+    let lines: Vec<String> = strands
+        .iter()
+        .map(|strand| {
+            let slug = strand
+                .slug
+                .as_deref()
+                .map(|s| format!(" ({})", s))
+                .unwrap_or_default();
+            format!(
+                "{}\t{}{}\t{} entries\t{}",
+                strand.id,
+                shorten(&strand.id),
+                slug,
+                strand.log_count(),
+                truncate(strand.first_summary(), 80)
+            )
+        })
+        .collect();
+
+    let interactive = atty::is(atty::Stream::Stdin) && atty::is(atty::Stream::Stdout);
+    if !interactive {
+        return Err(
+            "pick requires an interactive TTY; use --id/--print-id from an interactive shell"
+                .to_string(),
+        );
+    }
+    if fzf_available() {
+        if let Some(selected) = pick_with_fzf(&lines)? {
+            return Ok(selected);
+        }
+        return Err("pick cancelled".to_string());
+    }
+    pick_with_menu(strands)
+}
+
+fn fzf_available() -> bool {
+    std::process::Command::new("fzf")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn pick_with_fzf(lines: &[String]) -> Result<Option<String>, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("fzf")
+        .arg("--with-nth=2..")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run fzf: {}", e))?;
+    {
+        let stdin = child.stdin.as_mut().ok_or("cannot open fzf stdin")?;
+        for line in lines {
+            writeln!(stdin, "{}", line).map_err(|e| format!("cannot feed fzf: {}", e))?;
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("cannot read fzf output: {}", e))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let selected =
+        String::from_utf8(output.stdout).map_err(|e| format!("fzf output was not UTF-8: {}", e))?;
+    Ok(selected
+        .lines()
+        .next()
+        .and_then(|line| line.split('\t').next())
+        .map(str::to_string))
+}
+
+fn pick_with_menu(strands: &[projection::ProjectedStrand]) -> Result<String, String> {
+    for (idx, strand) in strands.iter().enumerate() {
+        let slug = strand
+            .slug
+            .as_deref()
+            .map(|s| format!(" ({})", s))
+            .unwrap_or_default();
+        eprintln!(
+            "{}: {}{}  {} entries  {}",
+            idx + 1,
+            shorten(&strand.id),
+            slug,
+            strand.log_count(),
+            truncate(strand.first_summary(), 80)
+        );
+    }
+    eprint!("pick> ");
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| format!("cannot read selection: {}", e))?;
+    let index: usize = input
+        .trim()
+        .parse()
+        .map_err(|_| "selection must be a number".to_string())?;
+    if index == 0 || index > strands.len() {
+        return Err(format!("selection {} is out of range", index));
+    }
+    Ok(strands[index - 1].id.clone())
+}
+
 // ── Tree projection ─────────────────────────────────────
 
 pub(crate) fn cmd_tree(root_id: &str, format_json: Option<&str>) -> Result<(), String> {
@@ -990,7 +1193,14 @@ pub(crate) fn cmd_tree(root_id: &str, format_json: Option<&str>) -> Result<(), S
     let (events, _skipped) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
 
-    match tree::project_tree(root_id, &strands) {
+    let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+    let full_root = crate::reference::resolve_strand_with_selection(
+        &strands,
+        root_id,
+        format_json != Some("json"),
+        current_max_offset,
+    )?;
+    match tree::project_tree(&full_root, &strands) {
         Some(root) => {
             if format_json == Some("json") {
                 let output = output::TreeOutput::from(&root);
@@ -1000,7 +1210,7 @@ pub(crate) fn cmd_tree(root_id: &str, format_json: Option<&str>) -> Result<(), S
             }
         }
         None => {
-            return Err(format!("strand not found or ambiguous prefix: {}", root_id));
+            return Err(format!("strand not found: {}", root_id));
         }
     }
     Ok(())
@@ -1033,9 +1243,16 @@ pub(crate) fn cmd_depends(id: &str, format_json: Option<&str>) -> Result<(), Str
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
+    let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+    let full_id = crate::reference::resolve_strand_with_selection(
+        &strands,
+        id,
+        format_json != Some("json"),
+        current_max_offset,
+    )?;
     let graph = graph::StrandGraph::from_strands(&strands);
     let analysis = graph
-        .depends_analysis(id)
+        .depends_analysis(&full_id)
         .ok_or_else(|| format!("strand {} not found", id))?;
 
     if format_json == Some("json") {

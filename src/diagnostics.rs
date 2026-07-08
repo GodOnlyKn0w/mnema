@@ -56,7 +56,7 @@ static TOPICS: &[TopicInfo] = &[
   都在写后回显受影响线的卡片。
 
 JSON 形态（OrientStrand，写命令 result 字段 / orient active[]）：
-  - id:           全宽 strand id（64 hex 内容 hash，跨输出可直接 join）
+  - id / slug:    全宽 strand id；slug 为人类别名，可为 null，机器 join 仍用 id
   - strand_type:  线的类型，可为 null（task/dag/why/session）
   - entry_count:  日志条目计数
   - summary:      第一条日志截断到 70 字符
@@ -125,12 +125,12 @@ Marker 语义（一行一条）：
         name: "json",
         title: "JSON 形态索引——各读命令 --format json 的顶层字段",
         body: r#"show（StrandDetailOutput）：
-  id / hidden / summary / entry_count / status / state_marker / state_offset / last_entry_offset /
+  id / slug / hidden / summary / entry_count / status / state_marker / state_offset / last_entry_offset /
   edges / belongs_to_edges / depends_on_edges / strand_branch / events
   ※ events[].entry=日志行；last_entry_offset=下次 --seen-offset；belongs_to_edges=父 / depends_on_edges=阻塞者(F3)
 
 list（StrandListOutput.strands[]，StrandListItem）：
-  id / entry_count / first_summary / last_summary / hidden / strand_type /
+  id / slug / entry_count / first_summary / last_summary / hidden / strand_type /
   edges / belongs_to_edges / depends_on_edges / status / state_marker /
   state_offset / last_entry_ts / last_entry_offset
 
@@ -207,7 +207,6 @@ JSON 命名法：
   计数 = count 或 *_count（entry_count / closed_count / hidden_count）
   自身身份 = id；引用他者 = <noun>_id（如 search 的 strand_id）
   id / strand_id 一律全宽 64 hex 内容 hash，跨输出可 join
-  
 
 写命令三件套：写 journal 必收 --provenance、必有 --format json
 孪生、写后回显卡片（见 tasktree explain card）。
@@ -218,7 +217,8 @@ JSON 命名法：
 exit code：0 成功 / 1 命令执行失败 / 2 journal 不可读或损坏 / 3 解析或参数非法。
 
 永久豁免（点名豁免，防"看起来漏了"的二次猜测）：
-  doctor 子命令风格（doctor journal）；add/append 正文位置参数、--stdin、--file 已在 v2 迁移中移除
+  doctor 子命令风格（doctor journal）；pick（交互选择器；机器入口用显式 --id 或 pick --print-id）
+  add/append 正文位置参数、--stdin、--file 已在 v2 迁移中移除
   export --out <PATH>（主对象用旗标）；cutover-v2 --apply（journal maintenance）"#,
     },
 ];
@@ -479,6 +479,7 @@ mod tests {
                 id: "task".to_string(),
                 ts: ts.clone(),
                 strand_type: None,
+                slug: None,
             },
             Event::LogAppended {
                 id: "task".to_string(),
@@ -497,6 +498,7 @@ mod tests {
                 id: "parent_a".to_string(),
                 ts: ts.clone(),
                 strand_type: None,
+                slug: None,
             },
             Event::LogAppended {
                 id: "parent_a".to_string(),
@@ -515,6 +517,7 @@ mod tests {
                 id: "parent_b".to_string(),
                 ts: ts.clone(),
                 strand_type: None,
+                slug: None,
             },
             Event::LogAppended {
                 id: "parent_b".to_string(),
@@ -778,6 +781,7 @@ mod tests {
         use crate::output::OrientStrand;
         let sample = OrientStrand {
             id: "abc123".to_string(),
+            slug: None,
             strand_type: None,
             entry_count: 1,
             summary: "test".to_string(),
@@ -808,6 +812,7 @@ mod tests {
         // show → StrandDetailOutput
         let show_sample = StrandDetailOutput {
             id: "a".to_string(),
+            slug: None,
             hidden: false,
             summary: "s".to_string(),
             entry_count: 0,
@@ -833,6 +838,7 @@ mod tests {
         // list → StrandListItem
         let list_sample = StrandListItem {
             id: "a".to_string(),
+            slug: None,
             entry_count: 0,
             first_summary: "s".to_string(),
             last_summary: "s".to_string(),

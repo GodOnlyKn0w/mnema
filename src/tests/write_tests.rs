@@ -61,7 +61,16 @@ fn append_default_skips_closed_strand() {
     let closed = cmd_close(&closed_id, Some("done"), None, false);
     assert!(closed.is_ok(), "close failed: {:?}", closed);
 
-    let result = cmd_append(Some("lands on open"), None, false, false, None, None, None, None);
+    let result = cmd_append(
+        Some("lands on open"),
+        None,
+        false,
+        false,
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(result.is_ok());
 
     let path = ensure_journal().unwrap();
@@ -853,8 +862,16 @@ fn add_parent_missing_errors_without_creating_child() {
 #[test]
 fn add_empty_parent_errors() {
     let _env = setup();
-    let result =
-        cmd_add_with_parent(Some("child"), false, None, false, Some("  "), None, None, None);
+    let result = cmd_add_with_parent(
+        Some("child"),
+        false,
+        None,
+        false,
+        Some("  "),
+        None,
+        None,
+        None,
+    );
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("--parent cannot be empty"));
 }
@@ -1345,4 +1362,112 @@ fn close_with_reason_stores_it_in_content() {
         None
     });
     assert_eq!(bare.unwrap(), "close disposition=done");
+}
+
+#[test]
+fn add_slug_persists_and_rejects_hex_or_duplicate() {
+    let _env = setup();
+    cmd_add_with_parent_and_slug(
+        Some("slugged strand"),
+        false,
+        None,
+        false,
+        None,
+        None,
+        Some("human-1"),
+        None,
+        None,
+    )
+    .unwrap();
+    let events = read_events_lossy(&ensure_journal().unwrap()).0;
+    let strands = projection::project_strands(&events, true);
+    assert_eq!(strands[0].slug.as_deref(), Some("human-1"));
+
+    let hex = cmd_add_with_parent_and_slug(
+        Some("bad hex slug"),
+        false,
+        None,
+        false,
+        None,
+        None,
+        Some("deadbeef"),
+        None,
+        None,
+    );
+    assert!(hex.unwrap_err().contains("pure hex"));
+
+    let duplicate = cmd_add_with_parent_and_slug(
+        Some("duplicate slug"),
+        false,
+        None,
+        false,
+        None,
+        None,
+        Some("human-1"),
+        None,
+        None,
+    );
+    assert!(duplicate.unwrap_err().contains("already exists"));
+}
+
+#[test]
+fn rationale_strand_ambiguity_does_not_fallback_to_entry_hash() {
+    let _env = setup();
+    let events = vec![
+        Event::StrandCreated {
+            id: "aa111".to_string(),
+            ts: "2026-01-01T00:00:00Z".to_string(),
+            strand_type: None,
+            slug: None,
+        },
+        Event::LogAppended {
+            id: "aa111".to_string(),
+            ts: "2026-01-01T00:00:01Z".to_string(),
+            content: "first ambiguous strand".to_string(),
+            effect: None,
+            prev_entry_id: None,
+            entry_id: Some("aaentryfallback".to_string()),
+            refs: Vec::new(),
+            ref_: None,
+            append_id: None,
+            git: None,
+            provenance: None,
+        },
+        Event::StrandCreated {
+            id: "aa222".to_string(),
+            ts: "2026-01-01T00:00:02Z".to_string(),
+            strand_type: None,
+            slug: None,
+        },
+        Event::LogAppended {
+            id: "aa222".to_string(),
+            ts: "2026-01-01T00:00:03Z".to_string(),
+            content: "second ambiguous strand".to_string(),
+            effect: None,
+            prev_entry_id: None,
+            entry_id: Some("otherentry".to_string()),
+            refs: Vec::new(),
+            ref_: None,
+            append_id: None,
+            git: None,
+            provenance: None,
+        },
+    ];
+    append_events(&events).unwrap();
+
+    let result = cmd_add_with_parent_and_slug(
+        Some("derived"),
+        false,
+        None,
+        false,
+        None,
+        Some("aa"),
+        None,
+        None,
+        None,
+    );
+    let err = result.unwrap_err();
+    assert!(err.contains("ambiguous"), "{err}");
+    assert!(err.contains("aa111"));
+    assert!(err.contains("aa222"));
 }

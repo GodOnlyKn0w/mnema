@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone)]
 struct StrandInfo {
     id: String,
+    slug: Option<String>,
     summary: String,
     status: String,
     state_marker: Option<String>,
@@ -24,6 +25,7 @@ pub(crate) struct StrandGraph {
 #[derive(Debug, Clone)]
 pub struct TreeNode {
     pub id: String,
+    pub slug: Option<String>,
     pub summary: String,
     pub status: String,
     pub state_marker: Option<String>,
@@ -36,6 +38,7 @@ pub struct TreeNode {
 #[derive(Debug, Clone)]
 pub struct OrientForestNode {
     pub id: String,
+    pub slug: Option<String>,
     pub strand_type: Option<String>,
     pub entry_count: usize,
     pub summary: String,
@@ -89,6 +92,7 @@ impl StrandGraph {
         for s in strands {
             let info = StrandInfo {
                 id: s.id.clone(),
+                slug: s.slug.clone(),
                 summary: s.first_summary().to_string(),
                 status: s.state().to_string(),
                 state_marker: s.state_marker.clone(),
@@ -180,6 +184,7 @@ impl StrandGraph {
         visiting.remove(id);
         Some(TreeNode {
             id: info.id.clone(),
+            slug: info.slug.clone(),
             summary: info.summary.clone(),
             status: info.status.clone(),
             state_marker: info.state_marker.clone(),
@@ -337,6 +342,7 @@ fn orient_forest_from_strands(strands: &[&ProjectedStrand]) -> Vec<OrientForestN
                 s.id.clone(),
                 OrientForestNode {
                     id: s.id.clone(),
+                    slug: s.slug.clone(),
                     strand_type: s.strand_type.clone(),
                     entry_count: s.log_count(),
                     summary: s.first_summary().to_string(),
@@ -402,6 +408,7 @@ mod tests {
     ) -> ProjectedStrand {
         ProjectedStrand {
             id: id.to_string(),
+            slug: None,
             log: vec![LogEntry {
                 offset,
                 ts: format!("2026-01-01T00:00:{:02}Z", offset),

@@ -135,6 +135,7 @@ pub(crate) const ORIENT_PAUSE: &str = "pause（动手前停一下，是纪律不
 #[derive(Debug, Serialize, Clone)]
 pub struct OrientStrand {
     pub id: String,
+    pub slug: Option<String>,
     pub strand_type: Option<String>,
     pub entry_count: usize,
     pub summary: String,
@@ -152,6 +153,7 @@ impl From<&ProjectedStrand> for OrientStrand {
     fn from(s: &ProjectedStrand) -> Self {
         OrientStrand {
             id: s.id.clone(),
+            slug: s.slug.clone(),
             strand_type: s.strand_type.clone(),
             entry_count: s.log_count(),
             summary: truncate(s.first_summary(), 70),
@@ -179,6 +181,7 @@ impl From<&crate::graph::OrientForestNode> for OrientForestNode {
         OrientForestNode {
             card: OrientStrand {
                 id: node.id.clone(),
+                slug: node.slug.clone(),
                 strand_type: node.strand_type.clone(),
                 entry_count: node.entry_count,
                 summary: truncate(&node.summary, 70),
@@ -272,6 +275,7 @@ impl From<&crate::tree::TreeNode> for TreeOutput {
 #[derive(Debug, Serialize)]
 pub(crate) struct TreeNodeOutput {
     pub(crate) id: String,
+    pub(crate) slug: Option<String>,
     pub(crate) summary: String,
     pub(crate) status: String,
     pub(crate) state_marker: Option<String>,
@@ -285,6 +289,7 @@ impl From<&crate::tree::TreeNode> for TreeNodeOutput {
     fn from(node: &crate::tree::TreeNode) -> Self {
         TreeNodeOutput {
             id: node.id.clone(),
+            slug: node.slug.clone(),
             summary: node.summary.clone(),
             status: node.status.clone(),
             state_marker: node.state_marker.clone(),
@@ -348,6 +353,7 @@ pub(crate) struct AddOutput<'a> {
     pub(crate) id: String,
     pub(crate) status: &'static str,
     pub(crate) provenance: Option<&'a serde_json::Value>,
+    pub(crate) slug: Option<String>,
     pub(crate) parent_id: Option<String>,
     pub(crate) edge_type: Option<&'static str>,
     pub(crate) result: Option<OrientStrand>,
@@ -497,6 +503,7 @@ pub(crate) struct CutoverV2ReportOutput {
 #[derive(Debug, Serialize)]
 pub struct StrandListItem {
     pub id: String,
+    pub slug: Option<String>,
     pub entry_count: usize,
     pub first_summary: String,
     pub last_summary: String,
@@ -655,6 +662,7 @@ pub struct EventOutput {
 #[derive(Debug, Serialize)]
 pub struct StrandDetailOutput {
     pub id: String,
+    pub slug: Option<String>,
     pub hidden: bool,
     pub summary: String,
     pub entry_count: usize,
@@ -699,6 +707,7 @@ impl From<&ProjectedStrand> for StrandListItem {
     fn from(s: &ProjectedStrand) -> Self {
         StrandListItem {
             id: s.id.clone(),
+            slug: s.slug.clone(),
             entry_count: s.log_count(),
             first_summary: s.first_summary().to_string(),
             last_summary: s.last_summary().to_string(),
@@ -720,6 +729,7 @@ impl From<&ProjectedStrand> for StrandDetailOutput {
     fn from(s: &ProjectedStrand) -> Self {
         StrandDetailOutput {
             id: s.id.clone(),
+            slug: s.slug.clone(),
             hidden: s.hidden,
             summary: s.first_summary().to_string(),
             entry_count: s.log_count(),
