@@ -6,8 +6,8 @@
 //! ## Ownership
 //!
 //! This module is the **only** place snapshot generation logic lives.
-//! Implementations in `shuttle/` must call `tasktree snapshot` (CLI) or
-//! `tasktree_core::snapshot::generate_snapshot` (if lib crate) — they must
+//! Implementations in `shuttle/` must call `mnema snapshot` (CLI) or
+//! `mnema_core::snapshot::generate_snapshot` (if lib crate) — they must
 //! NOT reimplement the projection-to-snapshot mapping themselves.
 //!
 //! ## Dependencies

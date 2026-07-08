@@ -1,7 +1,7 @@
 //! Runtime diagnostic emitters.
 
 /// One emitted diagnostic: (code, one-line detail). The code resolves via
-/// `tasktree explain <code>`.
+/// `mnema explain <code>`.
 pub(crate) type EmittedDiag = (&'static str, String);
 
 /// Extract comparison tokens for W062 keyword matching: ASCII words of
@@ -316,8 +316,8 @@ pub(crate) fn check_w059_append_closed_strand(
     }
 
     let id = crate::util::shorten(&strand.id);
-    let add_from = format!("tasktree add --from {}", id);
-    let reopen = format!("tasktree reopen --id {}", id);
+    let add_from = format!("mnema add --from {}", id);
+    let reopen = format!("mnema reopen --id {}", id);
     Some(ClosedTargetWarning {
         code: "W059",
         detail: format!(
@@ -353,7 +353,7 @@ pub(crate) fn check_w076_seen_offset(
     }
     let gap = strand_last_offset - seen;
     let catch_up = format!(
-        "tasktree timeline --since-offset {} --links {}",
+        "mnema timeline --since-offset {} --links {}",
         seen,
         crate::util::shorten(strand_id)
     );

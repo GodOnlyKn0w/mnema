@@ -422,8 +422,8 @@ fn append_explicit_closed_strand_succeeds_and_json_carries_w059() {
         .expect("closed target warning must be carried on AppendOutcome");
     assert_eq!(warning.code, "W059");
     assert_eq!(warning.state, "closed:failed");
-    assert!(warning.detail.contains("tasktree add --from"));
-    assert!(warning.detail.contains("tasktree reopen --id"));
+    assert!(warning.detail.contains("mnema add --from"));
+    assert!(warning.detail.contains("mnema reopen --id"));
 
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
@@ -460,13 +460,13 @@ fn append_explicit_closed_strand_succeeds_and_json_carries_w059() {
         json["closed_target"]["add_from"]
             .as_str()
             .unwrap()
-            .contains("tasktree add --from")
+            .contains("mnema add --from")
     );
     assert!(
         json["closed_target"]["reopen"]
             .as_str()
             .unwrap()
-            .contains("tasktree reopen --id")
+            .contains("mnema reopen --id")
     );
     assert!(json["warnings"].as_array().unwrap().is_empty());
 }
@@ -516,7 +516,7 @@ fn append_open_strand_json_closed_target_is_null() {
 
 #[test]
 fn append_help_markers_are_writable() {
-    // The Append after_help now points to `tasktree explain markers` instead
+    // The Append after_help now points to `mnema explain markers` instead
     // of listing markers inline (L2 slim-down). The contract is now on the
     // markers topic body: every bracket marker in the body must be accepted
     // by validate_lifecycle_marker.

@@ -19,9 +19,9 @@ impl TestEnv {
     fn new() -> Self {
         let lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        let tasktree_dir = dir.path().join(".tasktree");
-        fs::create_dir_all(&tasktree_dir).unwrap();
-        let journal = tasktree_dir.join("journal.jsonl");
+        let mnema_dir = dir.path().join(".mnema");
+        fs::create_dir_all(&mnema_dir).unwrap();
+        let journal = mnema_dir.join("journal.jsonl");
         fs::write(&journal, "").unwrap();
         let prev_cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
@@ -47,20 +47,20 @@ pub(in crate::tests) fn setup() -> TestEnv {
     TestEnv::new()
 }
 
-pub(in crate::tests) fn with_tasktree_home<F: FnOnce() -> R, R>(
+pub(in crate::tests) fn with_mnema_home<F: FnOnce() -> R, R>(
     new_value: Option<&str>,
     f: F,
 ) -> R {
     let _env_lock = ENV_LOCK.lock().unwrap();
-    let prev = std::env::var("TASKTREE_HOME").ok();
+    let prev = std::env::var("MNEMA_HOME").ok();
     match new_value {
-        Some(v) => unsafe { std::env::set_var("TASKTREE_HOME", v) },
-        None => unsafe { std::env::remove_var("TASKTREE_HOME") },
+        Some(v) => unsafe { std::env::set_var("MNEMA_HOME", v) },
+        None => unsafe { std::env::remove_var("MNEMA_HOME") },
     }
     let result = f();
     match prev {
-        Some(v) => unsafe { std::env::set_var("TASKTREE_HOME", v) },
-        None => unsafe { std::env::remove_var("TASKTREE_HOME") },
+        Some(v) => unsafe { std::env::set_var("MNEMA_HOME", v) },
+        None => unsafe { std::env::remove_var("MNEMA_HOME") },
     }
     result
 }

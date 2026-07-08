@@ -54,7 +54,7 @@ fn substitute(tok: &str) -> String {
 }
 
 pub(in crate::tests) fn try_parse_example(line: &str) -> Result<(), String> {
-    let start = match line.find("tasktree ") {
+    let start = match line.find("mnema ") {
         Some(i) => i,
         None => return Ok(()),
     };

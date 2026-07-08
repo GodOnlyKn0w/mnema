@@ -3,8 +3,8 @@ use super::*;
 #[test]
 fn provenance_defaults_to_env_producer_when_set() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let prev = std::env::var("TASKTREE_PRODUCER").ok();
-    unsafe { std::env::set_var("TASKTREE_PRODUCER", "codex") };
+    let prev = std::env::var("MNEMA_PRODUCER").ok();
+    unsafe { std::env::set_var("MNEMA_PRODUCER", "codex") };
     assert_eq!(
         parse_provenance_arg(None).unwrap(),
         Some(serde_json::json!({ "producer": "codex" }))
@@ -15,24 +15,24 @@ fn provenance_defaults_to_env_producer_when_set() {
         Some(serde_json::json!({ "producer": "claude" }))
     );
     // Blank env → no default (treated as unset).
-    unsafe { std::env::set_var("TASKTREE_PRODUCER", "   ") };
+    unsafe { std::env::set_var("MNEMA_PRODUCER", "   ") };
     assert_eq!(parse_provenance_arg(None).unwrap(), None);
     match prev {
-        Some(v) => unsafe { std::env::set_var("TASKTREE_PRODUCER", v) },
-        None => unsafe { std::env::remove_var("TASKTREE_PRODUCER") },
+        Some(v) => unsafe { std::env::set_var("MNEMA_PRODUCER", v) },
+        None => unsafe { std::env::remove_var("MNEMA_PRODUCER") },
     }
 }
 
 #[test]
 fn test_resolve_journal_walkup_finds_parent() {
-    // TestEnv sets cwd to temp dir with .tasktree/ (the "project root").
+    // TestEnv sets cwd to temp dir with .mnema/ (the "project root").
     // Create a subdir and verify walk-up still finds the project journal.
     let env = setup();
     let subdir = env.path().join("subdir");
     fs::create_dir(&subdir).unwrap();
     let prev_cwd = std::env::current_dir().unwrap();
     std::env::set_current_dir(&subdir).unwrap();
-    let result = with_tasktree_home(None, || resolve_journal_dir());
+    let result = with_mnema_home(None, || resolve_journal_dir());
     std::env::set_current_dir(&prev_cwd).unwrap();
     let resolved = result.unwrap();
     // The resolved journal must be the project one, NOT a subdir one.
@@ -45,80 +45,80 @@ fn test_resolve_journal_walkup_finds_parent() {
 
 #[test]
 fn test_resolve_journal_no_journal_errors() {
-    // Set cwd to a temp dir with NO .tasktree/, no parent has one either.
+    // Set cwd to a temp dir with NO .mnema/, no parent has one either.
     let _lock = CWD_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let prev_cwd = std::env::current_dir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
-    let result = with_tasktree_home(None, || resolve_journal_dir());
+    let result = with_mnema_home(None, || resolve_journal_dir());
     std::env::set_current_dir(&prev_cwd).unwrap();
-    assert!(result.is_err(), "should error when no .tasktree/ found");
+    assert!(result.is_err(), "should error when no .mnema/ found");
     let err = result.unwrap_err();
     assert!(
-        err.contains(".tasktree/ not found"),
+        err.contains(".mnema/ not found"),
         "unexpected error: {}",
         err
     );
 }
 
 #[test]
-fn test_resolve_journal_tasktree_home_absolute() {
-    // TASKTREE_HOME pointing to a dir with .tasktree/ must win over walk-up.
+fn test_resolve_journal_mnema_home_absolute() {
+    // MNEMA_HOME pointing to a dir with .mnema/ must win over walk-up.
     let env = setup();
-    with_tasktree_home(Some(env.path().to_str().unwrap()), || {
+    with_mnema_home(Some(env.path().to_str().unwrap()), || {
         let resolved = resolve_journal_dir().unwrap();
         assert!(
             resolved.ends_with(JOURNAL_DIR),
-            "resolved should end with .tasktree, got {:?}",
+            "resolved should end with .mnema, got {:?}",
             resolved
         );
     });
 }
 
 #[test]
-fn test_resolve_journal_tasktree_home_missing_dir_errors() {
-    // TASKTREE_HOME pointing to a dir WITHOUT .tasktree/ must error.
+fn test_resolve_journal_mnema_home_missing_dir_errors() {
+    // MNEMA_HOME pointing to a dir WITHOUT .mnema/ must error.
     let _lock = CWD_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    with_tasktree_home(Some(dir.path().to_str().unwrap()), || {
+    with_mnema_home(Some(dir.path().to_str().unwrap()), || {
         let result = resolve_journal_dir();
         assert!(
             result.is_err(),
-            "should error when TASKTREE_HOME dir has no .tasktree/"
+            "should error when MNEMA_HOME dir has no .mnema/"
         );
         let err = result.unwrap_err();
         assert!(
-            err.contains("TASKTREE_HOME"),
-            "error must mention TASKTREE_HOME: {}",
+            err.contains("MNEMA_HOME"),
+            "error must mention MNEMA_HOME: {}",
             err
         );
     });
 }
 
 #[test]
-fn test_resolve_journal_tasktree_home_relative() {
-    // Relative TASKTREE_HOME must resolve against cwd.
+fn test_resolve_journal_mnema_home_relative() {
+    // Relative MNEMA_HOME must resolve against cwd.
     let env = setup();
     let dir_name = env.path().file_name().unwrap().to_str().unwrap();
     let prev_cwd = std::env::current_dir().unwrap();
     std::env::set_current_dir(env.path().parent().unwrap()).unwrap();
-    let result = with_tasktree_home(Some(dir_name), || resolve_journal_dir());
+    let result = with_mnema_home(Some(dir_name), || resolve_journal_dir());
     std::env::set_current_dir(&prev_cwd).unwrap();
     assert!(
         result.is_ok(),
-        "relative TASKTREE_HOME should resolve: {:?}",
+        "relative MNEMA_HOME should resolve: {:?}",
         result
     );
 }
 
 #[test]
 fn test_resolve_journal_walkup_stops_at_root() {
-    // Walk-up must terminate (not infinite loop) even when no .tasktree/ exists.
+    // Walk-up must terminate (not infinite loop) even when no .mnema/ exists.
     let _lock = CWD_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let prev_cwd = std::env::current_dir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
-    let result = with_tasktree_home(None, || resolve_journal_dir());
+    let result = with_mnema_home(None, || resolve_journal_dir());
     std::env::set_current_dir(&prev_cwd).unwrap();
     assert!(result.is_err(), "should error, not infinite loop");
 }
@@ -127,18 +127,18 @@ fn test_resolve_journal_walkup_stops_at_root() {
 // -C / --chdir global flag tests
 // ─────────────────────────────────────────────────────────────────
 
-// -C parses correctly from ['tasktree', '-C', 'X', 'orient']
+// -C parses correctly from ['mnema', '-C', 'X', 'orient']
 
 #[test]
 fn test_ensure_journal_uses_resolver() {
     // After refactor, ensure_journal must go through resolve_journal_dir().
-    // Smoke test: from a subdir, it returns a path inside the project .tasktree/.
+    // Smoke test: from a subdir, it returns a path inside the project .mnema/.
     let env = setup();
     let subdir = env.path().join("nested").join("deeper");
     fs::create_dir_all(&subdir).unwrap();
     let prev_cwd = std::env::current_dir().unwrap();
     std::env::set_current_dir(&subdir).unwrap();
-    let path = with_tasktree_home(None, || ensure_journal());
+    let path = with_mnema_home(None, || ensure_journal());
     std::env::set_current_dir(&prev_cwd).unwrap();
     let path = path.unwrap();
     assert!(
@@ -147,8 +147,8 @@ fn test_ensure_journal_uses_resolver() {
         path
     );
     assert!(
-        path.parent().unwrap().file_name().unwrap() == ".tasktree",
-        "parent must be .tasktree/, got {:?}",
+        path.parent().unwrap().file_name().unwrap() == ".mnema",
+        "parent must be .mnema/, got {:?}",
         path.parent()
     );
 }

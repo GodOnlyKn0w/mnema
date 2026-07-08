@@ -184,7 +184,7 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         provenance: Option<serde_json::Value>,
     },
-    /// Explicit close event written by `tasktree close`.
+    /// Explicit close event written by `mnema close`.
     /// This is the only event type that changes a strand's lifecycle state to closed.
     /// `disposition` is one of: done, failed, cancelled, merged, verified.
     #[serde(rename = "strand_closed")]
@@ -195,7 +195,7 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         provenance: Option<serde_json::Value>,
     },
-    /// Explicit reopen event written by `tasktree reopen`.
+    /// Explicit reopen event written by `mnema reopen`.
     /// Moves the strand back to open/registered state.
     #[serde(rename = "strand_reopened")]
     StrandReopened {
@@ -634,7 +634,7 @@ pub fn make_checkpoint(
 // Event factories below and command-layer append requests must go through
 // them; nothing else spells the content templates.
 
-/// Valid close dispositions accepted by `tasktree close --as <DISPOSITION>`.
+/// Valid close dispositions accepted by `mnema close --as <DISPOSITION>`.
 pub const CLOSE_DISPOSITIONS: &[&str] = &["done", "failed", "cancelled", "merged", "verified"];
 
 pub(crate) fn link_entry_parts(target_id: &str, edge_type: &str) -> (String, EntryEffect) {

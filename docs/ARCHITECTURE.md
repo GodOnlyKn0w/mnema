@@ -1,8 +1,8 @@
-# ARCHITECTURE: tasktree-core
+# ARCHITECTURE: mnema-core
 
 ## Overview
 
-tasktree is a local Rust CLI for durable work memory. All durable changes are appended as events to a journal; every read path rebuilds derived views from that event stream instead of treating cached state as source of truth.
+mnema is a local Rust CLI for durable work memory. All durable changes are appended as events to a journal; every read path rebuilds derived views from that event stream instead of treating cached state as source of truth.
 
 The target architecture has four modules. Dependencies point outward from durable facts to derived views to public contracts to CLI orchestration.
 
@@ -93,7 +93,7 @@ Contract Surface maps projection outputs to DTOs. It may map and preserve compat
 
 CLI grammar, help text, text rendering, and exit-code policy do not define durable facts. They may call core modules, but Journal Core and Projection Core do not depend on CLI syntax or stdout/stderr behavior.
 
-Slug durability and selection cache state have different ownership. A slug is a human alias for a strand and must be represented in the journal/projection path if it is meant to survive clone, backup, and later sessions. By contrast, `@last` and `@1`/`@2` are CLI-local selection caches under `.tasktree/`: they are directory-level shared state, not per-agent cursors, so concurrent writers may overwrite them. They are allowed to be stale, missing, or corrupt, and consumers must fail closed instead of guessing. Projection Core must not consume the selection cache.
+Slug durability and selection cache state have different ownership. A slug is a human alias for a strand and must be represented in the journal/projection path if it is meant to survive clone, backup, and later sessions. By contrast, `@last` and `@1`/`@2` are CLI-local selection caches under `.mnema/`: they are directory-level shared state, not per-agent cursors, so concurrent writers may overwrite them. They are allowed to be stale, missing, or corrupt, and consumers must fail closed instead of guessing. Projection Core must not consume the selection cache.
 
 Audit findings are projections. The audit pass derives findings from events; diagnostic catalog/explain output belongs to the public contract surface; command-specific presentation and exit behavior belong to the CLI Adapter.
 

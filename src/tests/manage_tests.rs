@@ -715,8 +715,8 @@ fn cutover_v2_certificate_detects_tampered_v1_archive() {
 
     cmd_cutover_v2(true, None, None, false).unwrap();
 
-    let tasktree_dir = env.path().join(".tasktree");
-    let archive = tasktree_dir.join("journal.v1.jsonl");
+    let mnema_dir = env.path().join(".mnema");
+    let archive = mnema_dir.join("journal.v1.jsonl");
     fs::write(&archive, "tampered\n").unwrap();
 
     let doctor_failed = crate::commands::doctor::cmd_doctor_journal().unwrap();
@@ -768,13 +768,13 @@ fn cutover_v2_dry_run_does_not_rewrite_journal() {
     assert_eq!(fs::read_to_string(&journal).unwrap(), before);
     assert!(
         !env.path()
-            .join(".tasktree")
+            .join(".mnema")
             .join("journal.v1.jsonl")
             .exists()
     );
     assert!(
         !env.path()
-            .join(".tasktree")
+            .join(".mnema")
             .join("migration-v1-to-v2.json")
             .exists()
     );
@@ -842,10 +842,10 @@ fn cutover_v2_apply_archives_v1_and_imports_pure_v2_journal() {
 
     cmd_cutover_v2(true, None, None, false).unwrap();
 
-    let tasktree_dir = env.path().join(".tasktree");
-    assert!(tasktree_dir.join("journal.v1.jsonl").exists());
-    assert!(tasktree_dir.join("migration-v1-to-v2.json").exists());
-    let certificate_path = tasktree_dir.join("migration-v1-to-v2.certificate.json");
+    let mnema_dir = env.path().join(".mnema");
+    assert!(mnema_dir.join("journal.v1.jsonl").exists());
+    assert!(mnema_dir.join("migration-v1-to-v2.json").exists());
+    let certificate_path = mnema_dir.join("migration-v1-to-v2.certificate.json");
     assert!(certificate_path.exists());
     let certificate: CutoverV2Certificate =
         serde_json::from_str(&fs::read_to_string(&certificate_path).unwrap()).unwrap();

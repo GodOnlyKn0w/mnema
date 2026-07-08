@@ -33,8 +33,8 @@ impl JournalAppendOutcome {
         }
     }
 }
-pub(crate) const JOURNAL_DIR: &str = ".tasktree";
-pub(crate) const JOURNAL_FILE: &str = ".tasktree/journal.jsonl";
+pub(crate) const JOURNAL_DIR: &str = ".mnema";
+pub(crate) const JOURNAL_FILE: &str = ".mnema/journal.jsonl";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JournalParseDiagnostic {
@@ -66,15 +66,15 @@ impl JournalRead {
 }
 
 /// Resolve the journal directory with priority:
-///   1. TASKTREE_HOME env var (explicit override; must contain .tasktree/)
-///   2. Walk-up from cwd: nearest ancestor containing .tasktree/
+///   1. MNEMA_HOME env var (explicit override; must contain .mnema/)
+///   2. Walk-up from cwd: nearest ancestor containing .mnema/
 ///   3. Error if neither found (no silent fallback)
 ///
 /// Walk-up enables shared journal across git worktrees: any worktree cwd
-/// walk-ups to the project root .tasktree/. See architecture.md s15.7.
+/// walk-ups to the project root .mnema/. See architecture.md s15.7.
 pub(crate) fn resolve_journal_dir() -> Result<PathBuf, String> {
     // 1. Explicit override
-    if let Ok(home) = std::env::var("TASKTREE_HOME") {
+    if let Ok(home) = std::env::var("MNEMA_HOME") {
         let p = PathBuf::from(&home);
         let resolved = if p.is_absolute() {
             p
@@ -86,7 +86,7 @@ pub(crate) fn resolve_journal_dir() -> Result<PathBuf, String> {
         let journal = resolved.join(JOURNAL_DIR);
         if !journal.is_dir() {
             return Err(format!(
-                "TASKTREE_HOME={} does not contain {}",
+                "MNEMA_HOME={} does not contain {}",
                 resolved.display(),
                 JOURNAL_DIR
             ));
@@ -103,7 +103,7 @@ pub(crate) fn resolve_journal_dir() -> Result<PathBuf, String> {
         }
         if !current.pop() {
             return Err(format!(
-                "{}/ not found in cwd or any parent directory. Run tasktree init in project root.",
+                "{}/ not found in cwd or any parent directory. Run mnema init in project root.",
                 JOURNAL_DIR
             ));
         }
@@ -114,7 +114,7 @@ pub(crate) fn ensure_journal() -> Result<PathBuf, String> {
     Ok(resolve_journal_dir()?.join("journal.jsonl"))
 }
 
-/// Return path to .tasktree/journal.lock (dedicated lock file, not the journal itself).
+/// Return path to .mnema/journal.lock (dedicated lock file, not the journal itself).
 pub(crate) fn journal_lock_path() -> Result<PathBuf, String> {
     Ok(resolve_journal_dir()?.join("journal.lock"))
 }
@@ -1084,7 +1084,7 @@ pub(crate) fn apply_cutover_v2(
             schema: "tasktree-v2-cutover-certificate-v1".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
-            tool_commit: env!("TASKTREE_COMMIT").to_string(),
+            tool_commit: env!("MNEMA_COMMIT").to_string(),
             source_journal: journal_path.display().to_string(),
             archive_journal: archive_path.display().to_string(),
             target_journal: journal_path.display().to_string(),

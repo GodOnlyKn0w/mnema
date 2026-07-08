@@ -6,7 +6,7 @@ use crate::util::shorten;
 /// The card printer used by write commands. Callers supply the state
 /// string directly so we avoid re-projecting a second time.
 // Card echo goes to stderr: stdout is the value (capturable by
-// `ID=$(tasktree add ...)`), stderr is the narration — same split as the
+// `ID=$(mnema add ...)`), stderr is the narration — same split as the
 // perf footers. JSON mode is unaffected (result field on stdout).
 pub(crate) fn print_card_with_state(card: &output::OrientStrand, state: &str) {
     print_handle_line(card, state);

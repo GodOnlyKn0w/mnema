@@ -335,7 +335,7 @@ fn render_doctor_report(path: &std::path::Path, report: &diagnostics::DoctorJour
         println!("    (none)");
     } else {
         for (code, detail) in &report.audit.diagnostics {
-            println!("    {} {}  (tasktree explain {})", code, detail, code);
+            println!("    {} {}  (mnema explain {})", code, detail, code);
         }
     }
 }

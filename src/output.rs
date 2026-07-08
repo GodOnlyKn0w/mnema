@@ -117,19 +117,19 @@ impl<'a> ExplainUnknownOutput<'a> {
             input,
             error: format!("unknown code or topic: {}", input),
             available_topics,
-            hint: "diagnostic codes: tasktree explain W062 etc",
+            hint: "diagnostic codes: mnema explain W062 etc",
         }
     }
 }
 // ── orient --format json ───────────────────────────────────
 
 /// Orient remind line: the operating loop surfaced by orient outputs.
-pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → echo \"[decision] ...\" | tasktree append --id <ID> | new matter → echo \"<summary>\" | tasktree add | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | read/extract → --format json | jq（id/offset/status，非文本切割）| more → tasktree --help";
+pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → echo \"[decision] ...\" | mnema append --id <ID> | new matter → echo \"<summary>\" | mnema add | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | read/extract → --format json | jq（id/offset/status，非文本切割）| more → mnema --help";
 
 /// Pause guidance — the one place it can live (CORPUS §8): the tool can't stop
 /// the irreversible moment and a cold-start LLM won't go looking for it, so its
 /// full text rides on orient. Pause is discipline, not a gate.
-pub(crate) const ORIENT_PAUSE: &str = "pause（动手前停一下，是纪律不是关卡）：不可逆或收口状态的动作前，先 tasktree checkpoint --id <ID> --action \"<为什么>\" 留一条自省痕——工具拦不住动作本身，只让『停一下』留下痕迹。判据：这一步撤得回吗？撤不回，先 pause。";
+pub(crate) const ORIENT_PAUSE: &str = "pause（动手前停一下，是纪律不是关卡）：不可逆或收口状态的动作前，先 mnema checkpoint --id <ID> --action \"<为什么>\" 留一条自省痕——工具拦不住动作本身，只让『停一下』留下痕迹。判据：这一步撤得回吗？撤不回，先 pause。";
 
 /// One active strand in the orient menu.
 #[derive(Debug, Serialize, Clone)]
@@ -160,7 +160,7 @@ impl From<&ProjectedStrand> for OrientStrand {
             last_entry: truncate(s.last_summary(), 70),
             last_offset: s.last_offset(),
             catch_up: format!(
-                "tasktree show --id {} --tail 8",
+                "mnema show --id {} --tail 8",
                 crate::util::shorten(&s.id)
             ),
             lifecycle: s.state().to_string(),
@@ -188,7 +188,7 @@ impl From<&crate::graph::OrientForestNode> for OrientForestNode {
                 last_entry: truncate(&node.last_entry, 70),
                 last_offset: node.last_offset,
                 catch_up: format!(
-                    "tasktree show --id {} --tail 8",
+                    "mnema show --id {} --tail 8",
                     crate::util::shorten(&node.id)
                 ),
                 lifecycle: node.lifecycle.clone(),

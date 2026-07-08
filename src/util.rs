@@ -30,11 +30,11 @@ pub(crate) fn parse_deadline_by(content: &str) -> Option<chrono::DateTime<chrono
         .map(|dt| chrono::DateTime::from_naive_utc_and_offset(dt, chrono::Utc))
 }
 
-/// Default provenance from the `TASKTREE_PRODUCER` env var (per-session agent
+/// Default provenance from the `MNEMA_PRODUCER` env var (per-session agent
 /// identity), applied when no explicit `--provenance` is passed. Returns `None`
 /// if the var is unset or blank. Explicit `--provenance` always wins.
 pub(crate) fn env_producer_provenance() -> Option<serde_json::Value> {
-    let producer = std::env::var("TASKTREE_PRODUCER").ok()?;
+    let producer = std::env::var("MNEMA_PRODUCER").ok()?;
     let producer = producer.trim();
     if producer.is_empty() {
         None
@@ -44,7 +44,7 @@ pub(crate) fn env_producer_provenance() -> Option<serde_json::Value> {
 }
 
 /// Parse a `--provenance` argument. Must be a JSON object when present.
-/// Returns the `TASKTREE_PRODUCER` env default for `None` input (or `None` if
+/// Returns the `MNEMA_PRODUCER` env default for `None` input (or `None` if
 /// unset); `Err` for malformed JSON or non-object shapes.
 pub(crate) fn parse_provenance_arg(raw: Option<&str>) -> Result<Option<serde_json::Value>, String> {
     match raw {
@@ -78,7 +78,7 @@ pub(crate) fn read_stdin_content() -> Result<String, String> {
 
 /// Read an optional note from stdin: `None` when stdin is a terminal (no pipe)
 /// or the piped content is blank. Used for close/reopen reasons, which are
-/// optional — a bare `tasktree close --id X` (no pipe) must still work.
+/// optional — a bare `mnema close --id X` (no pipe) must still work.
 pub(crate) fn read_stdin_if_piped() -> Option<String> {
     if atty::is(atty::Stream::Stdin) {
         return None;

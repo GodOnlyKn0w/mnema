@@ -326,7 +326,7 @@ pub(crate) fn cmd_add_with_parent_and_slug(
             print_card_with_state(&card, &state);
         }
         if let Err(e) = crate::reference::remember_last_touched_current(&id) {
-            eprintln!("[tasktree] warning: {}", e);
+            eprintln!("[mnema] warning: {}", e);
         }
     }
     Ok(())
@@ -547,7 +547,7 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
             let mut msg = e;
             if id == "-" {
                 msg.push_str(
-                    ". If you meant to pipe content from stdin, use:\n  echo \"...\" | tasktree append --id <id>",
+                    ". If you meant to pipe content from stdin, use:\n  echo \"...\" | mnema append --id <id>",
                 );
             }
             msg
@@ -633,14 +633,14 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
             print_card_with_state(card, state);
         }
         if let Err(e) = crate::reference::remember_last_touched_current(&outcome.strand_id) {
-            eprintln!("[tasktree] warning: {}", e);
+            eprintln!("[mnema] warning: {}", e);
         }
         return;
     }
 
     if let Some(warning) = &outcome.marker_warning {
         eprintln!(
-            "W073: unknown marker {} — did you mean {}? (tasktree explain markers)",
+            "W073: unknown marker {} — did you mean {}? (mnema explain markers)",
             warning.marker, warning.suggestion
         );
     }
@@ -648,17 +648,17 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
     if outcome.closing_marker_warning {
         eprintln!(
             "W074: [done]/[failed]/[cancelled]/[merged]/[verified] are annotations — \
-            they no longer close the strand. Use: tasktree close --id {} (tasktree explain W074)",
+            they no longer close the strand. Use: mnema close --id {} (mnema explain W074)",
             shorten(&outcome.strand_id)
         );
     }
 
     if let Some(w) = &outcome.closed_target_warning {
-        eprintln!("{}: {} (tasktree explain {})", w.code, w.detail, w.code);
+        eprintln!("{}: {} (mnema explain {})", w.code, w.detail, w.code);
     }
 
     if let Some(w) = &outcome.seen_warning {
-        eprintln!("{}: {} (tasktree explain {})", w.code, w.detail, w.code);
+        eprintln!("{}: {} (mnema explain {})", w.code, w.detail, w.code);
     }
 
     if format == Some("json") {
@@ -702,7 +702,7 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
             println!("appended to {}{}", shorten(&outcome.strand_id), prod);
         }
         if let Err(e) = crate::reference::remember_last_touched_current(&outcome.strand_id) {
-            eprintln!("[tasktree] warning: {}", e);
+            eprintln!("[mnema] warning: {}", e);
         }
     }
 }
@@ -1078,7 +1078,7 @@ pub(crate) fn plan_checkpoint(
 
     let catch_up = if journal_delta > 0 {
         Some(format!(
-            "tasktree timeline --since-offset {} --links {}",
+            "mnema timeline --since-offset {} --links {}",
             strand_last_offset,
             shorten(&strand.id)
         ))
@@ -1234,11 +1234,11 @@ pub(crate) fn render_checkpoint_outcome(outcome: &CheckpointOutcome, format_json
         println!("  [{}]{} {}", &entry.ts[..19], id_str, entry.content);
     }
     for (code, detail) in &plan.warning_lines {
-        println!("  {} {}  (tasktree explain {})", code, detail, code);
+        println!("  {} {}  (mnema explain {})", code, detail, code);
     }
     if plan.diagnostics_count > 0 {
         println!(
-            "diagnostics: {} warning(s) — run tasktree doctor journal",
+            "diagnostics: {} warning(s) — run mnema doctor journal",
             plan.diagnostics_count
         );
     }

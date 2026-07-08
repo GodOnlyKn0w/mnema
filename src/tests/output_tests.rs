@@ -311,7 +311,7 @@ fn handles_card_id_is_legal_prefix() {
         !card.catch_up.contains('\u{2026}') && !card.catch_up.contains("..."),
         "catch_up must not contain truncation marker"
     );
-    try_parse_example(&card.catch_up).expect("card.catch_up must be a parseable tasktree command");
+    try_parse_example(&card.catch_up).expect("card.catch_up must be a parseable mnema command");
 
     // last_offset: must equal the projected strand's real last_offset
     assert_eq!(
@@ -379,7 +379,7 @@ fn handles_orient_text_complete() {
             "catch_up must not be truncated"
         );
         try_parse_example(&card.catch_up)
-            .expect("orient catch_up must parse as a tasktree command");
+            .expect("orient catch_up must parse as a mnema command");
         // The embedded handle is the short prefix, not the full 64-hex hash:
         // human-facing views spend prefixes, resolution accepts them.
         assert!(
@@ -579,13 +579,13 @@ fn handles_diag_details_parse() {
             }
         }
 
-        // W070/W071: details contain no tasktree commands (catalog confirms
+        // W070/W071: details contain no mnema commands (catalog confirms
         // their recovery.executable is false). We verify no false-positive parse attempt.
         // (No try_parse_example call here — the detail strings are prose, not commands.)
         if *code == "W070" || *code == "W071" {
             assert!(
-                !detail.contains("tasktree "),
-                "W070/W071 detail must not embed a tasktree command: '{}'",
+                !detail.contains("mnema "),
+                "W070/W071 detail must not embed a mnema command: '{}'",
                 detail
             );
         }
@@ -602,7 +602,7 @@ fn handles_diag_details_parse() {
 //   orient --format json (via orient output) → OrientStrand.id = shorten(full id) = 12 chars
 //   search --format json → SearchMatch.strand_id = full id
 //
-// All forms are legally usable as tasktree --id arguments (prefix match
+// All forms are legally usable as mnema --id arguments (prefix match
 // or exact match). Neither form may contain '…'.
 
 #[test]
@@ -814,7 +814,7 @@ fn handles_checkpoint_handle_fields() {
         last
     };
     let expected_catch_up = format!(
-        "tasktree timeline --since-offset {} --links {}",
+        "mnema timeline --since-offset {} --links {}",
         pre_cp_offset,
         shorten(&id_a)
     );

@@ -332,7 +332,7 @@ pub(crate) fn cmd_export(out: &str) -> Result<(), String> {
         "exported_at": chrono::Utc::now().to_rfc3339(),
         "journal_lines": line_count,
         "head_at_export": "",
-        "source": "tasktree export"
+        "source": "mnema export"
     });
 
     let mut file = std::fs::File::create(&out_path)
@@ -423,7 +423,7 @@ pub(crate) fn cmd_cutover_v2(
         println!("  anchors: {}", report.anchor_count);
         println!("  unresolved_refs: {}", report.unresolved_ref_count);
         if !apply {
-            println!("  apply with: tasktree cutover-v2 --apply");
+            println!("  apply with: mnema cutover-v2 --apply");
         }
     }
 

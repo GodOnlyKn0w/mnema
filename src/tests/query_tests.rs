@@ -28,7 +28,7 @@ fn orient_menu_shows_active_folds_closed() {
     assert_eq!(
         entry.catch_up,
         format!(
-            "tasktree show --id {} --tail 8",
+            "mnema show --id {} --tail 8",
             crate::util::shorten(&open_id)
         )
     );
@@ -377,7 +377,7 @@ fn orient_tree_json_shape_is_nested() {
     assert!(parsed["remind"].is_string(), "remind must be present");
 }
 
-// orient --tree: parse check — `tasktree orient --tree` is a valid CLI invocation.
+// orient --tree: parse check — `mnema orient --tree` is a valid CLI invocation.
 
 #[test]
 fn tree_nests_belongs_to_child_under_parent() {
@@ -616,7 +616,7 @@ fn export_creates_file_with_metadata_header() {
 
     let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(meta["type"], "export_metadata");
-    assert_eq!(meta["source"], "tasktree export");
+    assert_eq!(meta["source"], "mnema export");
     assert!(meta["journal_lines"].as_u64().unwrap() > 0);
 }
 
@@ -626,8 +626,8 @@ fn export_creates_file_with_metadata_header() {
 // ..."  /  ZH: "cannot read journal: 系统找不到指定的文件。 ..."),
 // so we assert on the stable prefix only, not the full message.
 //
-// Also: this test uses an isolated temp dir + `TASKTREE_HOME` (via
-// `with_tasktree_home`) so it cannot pollute the shared test
+// Also: this test uses an isolated temp dir + `MNEMA_HOME` (via
+// `with_mnema_home`) so it cannot pollute the shared test
 // environment. We never `remove_file` on a journal another test
 // might be using, and we never panic while holding `CWD_LOCK` (the
 // assertion below is a single guarded check, not a multi-step
@@ -636,16 +636,16 @@ fn export_creates_file_with_metadata_header() {
 #[test]
 fn export_no_journal_returns_error() {
     let dir = tempfile::tempdir().unwrap();
-    // Create `.tasktree/` but DO NOT create `journal.jsonl` inside it.
+    // Create `.mnema/` but DO NOT create `journal.jsonl` inside it.
     // `resolve_journal_dir` succeeds (it only needs the dir to exist);
     // `cmd_export` then fails at the actual `std::fs::read` step
     // because the journal file is missing. This mirrors the user's
-    // experience: a project where `.tasktree/` exists but no journal
-    // has been written yet (e.g. first run after `tasktree init`).
-    let tasktree = dir.path().join(".tasktree");
-    std::fs::create_dir_all(&tasktree).unwrap();
+    // experience: a project where `.mnema/` exists but no journal
+    // has been written yet (e.g. first run after `mnema init`).
+    let mnema = dir.path().join(".mnema");
+    std::fs::create_dir_all(&mnema).unwrap();
     let out = dir.path().join("nojournal_export.jsonl");
-    with_tasktree_home(Some(dir.path().to_str().unwrap()), || {
+    with_mnema_home(Some(dir.path().to_str().unwrap()), || {
         let result = cmd_export(out.to_str().unwrap());
         let err = result.expect_err("cmd_export must return Err when no journal exists");
         assert!(
@@ -1017,7 +1017,7 @@ fn json_list_does_not_write_selection_cache() {
     cmd_list(false, None, None, None, None, None, None, None, true).unwrap();
     assert!(
         !env.path()
-            .join(".tasktree")
+            .join(".mnema")
             .join("selection-state.json")
             .exists()
     );

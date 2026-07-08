@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn chdir_flag_parses_before_subcommand() {
     use clap::CommandFactory;
-    let result = Cli::command().try_get_matches_from(["tasktree", "-C", "/some/dir", "orient"]);
+    let result = Cli::command().try_get_matches_from(["mnema", "-C", "/some/dir", "orient"]);
     assert!(result.is_ok(), "'-C DIR orient' must parse: {:?}", result);
 }
 
@@ -13,7 +13,7 @@ fn chdir_flag_parses_before_subcommand() {
 fn chdir_longform_parses() {
     use clap::CommandFactory;
     let result =
-        Cli::command().try_get_matches_from(["tasktree", "--chdir", "/some/dir", "orient"]);
+        Cli::command().try_get_matches_from(["mnema", "--chdir", "/some/dir", "orient"]);
     assert!(result.is_ok(), "--chdir long form must parse: {:?}", result);
 }
 
@@ -22,7 +22,7 @@ fn chdir_longform_parses() {
 #[test]
 fn chdir_global_after_subcommand_parses() {
     use clap::CommandFactory;
-    let result = Cli::command().try_get_matches_from(["tasktree", "orient", "-C", "/some/dir"]);
+    let result = Cli::command().try_get_matches_from(["mnema", "orient", "-C", "/some/dir"]);
     assert!(
         result.is_ok(),
         "'-C' after subcommand (global) must parse: {:?}",
@@ -30,20 +30,20 @@ fn chdir_global_after_subcommand_parses() {
     );
 }
 
-// -C pointing at a real .tasktree dir resolves journal from unrelated cwd.
+// -C pointing at a real .mnema dir resolves journal from unrelated cwd.
 
 #[test]
 fn chdir_resolves_journal_from_foreign_cwd() {
-    // env has .tasktree/ in its temp dir; we set cwd to a different temp dir
-    // (no .tasktree/), then set_current_dir to env path, and resolve succeeds.
-    let env = setup(); // cwd is now env.path() with .tasktree/
+    // env has .mnema/ in its temp dir; we set cwd to a different temp dir
+    // (no .mnema/), then set_current_dir to env path, and resolve succeeds.
+    let env = setup(); // cwd is now env.path() with .mnema/
     let foreign = tempfile::tempdir().unwrap();
-    // Move cwd to the foreign dir (no .tasktree/)
+    // Move cwd to the foreign dir (no .mnema/)
     let prev = std::env::current_dir().unwrap();
     std::env::set_current_dir(foreign.path()).unwrap();
     // Simulate what -C does: set_current_dir to the project root
     std::env::set_current_dir(env.path()).unwrap();
-    let result = with_tasktree_home(None, || resolve_journal_dir());
+    let result = with_mnema_home(None, || resolve_journal_dir());
     std::env::set_current_dir(&prev).unwrap();
     assert!(
         result.is_ok(),
@@ -123,7 +123,7 @@ fn reversed_positional_append_is_no_longer_supported() {
 #[test]
 fn orient_tree_flag_parses() {
     use clap::CommandFactory;
-    let result = Cli::command().try_get_matches_from(["tasktree", "orient", "--tree"]);
+    let result = Cli::command().try_get_matches_from(["mnema", "orient", "--tree"]);
     assert!(result.is_ok(), "'orient --tree' must parse: {:?}", result);
 }
 
@@ -133,7 +133,7 @@ fn orient_tree_flag_parses() {
 fn orient_tree_format_json_parses() {
     use clap::CommandFactory;
     let result =
-        Cli::command().try_get_matches_from(["tasktree", "orient", "--tree", "--format", "json"]);
+        Cli::command().try_get_matches_from(["mnema", "orient", "--tree", "--format", "json"]);
     assert!(
         result.is_ok(),
         "'orient --tree --format json' must parse: {:?}",
@@ -201,7 +201,7 @@ fn help_examples_parse_against_real_cli() {
     let mut failures: Vec<String> = Vec::new();
     for help in &helps {
         for line in help.lines() {
-            if !line.contains("tasktree ") || line.contains("<command>") {
+            if !line.contains("mnema ") || line.contains("<command>") {
                 continue;
             }
             checked += 1;
@@ -220,7 +220,7 @@ fn help_examples_parse_against_real_cli() {
 
 #[test]
 fn help_topic_references_exist() {
-    // "引用即契约": any `tasktree explain <word>` line in after_help where
+    // "引用即契约": any `mnema explain <word>` line in after_help where
     // <word> is all-lowercase must resolve via topic_lookup.
     use clap::CommandFactory;
     let cmd = Cli::command();
@@ -236,10 +236,10 @@ fn help_topic_references_exist() {
     let mut failures: Vec<String> = Vec::new();
     for help in &helps {
         for line in help.lines() {
-            // Match "tasktree explain <word>" where word is all-lowercase
+            // Match "mnema explain <word>" where word is all-lowercase
             if let Some(rest) = line
-                .find("tasktree explain ")
-                .map(|i| &line[i + "tasktree explain ".len()..])
+                .find("mnema explain ")
+                .map(|i| &line[i + "mnema explain ".len()..])
             {
                 let word: String = rest
                     .split_whitespace()
@@ -278,8 +278,8 @@ fn catalog_recovery_commands_parse_when_executable() {
     for info in diagnostics::catalog() {
         if info.recovery.executable {
             assert!(
-                info.recovery.command_str.starts_with("tasktree"),
-                "{}: executable recovery must be a tasktree command",
+                info.recovery.command_str.starts_with("mnema"),
+                "{}: executable recovery must be a mnema command",
                 info.code
             );
             try_parse_example(info.recovery.command_str)
@@ -356,13 +356,13 @@ fn catalog_referenced_markers_are_writable() {
 fn add_parent_and_belongs_to_alias_parse() {
     use clap::CommandFactory;
     let parent = "0000019dd34b";
-    let by_parent = Cli::command().try_get_matches_from(["tasktree", "add", "--parent", parent]);
+    let by_parent = Cli::command().try_get_matches_from(["mnema", "add", "--parent", parent]);
     assert!(
         by_parent.is_ok(),
         "add --parent must parse: {:?}",
         by_parent
     );
-    let by_alias = Cli::command().try_get_matches_from(["tasktree", "add", "--belongs-to", parent]);
+    let by_alias = Cli::command().try_get_matches_from(["mnema", "add", "--belongs-to", parent]);
     assert!(
         by_alias.is_ok(),
         "add --belongs-to alias must parse: {:?}",
@@ -413,33 +413,33 @@ fn depends_help_frames_upstreams_as_review_context() {
 fn grammar_write_commands_accept_id_flag_without_content_position() {
     use clap::CommandFactory;
     let id = "0000019dd34b";
-    let append = Cli::command().try_get_matches_from(["tasktree", "append", "--id", id]);
+    let append = Cli::command().try_get_matches_from(["mnema", "append", "--id", id]);
     assert!(append.is_ok(), "append --id must parse: {:?}", append);
-    let add = Cli::command().try_get_matches_from(["tasktree", "add"]);
+    let add = Cli::command().try_get_matches_from(["mnema", "add"]);
     assert!(
         add.is_ok(),
         "add must parse without a content arg: {:?}",
         add
     );
     let append_positional =
-        Cli::command().try_get_matches_from(["tasktree", "append", "--id", id, "note"]);
+        Cli::command().try_get_matches_from(["mnema", "append", "--id", id, "note"]);
     assert!(
         append_positional.is_err(),
         "append positional content must not parse"
     );
-    let add_positional = Cli::command().try_get_matches_from(["tasktree", "add", "note"]);
+    let add_positional = Cli::command().try_get_matches_from(["mnema", "add", "note"]);
     assert!(
         add_positional.is_err(),
         "add positional content must not parse"
     );
-    let stdin_flag = Cli::command().try_get_matches_from(["tasktree", "append", "--stdin"]);
+    let stdin_flag = Cli::command().try_get_matches_from(["mnema", "append", "--stdin"]);
     assert!(stdin_flag.is_err(), "append --stdin must not parse");
     let file_flag =
-        Cli::command().try_get_matches_from(["tasktree", "append", "--file", "note.md"]);
+        Cli::command().try_get_matches_from(["mnema", "append", "--file", "note.md"]);
     assert!(file_flag.is_err(), "append --file must not parse");
 
     let checkpoint = Cli::command().try_get_matches_from([
-        "tasktree",
+        "mnema",
         "checkpoint",
         "--id",
         id,
@@ -456,14 +456,14 @@ fn grammar_write_commands_accept_id_flag_without_content_position() {
 #[test]
 fn grammar_tail_commands_do_not_require_target() {
     use clap::CommandFactory;
-    let show = Cli::command().try_get_matches_from(["tasktree", "show", "--tail", "5"]);
+    let show = Cli::command().try_get_matches_from(["mnema", "show", "--tail", "5"]);
     assert!(
         show.is_ok(),
         "show --tail without target must parse: {:?}",
         show
     );
     let checkpoint = Cli::command().try_get_matches_from([
-        "tasktree",
+        "mnema",
         "checkpoint",
         "--tail",
         "5",
@@ -483,10 +483,10 @@ fn grammar_write_commands_accept_provenance() {
     let id = "0000019dd34b";
     let provenance = r#"{"producer":"tester"}"#;
     let cases: Vec<Vec<&str>> = vec![
-        vec!["tasktree", "add", "--provenance", provenance],
-        vec!["tasktree", "append", "--id", id, "--provenance", provenance],
+        vec!["mnema", "add", "--provenance", provenance],
+        vec!["mnema", "append", "--id", id, "--provenance", provenance],
         vec![
-            "tasktree",
+            "mnema",
             "checkpoint",
             "--id",
             id,
@@ -496,7 +496,7 @@ fn grammar_write_commands_accept_provenance() {
             provenance,
         ],
         vec![
-            "tasktree",
+            "mnema",
             "hide",
             "--id",
             id,
@@ -506,7 +506,7 @@ fn grammar_write_commands_accept_provenance() {
             provenance,
         ],
         vec![
-            "tasktree",
+            "mnema",
             "link",
             id,
             "0000019dd34c",
@@ -514,7 +514,7 @@ fn grammar_write_commands_accept_provenance() {
             provenance,
         ],
         vec![
-            "tasktree",
+            "mnema",
             "unlink",
             id,
             "0000019dd34c",
@@ -560,7 +560,7 @@ fn grammar_flag_vocabulary_conformance() {
 fn grammar_single_id_commands_accept_id_flag() {
     use clap::CommandFactory;
     for cmd in ["show", "find", "tree", "hide", "unhide"] {
-        let r = Cli::command().try_get_matches_from(["tasktree", cmd, "--id", "0000019dd34b"]);
+        let r = Cli::command().try_get_matches_from(["mnema", cmd, "--id", "0000019dd34b"]);
         assert!(
             r.is_ok(),
             "`{} --id <ID>` must parse (IdTarget contract): {:?}",
@@ -569,7 +569,7 @@ fn grammar_single_id_commands_accept_id_flag() {
         );
     }
     // timeline reaches the same grammar via alias
-    let r = Cli::command().try_get_matches_from(["tasktree", "timeline", "--id", "0000019dd34b"]);
+    let r = Cli::command().try_get_matches_from(["mnema", "timeline", "--id", "0000019dd34b"]);
     assert!(r.is_ok(), "`timeline --id` must alias --strand");
 }
 
@@ -577,7 +577,7 @@ fn grammar_single_id_commands_accept_id_flag() {
 fn seen_offset_flag_parses_on_write_commands() {
     use clap::CommandFactory;
     let append = Cli::command().try_get_matches_from([
-        "tasktree",
+        "mnema",
         "append",
         "--id",
         "0000019dd34b",
@@ -591,7 +591,7 @@ fn seen_offset_flag_parses_on_write_commands() {
     );
 
     let checkpoint = Cli::command().try_get_matches_from([
-        "tasktree",
+        "mnema",
         "checkpoint",
         "--id",
         "0000019dd34b",
@@ -823,7 +823,7 @@ fn new_with_file_content() {
 fn exit_code_for_journal_unreadable_is_2() {
     assert_eq!(exit_code_for("journal unreadable: bad bytes"), 2);
     assert_eq!(
-        exit_code_for("corrupt: [tasktree] WARNING: 1 corrupted lines skipped"),
+        exit_code_for("corrupt: [mnema] WARNING: 1 corrupted lines skipped"),
         2
     );
 }
@@ -849,16 +849,16 @@ fn id_target_flag_and_positional_equivalent() {
         ("tree", "0000019dd34b"),
     ];
     for (cmd, id) in cases {
-        // positional form: tasktree <cmd> <id>
-        let pos_result = Cli::command().try_get_matches_from(["tasktree", cmd, id]);
+        // positional form: mnema <cmd> <id>
+        let pos_result = Cli::command().try_get_matches_from(["mnema", cmd, id]);
         assert!(
             pos_result.is_ok(),
             "{} positional form failed: {:?}",
             cmd,
             pos_result.err()
         );
-        // flag form: tasktree <cmd> --id <id>
-        let flag_result = Cli::command().try_get_matches_from(["tasktree", cmd, "--id", id]);
+        // flag form: mnema <cmd> --id <id>
+        let flag_result = Cli::command().try_get_matches_from(["mnema", cmd, "--id", id]);
         assert!(
             flag_result.is_ok(),
             "{} --id form failed: {:?}",
@@ -882,7 +882,7 @@ fn id_target_flag_and_positional_equivalent() {
 fn id_target_conflict_rejected() {
     use clap::CommandFactory;
     let result =
-        Cli::command().try_get_matches_from(["tasktree", "show", "000653", "--id", "000653"]);
+        Cli::command().try_get_matches_from(["mnema", "show", "000653", "--id", "000653"]);
     assert!(
         result.is_err(),
         "show with both positional and --id must be rejected"
@@ -899,9 +899,9 @@ fn id_target_conflict_rejected() {
 fn close_reopen_accept_positional_and_id_flag() {
     use clap::CommandFactory;
     for cmd in ["close", "reopen"] {
-        let pos = Cli::command().try_get_matches_from(["tasktree", cmd, "0000019dd34b"]);
+        let pos = Cli::command().try_get_matches_from(["mnema", cmd, "0000019dd34b"]);
         assert!(pos.is_ok(), "`{} <ID>` must parse: {:?}", cmd, pos.err());
-        let flag = Cli::command().try_get_matches_from(["tasktree", cmd, "--id", "0000019dd34b"]);
+        let flag = Cli::command().try_get_matches_from(["mnema", cmd, "--id", "0000019dd34b"]);
         assert!(
             flag.is_ok(),
             "`{} --id <ID>` must parse: {:?}",
@@ -917,12 +917,12 @@ fn last_flag_parses_on_read_and_append_commands() {
     for cmd in [
         "show", "find", "hide", "unhide", "tree", "depends", "append",
     ] {
-        let r = Cli::command().try_get_matches_from(["tasktree", cmd, "--last"]);
+        let r = Cli::command().try_get_matches_from(["mnema", cmd, "--last"]);
         assert!(r.is_ok(), "`{} --last` must parse: {:?}", cmd, r.err());
     }
     // checkpoint requires --action alongside --last
     let r =
-        Cli::command().try_get_matches_from(["tasktree", "checkpoint", "--last", "--action", "x"]);
+        Cli::command().try_get_matches_from(["mnema", "checkpoint", "--last", "--action", "x"]);
     assert!(
         r.is_ok(),
         "`checkpoint --last --action` must parse: {:?}",
@@ -934,7 +934,7 @@ fn last_flag_parses_on_read_and_append_commands() {
 fn close_reopen_reject_last() {
     use clap::CommandFactory;
     for cmd in ["close", "reopen"] {
-        let r = Cli::command().try_get_matches_from(["tasktree", cmd, "--last"]);
+        let r = Cli::command().try_get_matches_from(["mnema", cmd, "--last"]);
         assert!(
             r.is_err(),
             "`{} --last` must be rejected (lifecycle-closing stays explicit)",
@@ -946,7 +946,7 @@ fn close_reopen_reject_last() {
 #[test]
 fn last_conflicts_with_explicit_id() {
     use clap::CommandFactory;
-    let r = Cli::command().try_get_matches_from(["tasktree", "show", "--id", "abc", "--last"]);
+    let r = Cli::command().try_get_matches_from(["mnema", "show", "--id", "abc", "--last"]);
     assert!(r.is_err(), "--id and --last are mutually exclusive");
 }
 
@@ -956,7 +956,7 @@ fn last_conflicts_with_explicit_id() {
 fn timeline_id_alias() {
     use clap::CommandFactory;
     let result =
-        Cli::command().try_get_matches_from(["tasktree", "timeline", "--id", "0000019dd34b"]);
+        Cli::command().try_get_matches_from(["mnema", "timeline", "--id", "0000019dd34b"]);
     assert!(
         result.is_ok(),
         "timeline --id should parse via visible_alias on --strand: {:?}",
@@ -964,7 +964,7 @@ fn timeline_id_alias() {
     );
     // Also verify --strand still works
     let result2 =
-        Cli::command().try_get_matches_from(["tasktree", "timeline", "--strand", "0000019dd34b"]);
+        Cli::command().try_get_matches_from(["mnema", "timeline", "--strand", "0000019dd34b"]);
     assert!(
         result2.is_ok(),
         "timeline --strand must still work: {:?}",

@@ -513,6 +513,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mnema"
+version = "0.2.0"
+dependencies = [
+ "atty",
+ "chrono",
+ "clap",
+ "fs2",
+ "hex",
+ "inquire",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "newline-converter"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -751,22 +767,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "tasktree"
-version = "0.2.0"
-dependencies = [
- "atty",
- "chrono",
- "clap",
- "fs2",
- "hex",
- "inquire",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
 ]
 
 [[package]]

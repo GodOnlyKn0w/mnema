@@ -67,7 +67,7 @@ pub fn cmd_explain(input: &str, format_json: bool) -> String {
         })
     } else {
         format!(
-            "unknown code or topic: {}\n  topics: {}\n  diagnostic codes: tasktree explain W062 etc",
+            "unknown code or topic: {}\n  topics: {}\n  diagnostic codes: mnema explain W062 etc",
             input,
             available_topics.join(", "),
         )

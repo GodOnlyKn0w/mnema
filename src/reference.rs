@@ -27,9 +27,9 @@ fn current_journal_path_string() -> Result<String, String> {
 fn read_state() -> Result<SelectionState, String> {
     let path = selection_state_path()?;
     let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("selection cache unavailable; run tasktree list: {}", e))?;
+        .map_err(|e| format!("selection cache unavailable; run mnema list: {}", e))?;
     serde_json::from_str(&text)
-        .map_err(|e| format!("selection cache is corrupt; rerun tasktree list: {}", e))
+        .map_err(|e| format!("selection cache is corrupt; rerun mnema list: {}", e))
 }
 
 fn read_state_for_update() -> SelectionState {
@@ -86,7 +86,7 @@ fn resolve_selection_handle(
     if input == "@last" {
         let Some(id) = state.last_touched else {
             return StrandLookup::Invalid(
-                "@last is not set; run tasktree show/add/append first".to_string(),
+                "@last is not set; run mnema show/add/append first".to_string(),
             );
         };
         if strands.iter().any(|s| s.id == id) {
@@ -104,7 +104,7 @@ fn resolve_selection_handle(
     };
     if state.max_offset != current_max_offset {
         return StrandLookup::Invalid(format!(
-            "{} is stale: journal advanced from offset {} to {}; rerun tasktree list",
+            "{} is stale: journal advanced from offset {} to {}; rerun mnema list",
             input, state.max_offset, current_max_offset
         ));
     }
@@ -114,19 +114,19 @@ fn resolve_selection_handle(
         .find(|mapping| mapping.index == index)
     else {
         return StrandLookup::Invalid(format!(
-            "{} is not in the last list output; rerun tasktree list",
+            "{} is not in the last list output; rerun mnema list",
             input
         ));
     };
     let Some(strand) = strands.iter().find(|strand| strand.id == mapping.id) else {
         return StrandLookup::Invalid(format!(
-            "{} points to a missing strand; rerun tasktree list",
+            "{} points to a missing strand; rerun mnema list",
             input
         ));
     };
     if strand.last_offset() != mapping.last_offset {
         return StrandLookup::Invalid(format!(
-            "{} is stale: strand {} moved from offset {} to {}; rerun tasktree list",
+            "{} is stale: strand {} moved from offset {} to {}; rerun mnema list",
             input,
             shorten(&strand.id),
             mapping.last_offset,

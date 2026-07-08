@@ -13,15 +13,15 @@ fn version_info() -> &'static str {
         env!("CARGO_PKG_VERSION"),
         "\njournal schema: tasktree-journal-v2",
         "\ncommit: ",
-        env!("TASKTREE_COMMIT"),
+        env!("MNEMA_COMMIT"),
         "\nbuild: ",
-        env!("TASKTREE_BUILD_PROFILE"),
+        env!("MNEMA_BUILD_PROFILE"),
     )
 }
 
 #[derive(Parser)]
 #[command(
-    name = "tasktree",
+    name = "mnema",
     version = version_info(),
     after_help = "\
 loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
@@ -48,7 +48,7 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   unlink        Remove a link (unlink effect entry; projection drops the edge)
 
 管 / manage:
-  init          Initialize .tasktree/ journal
+  init          Initialize .mnema/ journal
   hide          Hide a strand from active orient (parked, revivable)
   unhide        Unhide a strand
   doctor        Diagnose journal integrity
@@ -56,7 +56,7 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   cutover-v2    Rewrite/import current journal into pure v2 form
   explain       Explain a diagnostic code or topic (markers, json, grammar, ...)
 
-Run:  tasktree <command> --help"
+Run:  mnema <command> --help"
 )]
 pub(crate) struct Cli {
     /// Operate as if started in DIR (journal walk-up and relative paths use DIR)
@@ -111,7 +111,7 @@ fn resolve_read_target(target: &IdTarget) -> Result<String, String> {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize .tasktree/ directory and journal
+    /// Initialize .mnema/ directory and journal
     Init,
     /// Create a new strand with first log entry from stdin
     #[command(after_help = "\
@@ -123,9 +123,9 @@ Rules:
   Empty stdin content is rejected.
 
 Examples:
-  echo \"start a new line of work\" | tasktree add
-  echo \"child line of work\" | tasktree add --parent <PARENT>
-  echo \"derived matter\" | tasktree add --parent <PARENT> --from <REF>")]
+  echo \"start a new line of work\" | mnema add
+  echo \"child line of work\" | mnema add --parent <PARENT>
+  echo \"derived matter\" | mnema add --parent <PARENT> --from <REF>")]
     Add {
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -152,7 +152,7 @@ Examples:
     /// Append stdin content to a strand, or create a new strand from stdin.
     #[command(after_help = "\
 Invocation forms:
-  tasktree append [--id <ID> | --new]
+  mnema append [--id <ID> | --new]
 
 Content source:
   stdin               Log content. Piped input is required.
@@ -170,14 +170,14 @@ Rules:
   Explicit --id can append to a closed strand; that still writes and emits W059.
 
 Examples:
-  echo \"short note\" | tasktree append
-  echo \"short note\" | tasktree append --last
-  echo \"long note\" | tasktree append --id 0000019dd34b
-  echo \"new strand title\" | tasktree append --new
-  echo \"[metric] win_count=26\" | tasktree append --id 0000019dd34b --provenance '{\"producer\":\"pi\",\"model\":\"gpt-5\"}'
+  echo \"short note\" | mnema append
+  echo \"short note\" | mnema append --last
+  echo \"long note\" | mnema append --id 0000019dd34b
+  echo \"new strand title\" | mnema append --new
+  echo \"[metric] win_count=26\" | mnema append --id 0000019dd34b --provenance '{\"producer\":\"pi\",\"model\":\"gpt-5\"}'
 
 Markers (optional bracket prefix on the first line):
-  Marker vocabulary: tasktree explain markers
+  Marker vocabulary: mnema explain markers
 
 Provenance:
   --provenance <JSON>  Optional structured metadata. Must be a JSON
@@ -216,10 +216,10 @@ Provenance:
     /// Record context before an irreversible or state-closing action
     #[command(after_help = "\
 Invocation forms:
-  tasktree checkpoint --action \"<action and reason>\"
-  tasktree checkpoint --last --action \"<action and reason>\"
-  tasktree checkpoint --id <STRAND_ID> --action \"<action and reason>\"
-  tasktree checkpoint --id <STRAND_ID> --tail 30 --format json --action \"<action and reason>\"
+  mnema checkpoint --action \"<action and reason>\"
+  mnema checkpoint --last --action \"<action and reason>\"
+  mnema checkpoint --id <STRAND_ID> --action \"<action and reason>\"
+  mnema checkpoint --id <STRAND_ID> --tail 30 --format json --action \"<action and reason>\"
 
 Required:
   --action <TEXT>    Agent-supplied action and reason. Recorded, not classified.
@@ -237,7 +237,7 @@ Output:
 
   staleness          Always printed: age of strand's last entry + journal delta
                      since that entry. Catch-up command shown when delta > 0.
-  catch-up           tasktree timeline --since-offset <N> --links <STRAND_ID>
+  catch-up           mnema timeline --since-offset <N> --links <STRAND_ID>
                      (emitted verbatim when journal delta > 0)
   warnings           W070 (strand moved under you), W071 (closed strand), and
                      W076 (--seen-offset behind target last_offset) fire as scar
@@ -255,7 +255,7 @@ Rules:
   --tail only limits displayed output.
   --tail does not change observed_entries_before_append.
   checkpoint failed means hard stop.
-JSON shape: tasktree explain json")]
+JSON shape: mnema explain json")]
     Checkpoint {
         /// Strand ID (prefix match). Prefer explicit --id for commits and destructive actions.
         #[arg(long = "id", value_name = "STRAND_ID")]
@@ -320,9 +320,9 @@ JSON shape: tasktree explain json")]
     /// Show full details of one strand
     #[command(after_help = "\
 Examples:
-  tasktree show 0000019dd34b --tail 8
-  tasktree show --entry 3dfc13241d55 --deref 2
-  tasktree show --entry 3dfc13241d55 --after 3")]
+  mnema show 0000019dd34b --tail 8
+  mnema show --entry 3dfc13241d55 --deref 2
+  mnema show --entry 3dfc13241d55 --after 3")]
     Show {
         #[command(flatten)]
         target: IdTarget,
@@ -391,16 +391,16 @@ Examples:
     /// Pick a strand, then run a read/manage command on it
     #[command(after_help = "\
 Examples:
-  tasktree pick show
-  tasktree pick tree
-  echo \"short note\" | tasktree pick append
-  tasktree pick --print-id
+  mnema pick show
+  mnema pick tree
+  echo \"short note\" | mnema pick append
+  mnema pick --print-id
 
 Rules:
   Opens an arrow-key menu (up/down to move, type to filter, Enter to select,
   Esc to cancel). In non-TTY contexts it exits with an error instead of
   waiting for input. append selects a strand interactively and reads its body
-  from stdin: echo ... | tasktree pick append.")]
+  from stdin: echo ... | mnema pick append.")]
     Pick {
         /// Command to run with the selected strand: show, tree, depends, append, close, reopen, hide, unhide
         #[arg(value_name = "COMMAND", default_value = "show")]
@@ -424,13 +424,13 @@ Direction (read SOURCE first): the edge always points from SOURCE to TARGET.
    strand edge. Record the reason in the entry text itself.)
 
 Examples:
-  tasktree link <CHILD> <PARENT> --edge-type belongs-to
+  mnema link <CHILD> <PARENT> --edge-type belongs-to
                (CHILD nests under PARENT in tree / orient --tree)
-  tasktree link <TASK> <BLOCKER> --edge-type depends-on
+  mnema link <TASK> <BLOCKER> --edge-type depends-on
                (TASK waits on BLOCKER)
 
-Forest projection (how belongs-to nests): tasktree explain card
-JSON shape: tasktree explain json")]
+Forest projection (how belongs-to nests): mnema explain card
+JSON shape: mnema explain json")]
     Link {
         /// Source strand ID (prefix match). For belongs-to, this is the child.
         source: String,
@@ -455,7 +455,7 @@ Append-only: the original link stays in the journal; the read projection drops
 the edge. edge_type must match the link being removed (belongs-to / depends-on).
 
 Example:
-  tasktree unlink <TASK> <BLOCKER> --edge-type depends-on")]
+  mnema unlink <TASK> <BLOCKER> --edge-type depends-on")]
     Unlink {
         /// Source strand ID (prefix match) — same SOURCE as the link being removed.
         source: String,
@@ -519,9 +519,9 @@ strand explicitly, positional <ID> or --id <ID>. No --last, no implicit
 most-recent.
 
 Examples:
-  tasktree close <ID>
-  tasktree close --id <ID> --as failed
-  echo \"verified in staging\" | tasktree close --id <ID> --as verified")]
+  mnema close <ID>
+  mnema close --id <ID> --as failed
+  echo \"verified in staging\" | mnema close --id <ID> --as verified")]
     Close {
         #[command(flatten)]
         target: IdTarget,
@@ -542,8 +542,8 @@ Target: name the strand explicitly, positional <ID> or --id <ID>. Like close,
 reopen never defaults to most-recent.
 
 Examples:
-  tasktree reopen <ID>
-  echo \"closed by mistake, still active\" | tasktree reopen --id <ID>")]
+  mnema reopen <ID>
+  echo \"closed by mistake, still active\" | mnema reopen --id <ID>")]
     Reopen {
         #[command(flatten)]
         target: IdTarget,
@@ -570,13 +570,13 @@ Topics:
   jq        jq 整型：把 --format json 输出切成你要的形
 
 Examples:
-  tasktree explain W062
-  tasktree explain card
-  tasktree explain json
-  tasktree explain markers
-  tasktree explain retry
-  tasktree explain W062 --format json
-  tasktree explain card --json")]
+  mnema explain W062
+  mnema explain card
+  mnema explain json
+  mnema explain markers
+  mnema explain retry
+  mnema explain W062 --format json
+  mnema explain card --json")]
     Explain {
         /// Diagnostic code (e.g. W068) or topic name (e.g. card)
         code: String,
@@ -602,16 +602,16 @@ Examples:
     #[command(
         name = "cutover-v2",
         after_help = "\
-Default is a dry run. --apply performs the cutover in .tasktree/:\n  - moves journal.jsonl to journal.v1.jsonl\n  - writes a new pure-v2 journal.jsonl\n  - writes migration-v1-to-v2.json with old id/offset to new hash mappings\n\nExamples:\n  tasktree cutover-v2\n  tasktree cutover-v2 --format json\n  tasktree cutover-v2 --apply"
+Default is a dry run. --apply performs the cutover in .mnema/:\n  - moves journal.jsonl to journal.v1.jsonl\n  - writes a new pure-v2 journal.jsonl\n  - writes migration-v1-to-v2.json with old id/offset to new hash mappings\n\nExamples:\n  mnema cutover-v2\n  mnema cutover-v2 --format json\n  mnema cutover-v2 --apply"
     )]
     CutoverV2 {
         /// Apply the cutover. Without this flag, only report the plan.
         #[arg(long)]
         apply: bool,
-        /// Archive path for the pre-cutover journal (default: .tasktree/journal.v1.jsonl)
+        /// Archive path for the pre-cutover journal (default: .mnema/journal.v1.jsonl)
         #[arg(long, value_name = "PATH")]
         archive: Option<String>,
-        /// Mapping output path (default: .tasktree/migration-v1-to-v2.json)
+        /// Mapping output path (default: .mnema/migration-v1-to-v2.json)
         #[arg(long = "map", value_name = "PATH")]
         map: Option<String>,
         /// Output format: text (default) or json
@@ -665,15 +665,15 @@ Output per active strand:
                 strand since it was last touched (cursor = last_offset)
 
 After orienting:
-  continue a line   echo \"[decision] ...\" | tasktree append --id <ID>
-  new matter        echo \"<summary>\" | tasktree add
-  matter concluded  tasktree close --id <ID> [--as done|failed|cancelled|merged|verified]
-                    (default: done; reopen with tasktree reopen --id <ID>)
+  continue a line   echo \"[decision] ...\" | mnema append --id <ID>
+  new matter        echo \"<summary>\" | mnema add
+  matter concluded  mnema close --id <ID> [--as done|failed|cancelled|merged|verified]
+                    (default: done; reopen with mnema reopen --id <ID>)
   before anything irreversible
-                    tasktree checkpoint --id <ID> --action \"<what and why>\"
+                    mnema checkpoint --id <ID> --action \"<what and why>\"
 
-Closed strands are folded to a count; retrieve with tasktree list.
-Hidden strands are folded to a count; retrieve with tasktree list --all.
+Closed strands are folded to a count; retrieve with mnema list.
+Hidden strands are folded to a count; retrieve with mnema list --all.
 
 --tree: render active strands as a belongs-to forest. Strands that declare
   a belongs-to edge to another active strand are indented under their parent;
@@ -682,7 +682,7 @@ Hidden strands are folded to a count; retrieve with tasktree list --all.
 Exit codes:
   0 ok
   1 journal missing or unreadable
-JSON shape: tasktree explain json")]
+JSON shape: mnema explain json")]
     Orient {
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -716,8 +716,8 @@ prefer upstream lifecycle facts when making decisions. Built on the typed
 depends-on projection (F3).
 
 Examples:
-  tasktree depends <TASK>
-  tasktree depends <TASK> --format json")]
+  mnema depends <TASK>
+  mnema depends <TASK> --format json")]
     Depends {
         #[command(flatten)]
         target: IdTarget,
@@ -739,7 +739,7 @@ enum DoctorTarget {
 /// NOTE: Strand sort key is `max(log_appended.ts)` per strand.
 fn cmd_init() -> Result<(), String> {
     let dir = PathBuf::from(JOURNAL_DIR);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create .tasktree/: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create .mnema/: {}", e))?;
     let path = PathBuf::from(JOURNAL_FILE);
     if !path.exists() {
         std::fs::write(&path, "").map_err(|e| format!("cannot create journal: {}", e))?;
@@ -749,7 +749,7 @@ fn cmd_init() -> Result<(), String> {
     if !lock_path.exists() {
         std::fs::write(&lock_path, "").map_err(|e| format!("cannot create journal.lock: {}", e))?;
     }
-    println!("Initialized empty tasktree in .tasktree/");
+    println!("Initialized empty mnema in .mnema/");
     Ok(())
 }
 
@@ -760,7 +760,7 @@ pub(crate) fn main() {
     // Journal Core surfaces write-path warnings through an injected sink; the
     // CLI is the presentation layer, so it installs the stderr presenter here.
     crate::journal::set_journal_warning_sink(|message| {
-        eprintln!("[tasktree] warning: {}", message);
+        eprintln!("[mnema] warning: {}", message);
     });
     let cli = parse_cli_or_exit();
     apply_chdir(cli.chdir.as_deref());

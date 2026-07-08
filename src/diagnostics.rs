@@ -1,13 +1,13 @@
 //! Unified diagnostic catalog — single source of truth for all diagnostic codes.
 //!
 //! Every code emitted by any producer (currently: lifecycle, health) MUST
-//! have an entry here. The `tasktree explain` command queries this catalog.
+//! have an entry here. The `mnema explain` command queries this catalog.
 //!
 //! # Catalog closure contract
 //!
 //! Adding a new diagnostic code without a corresponding catalog entry is a bug.
 //! Closure is two-way:
-//!   1. Every emitted code must resolve via `tasktree explain --json <code>`
+//!   1. Every emitted code must resolve via `mnema explain --json <code>`
 //!      with `ok: true` (no orphan emissions).
 //!   2. Every catalog entry should have a live producer (no dead codes lying
 //!      about checks that no longer run).
@@ -22,7 +22,7 @@
 
 // ── Topic catalog (L3 encyclopaedia layer) ──────────────────
 
-/// One encyclopaedia topic reachable via `tasktree explain <name>`.
+/// One encyclopaedia topic reachable via `mnema explain <name>`.
 /// Namespace rule: topic names are all-lowercase; diagnostic codes begin
 /// with an uppercase letter (W/E). The two namespaces are mechanically
 /// disjoint — no case-folding is applied to topics.
@@ -48,7 +48,7 @@ static TOPICS: &[TopicInfo] = &[
 把手行中的 <state> 显示生命周期（lifecycle），格式：
   open:   registered（未关闭）
   closed: closed:<disposition>（如 closed:done、closed:failed）
-  生命周期由 tasktree close / reopen 命令改变，append 的 marker 是注解。
+  生命周期由 mnema close / reopen 命令改变，append 的 marker 是注解。
 
 语义：
   回显即预付的验证——写后输出卡片，调用方无需再跑 show/orient 确认。
@@ -65,7 +65,7 @@ JSON 形态（OrientStrand，写命令 result 字段 / orient active[]）：
   - catch_up:     就绪的 timeline 追赶命令
   - lifecycle:    生命周期（"registered" 或 "closed:<disposition>"）
 
-JSON shape 索引见 tasktree explain json"#,
+JSON shape 索引见 mnema explain json"#,
     },
     TopicInfo {
         name: "markers",
@@ -92,10 +92,10 @@ Marker 语义（一行一条）：
   [observed]    观察到的事实
   [progress]    进展 / [deliverable] 交付物
   [metric]      落账的测量值；约定写 name=val（如 [metric] win_count=26）
-                可被 jq capture 抽成序列，见 tasktree explain jq
+                可被 jq capture 抽成序列，见 mnema explain jq
   [deadline]    截止日期（by= 字段必须是日期或 RFC3339）
   [done]        完成注解（仅注解，不关闭线；关闭用 close --id <ID>）
-  [checkpoint]  由 tasktree checkpoint 命令写入，勿手动添加
+  [checkpoint]  由 mnema checkpoint 命令写入，勿手动添加
 
 未知方括号前缀一律透传（不拒写）；拼错收 W073；
 追加关闭类 marker 后收 W074 提醒改用 close 命令。"#,
@@ -136,7 +136,7 @@ list（StrandListOutput.strands[]，StrandListItem）：
 
 orient（OrientOutput）：
   max_offset / active / closed_count / hidden_count / integrity / notices / remind / pause
-  ※ active[] 是卡片数组（OrientStrand）见 tasktree explain card
+  ※ active[] 是卡片数组（OrientStrand）见 mnema explain card
 
 search（SearchOutput）：
   matches / count / query
@@ -153,39 +153,39 @@ hide / unhide: strand_id / status / noop /
 link: source_id / target_id / edge_type / status /
   result.source / result.target（卡片）
 cutover-v2: applied / source_journal / archive_journal / map_path / source_event_count / imported_event_count / strand_count / entry_count / anchor_count / unresolved_ref_count
-卡片/result 形态见 tasktree explain card；jq 整型见 tasktree explain jq"#,
+卡片/result 形态见 mnema explain card；jq 整型见 mnema explain jq"#,
     },
     TopicInfo {
         name: "jq",
         title: "jq 整型——把 JSON 投影切成你要的形",
         body: r#"JSON 是空间(tree)/时间(timeline)两视角投影，jq 是塑形层。
 边界：jq 只塑形结构够的内容——埋在散文里的数/状态它抓不动，
-故"写得可解析"是前提（marker 前缀、name=val），不是 tasktree 多建命令。
+故"写得可解析"是前提（marker 前缀、name=val），不是 mnema 多建命令。
 （orient 开场 remind 的 read/extract 段即指向此页。）
-顶层字段见 tasktree explain json。常用：
+顶层字段见 mnema explain json。常用：
 
 取 strand id（免脆弱解析，取代手搓字符串切割）：
-  echo "..." | tasktree add --format json | jq -r .id
+  echo "..." | mnema add --format json | jq -r .id
 
 取日志行：
-  tasktree show --id <ID> --format json | jq -r '.events[].entry'
+  mnema show --id <ID> --format json | jq -r '.events[].entry'
 
 按 marker 聚条目（marker 是 .entry 前缀，取代 show 文字墙 + grep）：
-  tasktree show --id <ID> --format json | jq -r '.events[] | select(.entry | startswith("[friction]")) | .entry'
+  mnema show --id <ID> --format json | jq -r '.events[] | select(.entry | startswith("[friction]")) | .entry'
   坑：用 startswith；勿用 test("^\[...")——shell 里反斜杠转义会炸。
 
 抽数字轨迹（先按约定写 [metric] name=val，再 capture 出序列）：
-  echo "[metric] win_count=26" | tasktree append --id <ID>
-  tasktree show --id <ID> --format json | jq '[.events[].entry | capture("win_count=(?<v>[0-9]+)") | .v | tonumber]'
+  echo "[metric] win_count=26" | mnema append --id <ID>
+  mnema show --id <ID> --format json | jq '[.events[].entry | capture("win_count=(?<v>[0-9]+)") | .v | tonumber]'
 
 数值筛选（offset / count / entry_count 是数，可比较）：
-  tasktree list --format json | jq '.strands[] | select(.entry_count > 10) | .id'
+  mnema list --format json | jq '.strands[] | select(.entry_count > 10) | .id'
 
 中途现状合成（"我在哪"：活线 + 各自 last_offset 即下次 --seen-offset 的 N）：
-  tasktree orient --format json | jq -r '.active[] | "\(.id[0:12]) n=\(.last_offset) :: \(.last_entry)"'
+  mnema orient --format json | jq -r '.active[] | "\(.id[0:12]) n=\(.last_offset) :: \(.last_entry)"'
 
 时间线切成精简视图：
-  tasktree timeline --format json | jq '.timeline[] | {ts, strand_id, kind}'"#,
+  mnema timeline --format json | jq '.timeline[] | {ts, strand_id, kind}'"#,
     },
     TopicInfo {
         name: "grammar",
@@ -209,7 +209,7 @@ JSON 命名法：
   id / strand_id 一律全宽 64 hex 内容 hash，跨输出可 join
 
 写命令三件套：写 journal 必收 --provenance、必有 --format json
-孪生、写后回显卡片（见 tasktree explain card）。
+孪生、写后回显卡片（见 mnema explain card）。
 （孪生与 provenance 的覆盖缺口见一致性 CI 豁免表，按批清偿。）
 
 全局旗标：
@@ -310,7 +310,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         impact: "The task is overdue; downstream schedule assumptions are invalid.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
-            command_str: "re-read the deadline and current state: tasktree show --id <STRAND_ID>",
+            command_str: "re-read the deadline and current state: mnema show --id <STRAND_ID>",
             executable: false,
             requires_human: true,
         },
@@ -340,7 +340,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         impact: "You may be checkpointing a strand that was last touched by a different agent — your view of the strand's state may be stale.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
-            command_str: "tasktree timeline --since-offset <OFFSET> --links <STRAND_ID>",
+            command_str: "mnema timeline --since-offset <OFFSET> --links <STRAND_ID>",
             executable: false,
             requires_human: true,
         },
@@ -355,7 +355,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         impact: "The checkpoint is almost certainly targeting the wrong strand — irreversible actions should be anchored to an open strand.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
-            command_str: "confirm the target with tasktree list; the checkpoint may belong on a successor strand",
+            command_str: "confirm the target with mnema list; the checkpoint may belong on a successor strand",
             executable: false,
             requires_human: true,
         },
@@ -367,10 +367,10 @@ static CATALOG: &[DiagnosticInfo] = &[
         category: "lifecycle",
         title: "append on closed strand",
         finding: "An explicit append --id targeted a strand whose lifecycle state is closed:<disposition>.",
-        impact: "The append still writes to that closed strand. If this is a new result, start a successor with `tasktree add --from <ID>` and refer back to the closed line. If the strand was closed by mistake, reopen it with `tasktree reopen --id <ID>` before continuing.",
+        impact: "The append still writes to that closed strand. If this is a new result, start a successor with `mnema add --from <ID>` and refer back to the closed line. If the strand was closed by mistake, reopen it with `mnema reopen --id <ID>` before continuing.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
-            command_str: "new result: tasktree add --from <ID>; wrong close: tasktree reopen --id <ID>",
+            command_str: "new result: mnema add --from <ID>; wrong close: mnema reopen --id <ID>",
             executable: false,
             requires_human: true,
         },
@@ -386,7 +386,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         impact: "The decision and constraint may conflict — the governance signal is ambiguous.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
-            command_str: "re-read both entries to judge the contradiction: tasktree show --id <STRAND_ID>",
+            command_str: "re-read both entries to judge the contradiction: mnema show --id <STRAND_ID>",
             executable: false,
             requires_human: true,
         },
@@ -401,7 +401,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         impact: "The entry was written as plain content, not a structured marker — it will be invisible to projections that filter by marker type.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
-            command_str: "check vocabulary: tasktree explain markers",
+            command_str: "check vocabulary: mnema explain markers",
             executable: false,
             requires_human: true,
         },
@@ -416,7 +416,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         impact: "If the intent was to close the strand, it remains open. Downstream tools that filter on lifecycle state (list --state done, orient closed_count) will not see this strand as closed.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
-            command_str: "re-check whether it should be closed: tasktree show --id <STRAND_ID>",
+            command_str: "re-check whether it should be closed: mnema show --id <STRAND_ID>",
             executable: false,
             requires_human: false,
         },
@@ -431,7 +431,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         impact: "The [fixed] entry is not folded and its intended friction target remains exposed as an unresolved live debt. The pairing was silently skipped.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
-            command_str: "re-check the fixes= prefix: tasktree show --id <STRAND_ID>",
+            command_str: "re-check the fixes= prefix: mnema show --id <STRAND_ID>",
             executable: false,
             requires_human: true,
         },
@@ -446,7 +446,7 @@ static CATALOG: &[DiagnosticInfo] = &[
         impact: "The caller is writing after the strand changed behind its last observed position; its local view may be stale. W076 is a transient write-time signal (rides the append/checkpoint echo on stderr + JSON warnings[]/seen_gap, exit 0). By design it is NOT persisted as a scar and will NOT reappear in a later `show` — scars are lifecycle state (close/reopen), not diagnostics, and recording a read cursor would violate ADR-0003. Capture the evidence on the spot from the write echo; do not audit it via show.",
         recovery: RecoveryInfo {
             kind: RecoveryKind::Manual,
-            command_str: "tasktree timeline --since-offset <N> --links <STRAND_ID>",
+            command_str: "mnema timeline --since-offset <N> --links <STRAND_ID>",
             executable: false,
             requires_human: true,
         },
@@ -802,7 +802,7 @@ mod tests {
             summary: "test".to_string(),
             last_entry: "test".to_string(),
             last_offset: 0,
-            catch_up: "tasktree timeline --since-offset 0 --links abc123".to_string(),
+            catch_up: "mnema timeline --since-offset 0 --links abc123".to_string(),
             lifecycle: "registered".to_string(),
         };
         let v = serde_json::to_value(&sample).expect("serialize OrientStrand");

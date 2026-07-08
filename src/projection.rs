@@ -1,4 +1,4 @@
-//! Tasktree journal projection layer.
+//! Mnema journal projection layer.
 //! Projects raw event streams into structured strand and timeline views.
 
 use crate::event::{EntryEffect, Event};
@@ -604,7 +604,7 @@ pub(crate) fn build_entry_view<'a>(
             .expect("find_entry only matches entries with ids"),
         EntryLookup::None => {
             return Err(format!(
-                "no entry matches {} (strand views resolve with 'tasktree show <ID>')",
+                "no entry matches {} (strand views resolve with 'mnema show <ID>')",
                 prefix
             ));
         }

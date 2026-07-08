@@ -23,7 +23,7 @@ use std::time::Instant;
 
 fn corrupted_lines_error(skipped: usize) -> String {
     format!(
-        "corrupt: [tasktree] WARNING: {} corrupted lines skipped",
+        "corrupt: [mnema] WARNING: {} corrupted lines skipped",
         skipped
     )
 }
@@ -152,7 +152,7 @@ pub(crate) fn cmd_list(
         if skipped > 0 {
             return Err(corrupted_lines_error(skipped));
         }
-        eprintln!("[tasktree] list: {:.0?}", started.elapsed());
+        eprintln!("[mnema] list: {:.0?}", started.elapsed());
         return Ok(());
     }
 
@@ -180,12 +180,12 @@ pub(crate) fn cmd_list(
     }
     let max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
     if let Err(e) = crate::reference::remember_list(&strands, max_offset) {
-        eprintln!("[tasktree] warning: {}", e);
+        eprintln!("[mnema] warning: {}", e);
     }
     if skipped > 0 {
         return Err(corrupted_lines_error(skipped));
     }
-    eprintln!("[tasktree] list: {:.0?}", started.elapsed());
+    eprintln!("[mnema] list: {:.0?}", started.elapsed());
     Ok(())
 }
 
@@ -268,7 +268,7 @@ pub(crate) fn cmd_search(
         return Err(corrupted_lines_error(skipped));
     }
     eprintln!(
-        "[tasktree] search: {:.0?}  ({} matches)",
+        "[mnema] search: {:.0?}  ({} matches)",
         started.elapsed(),
         result.output.count
     );
@@ -551,7 +551,7 @@ pub(crate) fn cmd_orient(
             println!("{}", serde_json::to_string(&tree_out).expect("serialize"));
         } else {
             println!(
-                "journal: max_offset {} | {} active | {} closed | {} hidden (tasktree list)",
+                "journal: max_offset {} | {} active | {} closed | {} hidden (mnema list)",
                 out.max_offset,
                 out.active.len(),
                 out.closed_count,
@@ -560,7 +560,7 @@ pub(crate) fn cmd_orient(
             println!("integrity: {}", out.integrity);
             print_orient_forest(&tree_out.roots, 0);
             if out.active.is_empty() {
-                println!("(no active strands) — start one: tasktree add \"<summary>\"");
+                println!("(no active strands) — start one: mnema add \"<summary>\"");
             }
             print_orient_notices(&out.notices);
             println!("remind: {}", out.remind);
@@ -570,7 +570,7 @@ pub(crate) fn cmd_orient(
         println!("{}", serde_json::to_string(&out).expect("serialize"));
     } else {
         println!(
-            "journal: max_offset {} | {} active | {} closed | {} hidden (tasktree list)",
+            "journal: max_offset {} | {} active | {} closed | {} hidden (mnema list)",
             out.max_offset,
             out.active.len(),
             out.closed_count,
@@ -603,7 +603,7 @@ pub(crate) fn cmd_orient(
             println!("    catch-up: {}", s.catch_up);
         }
         if out.active.is_empty() {
-            println!("(no active strands) — start one: tasktree add \"<summary>\"");
+            println!("(no active strands) — start one: mnema add \"<summary>\"");
         }
         print_orient_notices(&out.notices);
         println!("remind: {}", out.remind);
@@ -613,7 +613,7 @@ pub(crate) fn cmd_orient(
     if skipped > 0 {
         return Err(corrupted_lines_error(skipped));
     }
-    eprintln!("[tasktree] orient: {:.0?}", started.elapsed());
+    eprintln!("[mnema] orient: {:.0?}", started.elapsed());
     Ok(())
 }
 
@@ -772,12 +772,12 @@ pub(crate) fn cmd_show(
         };
         println!("markers: {}", census);
         eprintln!(
-            "[tasktree] show:   {:.0?}  (digest, {} entries)",
+            "[mnema] show:   {:.0?}  (digest, {} entries)",
             started.elapsed(),
             entry_count
         );
         if let Err(e) = crate::reference::remember_last_touched_current(&strand.id) {
-            eprintln!("[tasktree] warning: {}", e);
+            eprintln!("[mnema] warning: {}", e);
         }
         if skipped > 0 {
             return Err(corrupted_lines_error(skipped));
@@ -846,13 +846,13 @@ pub(crate) fn cmd_show(
         );
     }
     eprintln!(
-        "[tasktree] show:   {:.0?}  ({} entries, {} shown)",
+        "[mnema] show:   {:.0?}  ({} entries, {} shown)",
         started.elapsed(),
         entry_count,
         shown
     );
     if let Err(e) = crate::reference::remember_last_touched_current(&strand.id) {
-        eprintln!("[tasktree] warning: {}", e);
+        eprintln!("[mnema] warning: {}", e);
     }
     if skipped > 0 {
         return Err(corrupted_lines_error(skipped));
@@ -990,7 +990,7 @@ pub(crate) fn cmd_show_entry(
                 String::new()
             };
             println!(
-                "  at: {} · tasktree show --entry {}{}",
+                "  at: {} · mnema show --entry {}{}",
                 display_ts(&node.entry.ts, now),
                 handle,
                 re_look
@@ -1040,11 +1040,11 @@ pub(crate) fn cmd_show_entry(
                 frontier_chars
             );
             for f in &view.frontier {
-                println!("  tasktree show --entry {}", shorten(&f.hash));
+                println!("  mnema show --entry {}", shorten(&f.hash));
             }
         }
         eprintln!(
-            "[tasktree] show --entry: {} entries pulled, ~{} chars, {} unresolved",
+            "[mnema] show --entry: {} entries pulled, ~{} chars, {} unresolved",
             view.nodes.len(),
             total_chars,
             view.stubs.len()
@@ -1069,7 +1069,7 @@ pub(crate) fn cmd_pick(command: &str, print_id: bool, include_hidden: bool) -> R
 
     let append_body = if !print_id && command == "append" {
         if atty::is(atty::Stream::Stdin) {
-            return Err("append body must be piped: echo ... | tasktree pick append".to_string());
+            return Err("append body must be piped: echo ... | mnema pick append".to_string());
         }
         Some(read_stdin_content()?)
     } else {
