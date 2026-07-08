@@ -37,6 +37,7 @@ tasktree 的源码仓库（Rust CLI：append-only journal + 投影）。
   `close --id <ID> --as done|failed`。
 - entry 开头标明身份（谁派的哪一路），多路并发靠这个区分笔迹。
 - 交付物全部落 strand；stdout 只放一句指针（"完事，见 strand <ID>"）。
+- worker 交付物不因进程死活自动判 failed（进程死 ≠ 任务败）；换路做成的结果落新线（`tasktree add --from <旧ID>`）或母线，不要 append 回已被另一路关掉的 worker 线。
 - 禁 git commit——派你的一方审 diff 后自己提交。
 - 默认不再往下派子代理，除非工单原文明确授权（防递归扇出）。
 

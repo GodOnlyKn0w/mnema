@@ -358,6 +358,160 @@ fn w071_silent_on_open_strand() {
     assert!(result.is_none(), "W071 must not fire on registered strand");
 }
 
+// ── W059: append on closed strand ─────────────────────────────────────
+
+#[test]
+fn w059_fires_on_closed_strand() {
+    let _env = setup();
+    let id = create_strand("closed append target");
+    cmd_close(&id, Some("done"), None, false).unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let strand = strands.iter().find(|s| s.id == id).unwrap();
+    let result = diagnostics::check_w059_append_closed_strand(strand);
+    assert!(result.is_some(), "W059 must fire on closed append target");
+    let warning = result.unwrap();
+    assert_eq!(warning.code, "W059");
+    assert_eq!(warning.state, "closed:done");
+    assert!(
+        warning.detail.contains("closed:done"),
+        "detail must mention state: {}",
+        warning.detail
+    );
+    assert!(warning.add_from.contains(&shorten(&id)));
+    assert!(warning.reopen.contains(&shorten(&id)));
+}
+
+#[test]
+fn w059_silent_on_open_strand() {
+    let _env = setup();
+    let id = create_strand("open append target");
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let strand = strands.iter().find(|s| s.id == id).unwrap();
+    let result = diagnostics::check_w059_append_closed_strand(strand);
+    assert!(result.is_none(), "W059 must not fire on registered strand");
+}
+
+#[test]
+fn append_explicit_closed_strand_succeeds_and_json_carries_w059() {
+    let _env = setup();
+    let id = create_strand("closed explicit append target");
+    cmd_close(&id, Some("failed"), None, false).unwrap();
+
+    let outcome = execute_append(AppendRequest {
+        content: Some("[progress] late result"),
+        legacy_id: None,
+        new: false,
+        stdin: false,
+        file: None,
+        explicit_id: Some(&id),
+        provenance_raw: None,
+        seen_offset: None,
+        why: None,
+        allow_selection: false,
+    })
+    .expect("append to explicitly closed strand must still exit 0");
+
+    assert_eq!(outcome.kind, AppendOutcomeKind::AppendedExisting);
+    let warning = outcome
+        .closed_target_warning
+        .as_ref()
+        .expect("closed target warning must be carried on AppendOutcome");
+    assert_eq!(warning.code, "W059");
+    assert_eq!(warning.state, "closed:failed");
+    assert!(warning.detail.contains("tasktree add --from"));
+    assert!(warning.detail.contains("tasktree reopen --id"));
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let strand = strands.iter().find(|s| s.id == id).unwrap();
+    assert!(
+        strand.log.iter().any(|e| e.content.contains("late result")),
+        "append must still write the requested entry"
+    );
+
+    let warnings: Vec<output::SeenOffsetWarningOutput<'_>> = outcome
+        .seen_warning
+        .iter()
+        .map(output::SeenOffsetWarningOutput::from)
+        .collect();
+    let dto = output::AppendOutput {
+        strand_id: &outcome.strand_id,
+        entry_id: &outcome.entry_id,
+        content_preview: outcome.stored_content.chars().take(120).collect::<String>(),
+        provenance: &outcome.provenance,
+        seen_offset: outcome.seen_offset,
+        seen_gap: outcome.seen_warning.as_ref().map(|w| w.seen_gap),
+        warnings,
+        closed_target: outcome
+            .closed_target_warning
+            .as_ref()
+            .map(output::ClosedTargetOutput::from),
+        result: outcome.card_state.as_ref().map(|(card, _)| card.clone()),
+    };
+    let json = serde_json::to_value(&dto).expect("append DTO must serialize");
+    assert_eq!(json["closed_target"]["code"], "W059");
+    assert_eq!(json["closed_target"]["state"], "closed:failed");
+    assert!(
+        json["closed_target"]["add_from"]
+            .as_str()
+            .unwrap()
+            .contains("tasktree add --from")
+    );
+    assert!(
+        json["closed_target"]["reopen"]
+            .as_str()
+            .unwrap()
+            .contains("tasktree reopen --id")
+    );
+    assert!(json["warnings"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn append_open_strand_json_closed_target_is_null() {
+    let _env = setup();
+    let id = create_strand("open explicit append target");
+    let outcome = execute_append(AppendRequest {
+        content: Some("[progress] normal result"),
+        legacy_id: None,
+        new: false,
+        stdin: false,
+        file: None,
+        explicit_id: Some(&id),
+        provenance_raw: None,
+        seen_offset: None,
+        why: None,
+        allow_selection: false,
+    })
+    .expect("append to open strand must succeed");
+
+    let warnings: Vec<output::SeenOffsetWarningOutput<'_>> = outcome
+        .seen_warning
+        .iter()
+        .map(output::SeenOffsetWarningOutput::from)
+        .collect();
+    let dto = output::AppendOutput {
+        strand_id: &outcome.strand_id,
+        entry_id: &outcome.entry_id,
+        content_preview: outcome.stored_content.chars().take(120).collect::<String>(),
+        provenance: &outcome.provenance,
+        seen_offset: outcome.seen_offset,
+        seen_gap: outcome.seen_warning.as_ref().map(|w| w.seen_gap),
+        warnings,
+        closed_target: outcome
+            .closed_target_warning
+            .as_ref()
+            .map(output::ClosedTargetOutput::from),
+        result: outcome.card_state.as_ref().map(|(card, _)| card.clone()),
+    };
+    let json = serde_json::to_value(&dto).expect("append DTO must serialize");
+    assert!(json["closed_target"].is_null());
+}
+
 // ── checkpoint + W071 end-to-end: writes succeed (exit 0) ─────────────
 
 #[test]

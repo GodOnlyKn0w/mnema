@@ -366,6 +366,7 @@ pub(crate) struct AppendOutcome {
     pub(crate) provenance: Option<serde_json::Value>,
     pub(crate) seen_offset: Option<usize>,
     pub(crate) seen_warning: Option<diagnostics::SeenOffsetWarning>,
+    pub(crate) closed_target_warning: Option<diagnostics::ClosedTargetWarning>,
     pub(crate) marker_warning: Option<AppendMarkerWarning>,
     pub(crate) closing_marker_warning: bool,
     pub(crate) card_state: Option<(OrientStrand, String)>,
@@ -527,6 +528,7 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
             provenance: provenance.clone(),
             seen_offset: req.seen_offset,
             seen_warning: None,
+            closed_target_warning: None,
             marker_warning: None,
             closing_marker_warning: false,
             card_state: strand_card_fresh_with_state(&new_id),
@@ -562,6 +564,11 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         .find(|s| s.id == full_id)
         .ok_or_else(|| format!("strand {} not found", full_id))?;
     let strand_last_offset = target_strand.last_offset();
+    let closed_target_warning = if req.explicit_id.is_some() {
+        diagnostics::check_w059_append_closed_strand(target_strand)
+    } else {
+        None
+    };
 
     let seen_warning =
         diagnostics::check_w076_seen_offset(&full_id, req.seen_offset, strand_last_offset);
@@ -596,6 +603,7 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         provenance,
         seen_offset: req.seen_offset,
         seen_warning,
+        closed_target_warning,
         marker_warning,
         closing_marker_warning,
         card_state,
@@ -645,6 +653,10 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
         );
     }
 
+    if let Some(w) = &outcome.closed_target_warning {
+        eprintln!("{}: {} (tasktree explain {})", w.code, w.detail, w.code);
+    }
+
     if let Some(w) = &outcome.seen_warning {
         eprintln!("{}: {} (tasktree explain {})", w.code, w.detail, w.code);
     }
@@ -663,6 +675,10 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
             seen_offset: outcome.seen_offset,
             seen_gap: outcome.seen_warning.as_ref().map(|w| w.seen_gap),
             warnings,
+            closed_target: outcome
+                .closed_target_warning
+                .as_ref()
+                .map(output::ClosedTargetOutput::from),
             result: outcome.card_state.as_ref().map(|(card, _)| card.clone()),
         };
         println!("{}", serde_json::to_string(&output).unwrap());

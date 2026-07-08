@@ -298,6 +298,39 @@ pub(crate) fn check_w071_closed_strand(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClosedTargetWarning {
+    pub(crate) code: &'static str,
+    pub(crate) detail: String,
+    pub(crate) state: String,
+    pub(crate) add_from: String,
+    pub(crate) reopen: String,
+}
+
+/// Check W059: explicit append target strand is already closed.
+pub(crate) fn check_w059_append_closed_strand(
+    strand: &crate::projection::ProjectedStrand,
+) -> Option<ClosedTargetWarning> {
+    let state = strand.state();
+    if state == "registered" {
+        return None;
+    }
+
+    let id = crate::util::shorten(&strand.id);
+    let add_from = format!("tasktree add --from {}", id);
+    let reopen = format!("tasktree reopen --id {}", id);
+    Some(ClosedTargetWarning {
+        code: "W059",
+        detail: format!(
+            "append target {} is {}; new result: {}; wrong close: {}",
+            id, state, add_from, reopen
+        ),
+        state: state.to_string(),
+        add_from,
+        reopen,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SeenOffsetWarning {
     pub(crate) code: &'static str,
     pub(crate) detail: String,

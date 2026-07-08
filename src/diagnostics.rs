@@ -147,7 +147,7 @@ timeline（TimelineOutput）：
   ※ timeline[] 每元素：journal_offset / ts / strand_id /
     strand_type / kind / ts_skew
 
-append/checkpoint: seen_offset / seen_gap / warnings / result；add/find: id / status / result
+append: seen_offset / seen_gap / warnings / closed_target / result；checkpoint: seen_offset / seen_gap / warnings / result；add/find: id / status / result
 hide / unhide: strand_id / status / noop /
   active_count / closed_count / hidden_count / result（卡片）
 link: source_id / target_id / edge_type / status /
@@ -360,6 +360,21 @@ static CATALOG: &[DiagnosticInfo] = &[
             requires_human: true,
         },
         producer: "lifecycle",
+    },
+    DiagnosticInfo {
+        code: "W059",
+        severity: Severity::Warning,
+        category: "lifecycle",
+        title: "append on closed strand",
+        finding: "An explicit append --id targeted a strand whose lifecycle state is closed:<disposition>.",
+        impact: "The append still writes to that closed strand. If this is a new result, start a successor with `tasktree add --from <ID>` and refer back to the closed line. If the strand was closed by mistake, reopen it with `tasktree reopen --id <ID>` before continuing.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "new result: tasktree add --from <ID>; wrong close: tasktree reopen --id <ID>",
+            executable: false,
+            requires_human: true,
+        },
+        producer: "append",
     },
     // ── Health (W062) ───────────────────────────────────
     DiagnosticInfo {
@@ -917,6 +932,7 @@ mod tests {
     #[test]
     fn test_all_codes_present() {
         let codes = all_codes();
+        assert!(codes.contains(&"W059"));
         assert!(codes.contains(&"W062"));
         assert!(codes.contains(&"W068"));
         assert!(codes.contains(&"W069"));
@@ -928,7 +944,7 @@ mod tests {
         assert!(codes.contains(&"W076"));
         assert_eq!(
             codes.len(),
-            9,
+            10,
             "catalog size changed — update this test deliberately"
         );
     }
@@ -1023,6 +1039,22 @@ mod tests {
             unique.len(),
             "duplicate diagnostic codes found"
         );
+    }
+
+    #[test]
+    fn test_w059_can_explain() {
+        let info = lookup("W059").expect("W059 should be in catalog");
+        assert_eq!(info.code, "W059");
+        assert_eq!(info.title, "append on closed strand");
+        assert!(matches!(info.severity, Severity::Warning));
+        assert_eq!(info.category, "lifecycle");
+        assert_eq!(info.producer, "append");
+        let output = cmd_explain("W059", true);
+        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["code"], "W059");
+        assert_eq!(v["recovery"]["executable"], false);
+        assert_eq!(v["recovery"]["requires_human"], true);
     }
 
     #[test]

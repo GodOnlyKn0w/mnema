@@ -167,6 +167,7 @@ Rules:
   Entry content is never read from positional arguments, --stdin, or --file.
   --new, --id, and --last are mutually exclusive.
   Empty stdin content is rejected.
+  Explicit --id can append to a closed strand; that still writes and emits W059.
 
 Examples:
   echo \"short note\" | tasktree append

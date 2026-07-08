@@ -383,6 +383,27 @@ impl<'a> From<&'a crate::diagnostics::SeenOffsetWarning> for SeenOffsetWarningOu
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct ClosedTargetOutput<'a> {
+    pub(crate) code: &'a str,
+    pub(crate) detail: &'a str,
+    pub(crate) state: &'a str,
+    pub(crate) add_from: &'a str,
+    pub(crate) reopen: &'a str,
+}
+
+impl<'a> From<&'a crate::diagnostics::ClosedTargetWarning> for ClosedTargetOutput<'a> {
+    fn from(warning: &'a crate::diagnostics::ClosedTargetWarning) -> Self {
+        ClosedTargetOutput {
+            code: warning.code,
+            detail: &warning.detail,
+            state: &warning.state,
+            add_from: &warning.add_from,
+            reopen: &warning.reopen,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct AppendOutput<'a> {
     pub(crate) strand_id: &'a str,
     pub(crate) entry_id: &'a Option<String>,
@@ -391,6 +412,7 @@ pub(crate) struct AppendOutput<'a> {
     pub(crate) seen_offset: Option<usize>,
     pub(crate) seen_gap: Option<usize>,
     pub(crate) warnings: Vec<SeenOffsetWarningOutput<'a>>,
+    pub(crate) closed_target: Option<ClosedTargetOutput<'a>>,
     pub(crate) result: Option<OrientStrand>,
 }
 
