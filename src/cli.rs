@@ -34,7 +34,7 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   timeline      Chronological entries across strands (+linked)
   search        Full-text search across entries
   find          Resolve a strand id
-  pick          Pick a strand through fzf or a numbered menu
+  pick          Pick a strand from an arrow-key menu; append reads body from stdin
   tree          Strand forest (belongs-to nesting)
   depends       depends-on analysis: blockers / readiness / critical path
 
@@ -393,15 +393,16 @@ Examples:
 Examples:
   tasktree pick show
   tasktree pick tree
+  echo \"short note\" | tasktree pick append
   tasktree pick --print-id
 
 Rules:
-  Uses fzf when available in an interactive terminal; otherwise falls back to
-  a numbered menu. In non-TTY contexts it exits with an error instead of
-  waiting for input. append is intentionally not supported here because append
-  content belongs on stdin; use --print-id and pass the id explicitly.")]
+  Opens an arrow-key menu (up/down to move, type to filter, Enter to select,
+  Esc to cancel). In non-TTY contexts it exits with an error instead of
+  waiting for input. append selects a strand interactively and reads its body
+  from stdin: echo ... | tasktree pick append.")]
     Pick {
-        /// Command to run with the selected strand: show, tree, depends, close, reopen, hide, unhide
+        /// Command to run with the selected strand: show, tree, depends, append, close, reopen, hide, unhide
         #[arg(value_name = "COMMAND", default_value = "show")]
         command: String,
         /// Print the selected canonical full strand id instead of running a command

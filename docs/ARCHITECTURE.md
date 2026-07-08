@@ -109,7 +109,7 @@ Deprecated JSON fields stay in DTOs and contract documentation. They must not fo
 
 Human-readable text is CLI behavior, not the machine contract. Help examples are parse-contracts and must remain executable; other text output may evolve without changing JSON DTO semantics.
 
-Picker integrations are optional CLI affordances. They may call external tools such as `fzf` only when an interactive terminal is available; in non-TTY contexts they must either run from explicit parameters or fail with a usage error. No feature may require the picker as its only entry point.
+The picker is a human-only interactive projection at the CLI Adapter. `pick` renders the same strand projection the machine reads as JSON, but folded and navigable — a built-in arrow-key menu (`inquire`) is the default backend, and `fzf` is an optional accelerator that adds a live preview pane when present. Selection is read from the controlling terminal, never from stdin, so a piped body stays free: `pick append` selects interactively but takes the entry body from stdin (never from the terminal), and close/reopen take their optional reason the same way. The TTY guard therefore keys on terminal availability, not on stdin being a terminal, since a piped body deliberately makes stdin a non-terminal. In non-TTY contexts the picker fails closed with a usage error, never blocking. No feature may require the picker as its only entry point, and the picker is a presentation of the projection, not a second source of truth for strand identity or content.
 
 Review projections report facts and evidence. They do not decide whether a task is valid, whether an agent should stop, or whether a process exits successfully.
 

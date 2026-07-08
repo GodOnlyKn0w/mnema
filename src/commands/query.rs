@@ -13,7 +13,12 @@ use crate::output;
 use crate::projection::{self, TimelineEventKind};
 use crate::render::*;
 use crate::tree;
-use crate::util::{display_ts, humanize_duration, parse_duration, shorten, truncate};
+use crate::util::{
+    display_ts, humanize_duration, parse_duration, read_stdin_content, read_stdin_if_piped,
+    shorten, truncate,
+};
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 fn corrupted_lines_error(skipped: usize) -> String {
@@ -1061,129 +1066,206 @@ pub(crate) fn cmd_pick(command: &str, print_id: bool, include_hidden: bool) -> R
     if strands.is_empty() {
         return Err("no strands to pick".to_string());
     }
+
+    let append_body = if !print_id && command == "append" {
+        if atty::is(atty::Stream::Stdin) {
+            return Err("append body must be piped: echo ... | tasktree pick append".to_string());
+        }
+        Some(read_stdin_content()?)
+    } else {
+        None
+    };
+    let lifecycle_reason = if !print_id && (command == "close" || command == "reopen") {
+        read_stdin_if_piped()
+    } else {
+        None
+    };
+
     let selected = pick_strand_id(&strands)?;
     if print_id {
         println!("{}", selected);
         return Ok(());
     }
     match command {
-        "show" => cmd_show(Some(&selected), false, None, false, false, false, None),
+        "show" => cmd_show(Some(&selected), false, Some(8), false, false, false, None),
         "tree" => cmd_tree(&selected, None),
         "depends" => cmd_depends(&selected, None),
-        "close" => crate::commands::write::cmd_close(&selected, None, None, false),
-        "reopen" => crate::commands::write::cmd_reopen(&selected, None, false),
+        "append" => crate::commands::write::cmd_append_with_seen_offset(
+            append_body.as_deref(),
+            None,
+            false,
+            false,
+            None,
+            Some(&selected),
+            None,
+            None,
+            None,
+            None,
+        ),
+        "close" => {
+            crate::commands::write::cmd_close(&selected, None, lifecycle_reason.as_deref(), false)
+        }
+        "reopen" => {
+            crate::commands::write::cmd_reopen(&selected, lifecycle_reason.as_deref(), false)
+        }
         "hide" => crate::commands::manage::cmd_hide(&selected, None, false, None),
         "unhide" => crate::commands::manage::cmd_unhide(&selected, false),
         other => Err(format!(
-            "pick command '{}' is unsupported; valid commands: show, tree, depends, close, reopen, hide, unhide, --print-id",
+            "pick command '{}' is unsupported; valid commands: show, tree, depends, append, close, reopen, hide, unhide, --print-id",
             other
         )),
     }
 }
 
-fn pick_strand_id(strands: &[projection::ProjectedStrand]) -> Result<String, String> {
-    let lines: Vec<String> = strands
-        .iter()
-        .map(|strand| {
-            let slug = strand
-                .slug
-                .as_deref()
-                .map(|s| format!(" ({})", s))
-                .unwrap_or_default();
-            format!(
-                "{}\t{}{}\t{} entries\t{}",
-                strand.id,
-                shorten(&strand.id),
-                slug,
-                strand.log_count(),
-                truncate(strand.first_summary(), 80)
-            )
-        })
-        .collect();
+/// Build the visible row for one strand in the picker: short id / optional
+/// slug / lifecycle state / first summary / last summary. Pure — unit-tested
+/// without a tty, since the interactive selection itself needs a real terminal.
+pub(crate) fn pick_label(strand: &projection::ProjectedStrand) -> String {
+    pick_label_with_state(strand, &pick_state_label(strand.state()))
+}
 
-    let interactive = atty::is(atty::Stream::Stdin) && atty::is(atty::Stream::Stdout);
+fn pick_label_with_state(strand: &projection::ProjectedStrand, state: &str) -> String {
+    let slug = strand
+        .slug
+        .as_deref()
+        .map(|s| format!(" ({})", s))
+        .unwrap_or_default();
+    format!(
+        "{}{}  {}  {}  →  {}",
+        shorten(&strand.id),
+        slug,
+        state,
+        truncate(strand.first_summary(), 40),
+        truncate(strand.last_summary(), 40)
+    )
+}
+
+fn pick_state_label(state: &str) -> String {
+    match state {
+        "registered" => "○ open".to_string(),
+        "closed:done" => "● done".to_string(),
+        "closed:failed" => "● failed".to_string(),
+        other if other.starts_with("closed:") => format!("● {}", &other["closed:".len()..]),
+        other => other.to_string(),
+    }
+}
+
+fn pick_state_label_ansi(state: &str) -> String {
+    match state {
+        "registered" => "\u{1b}[32m○ open\u{1b}[0m".to_string(),
+        "closed:done" => "\u{1b}[34m● done\u{1b}[0m".to_string(),
+        "closed:failed" => "\u{1b}[31m● failed\u{1b}[0m".to_string(),
+        other if other.starts_with("closed:") => format!("● {}", &other["closed:".len()..]),
+        other => other.to_string(),
+    }
+}
+
+fn pick_label_ansi(strand: &projection::ProjectedStrand) -> String {
+    pick_label_with_state(strand, &pick_state_label_ansi(strand.state()))
+}
+
+/// One selectable row. `Display` renders the label so inquire shows it;
+/// selecting returns the whole item, so the canonical full id is recovered
+/// without parsing it back out of the label.
+struct PickItem {
+    id: String,
+    label: String,
+}
+
+impl std::fmt::Display for PickItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// Interactive strand chooser: fzf when available (with a preview pane),
+/// otherwise an arrow-key inquire menu. stdout stays clean for --print-id. In a
+/// non-TTY context it fails closed rather than blocking on input.
+fn pick_strand_id(strands: &[projection::ProjectedStrand]) -> Result<String, String> {
+    let interactive = atty::is(atty::Stream::Stdout) || atty::is(atty::Stream::Stderr);
     if !interactive {
         return Err(
             "pick requires an interactive TTY; use --id/--print-id from an interactive shell"
                 .to_string(),
         );
     }
-    if fzf_available() {
-        if let Some(selected) = pick_with_fzf(&lines)? {
-            return Ok(selected);
-        }
-        return Err("pick cancelled".to_string());
+    if let Some(selected) = pick_with_fzf(strands)? {
+        return Ok(selected);
     }
-    pick_with_menu(strands)
+    let items: Vec<PickItem> = strands
+        .iter()
+        .map(|strand| PickItem {
+            id: strand.id.clone(),
+            label: pick_label(strand),
+        })
+        .collect();
+    match inquire::Select::new("pick a strand", items)
+        .with_page_size(15)
+        .prompt()
+    {
+        Ok(item) => Ok(item.id),
+        Err(inquire::InquireError::OperationCanceled)
+        | Err(inquire::InquireError::OperationInterrupted) => Err("pick cancelled".to_string()),
+        Err(e) => Err(format!("pick failed: {}", e)),
+    }
 }
 
-fn fzf_available() -> bool {
-    std::process::Command::new("fzf")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn pick_with_fzf(lines: &[String]) -> Result<Option<String>, String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("fzf")
+fn pick_with_fzf(strands: &[projection::ProjectedStrand]) -> Result<Option<String>, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("pick failed: {}", e))?;
+    let preview = format!("{} show {{1}} --tail 8", quote_preview_exe(&exe));
+    let mut child = match Command::new("fzf")
+        .arg("--ansi")
         .arg("--with-nth=2..")
+        .arg("--delimiter=\\t")
+        .arg("--preview")
+        .arg(preview)
+        .arg("--preview-window=right:50%")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|e| format!("cannot run fzf: {}", e))?;
     {
-        let stdin = child.stdin.as_mut().ok_or("cannot open fzf stdin")?;
-        for line in lines {
-            writeln!(stdin, "{}", line).map_err(|e| format!("cannot feed fzf: {}", e))?;
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("pick failed: {}", e)),
+    };
+
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "pick failed: fzf stdin unavailable".to_string())?;
+        for strand in strands {
+            writeln!(stdin, "{}\t{}", strand.id, pick_label_ansi(strand))
+                .map_err(|e| format!("pick failed: {}", e))?;
         }
     }
+
     let output = child
         .wait_with_output()
-        .map_err(|e| format!("cannot read fzf output: {}", e))?;
+        .map_err(|e| format!("pick failed: {}", e))?;
     if !output.status.success() {
-        return Ok(None);
+        return Err("pick cancelled".to_string());
     }
-    let selected =
-        String::from_utf8(output.stdout).map_err(|e| format!("fzf output was not UTF-8: {}", e))?;
-    Ok(selected
+    let selected = String::from_utf8_lossy(&output.stdout);
+    let selected_id = selected
         .lines()
         .next()
-        .and_then(|line| line.split('\t').next())
-        .map(str::to_string))
+        .unwrap_or("")
+        .trim_end_matches('\r')
+        .split('\t')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if selected_id.is_empty() {
+        Err("pick cancelled".to_string())
+    } else {
+        Ok(Some(selected_id.to_string()))
+    }
 }
 
-fn pick_with_menu(strands: &[projection::ProjectedStrand]) -> Result<String, String> {
-    for (idx, strand) in strands.iter().enumerate() {
-        let slug = strand
-            .slug
-            .as_deref()
-            .map(|s| format!(" ({})", s))
-            .unwrap_or_default();
-        eprintln!(
-            "{}: {}{}  {} entries  {}",
-            idx + 1,
-            shorten(&strand.id),
-            slug,
-            strand.log_count(),
-            truncate(strand.first_summary(), 80)
-        );
-    }
-    eprint!("pick> ");
-    let mut input = String::new();
-    std::io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| format!("cannot read selection: {}", e))?;
-    let index: usize = input
-        .trim()
-        .parse()
-        .map_err(|_| "selection must be a number".to_string())?;
-    if index == 0 || index > strands.len() {
-        return Err(format!("selection {} is out of range", index));
-    }
-    Ok(strands[index - 1].id.clone())
+fn quote_preview_exe(path: &std::path::Path) -> String {
+    format!("\"{}\"", path.display().to_string().replace('"', "\\\""))
 }
 
 // ── Tree projection ─────────────────────────────────────

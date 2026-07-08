@@ -1030,3 +1030,42 @@ fn pick_fails_in_non_tty_instead_of_waiting() {
     let err = cmd_pick("show", false, false).unwrap_err();
     assert!(err.contains("interactive TTY"), "{err}");
 }
+
+#[test]
+fn pick_label_carries_id_prefix_state_first_and_last_summary() {
+    let _env = setup();
+    let id = create_strand("design the picker");
+    cmd_append(
+        Some("preview the newest tail"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let s = strands.iter().find(|s| s.id == id).unwrap();
+    let label = crate::commands::query::pick_label(s);
+    assert!(
+        label.contains(&id[..8]),
+        "label carries the id prefix: {label}"
+    );
+    assert!(label.contains("○ open"), "label carries state: {label}");
+    assert!(
+        label.contains("design the picker"),
+        "label carries the first summary: {label}"
+    );
+    assert!(
+        label.contains("→"),
+        "label separates first and last: {label}"
+    );
+    assert!(
+        label.contains("preview the newest tail"),
+        "label carries the last summary: {label}"
+    );
+}
