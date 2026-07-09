@@ -94,7 +94,7 @@ Marker 语义（一行一条）：
   [metric]      落账的测量值；约定写 name=val（如 [metric] win_count=26）
                 可被 jq capture 抽成序列，见 mnema explain jq
   [deadline]    截止日期（by= 字段必须是日期或 RFC3339）
-  [done]        完成注解（仅注解，不关闭线；关闭用 close --id <ID>）
+  [done]        完成注解（仅注解，不关闭线；关闭用 mnema close --id <ID>）
   [checkpoint]  由 mnema checkpoint 命令写入，勿手动添加
 
 未知方括号前缀一律透传（不拒写）；拼错收 W073；
@@ -147,12 +147,11 @@ timeline（TimelineOutput）：
   ※ timeline[] 每元素：journal_offset / ts / strand_id /
     strand_type / kind / ts_skew
 
-append: seen_offset / seen_gap / warnings / closed_target / result；checkpoint: seen_offset / seen_gap / warnings / result；add/find: id / status / result
-hide / unhide: strand_id / status / noop /
-  active_count / closed_count / hidden_count / result（卡片）
-link: source_id / target_id / edge_type / status /
-  result.source / result.target（卡片）
-cutover-v2: applied / source_journal / archive_journal / map_path / source_event_count / imported_event_count / strand_count / entry_count / anchor_count / unresolved_ref_count
+append: seen_offset / seen_gap / warnings / closed_target / result；checkpoint: seen_offset / seen_gap / warnings / result
+add: id / status / provenance / slug / parent_id / edge_type / result；find: id
+hide / unhide: strand_id / status / noop / active_count / closed_count / hidden_count / result（卡片）
+link: source_id / target_id / edge_type / status / result.source / result.target（卡片）
+cutover-v2: applied / source_journal / archive_journal / map_path / certificate_path / source_event_count / imported_event_count / strand_count / entry_count / anchor_count / unresolved_ref_count
 卡片/result 形态见 mnema explain card；jq 整型见 mnema explain jq"#,
     },
     TopicInfo {
@@ -225,12 +224,13 @@ entry 形状模板：
 close/reopen 收口动作强制显式指名、禁 --last/缺省；正文只走 stdin，故 add/append 无位置参数；timeline 的 --id 等价 --strand。
 
 旗标词表（同一概念只有一个名字）：
-  --include-hidden  含隐藏线（list 的 --all 是兼容别名）
+  --include-hidden  含隐藏线（checkpoint/pick 主名；--all 为兼容别名）
+  mnema list --all  （list 的隐藏线开关例外：只认 --all）
   --format json     机器输出唯一正典（explain --json 是兼容快捷）
   --provenance / --seen-offset <N>  写命令出处 / 上次看到的目标线 offset
   --tail <N>        只限显示、不改账，对任何目标可用
   --edge-type       link 的边类型（--type 是 deprecated 别名）
-  --why / --from    引依据/记来源：线前缀=其最新条，entry 哈希前缀=精确该条；读取用 show --entry（--deref 展开链，--before/--after 邻域）
+  --why / --from    引依据/记来源：线前缀=其最新条，entry 哈希前缀=精确该条；读取用 mnema show --entry <HASH>（--deref 展开链，--before/--after 邻域）
 
 JSON 命名法：
   复数名词 = 数组（events / matches / strands / active / timeline）
@@ -238,8 +238,7 @@ JSON 命名法：
   自身身份 = id；引用他者 = <noun>_id（如 search 的 strand_id）
   id / strand_id 一律全宽 64 hex 内容 hash，跨输出可 join
 
-写命令三件套：写 journal 必收 --provenance、必有 --format json
-孪生、写后回显卡片（见 mnema explain card）。
+写命令三件套：写 journal 必收 --provenance、必有 --format json 孪生、写后回显卡片（见 mnema explain card）。
 （孪生与 provenance 的覆盖缺口见一致性 CI 豁免表，按批清偿。）
 
 全局旗标：
@@ -247,9 +246,9 @@ JSON 命名法：
 exit code：0 成功 / 1 命令执行失败 / 2 journal 不可读或损坏 / 3 解析或参数非法。
 
 永久豁免（点名豁免，防"看起来漏了"的二次猜测）：
-  doctor 子命令风格（doctor journal）；pick（交互选择器；机器入口用显式 --id 或 pick --print-id）
+  doctor 子命令风格（mnema doctor journal）；pick（交互选择器；机器入口用显式 --id 或 mnema pick --print-id）
   add/append 正文位置参数、--stdin、--file 已在 v2 迁移中移除
-  export --out <PATH>（主对象用旗标）；cutover-v2 --apply（journal maintenance）"#,
+  mnema export --out <PATH>（主对象用旗标）；mnema cutover-v2 --apply（journal maintenance）"#,
     },
 ];
 
