@@ -48,13 +48,17 @@ mnema 的源码仓库（Rust CLI：append-only journal + 投影）。
 - 每路一条 strand（`mnema add`）。prompt 只需三样：strand ID、
   身份标识、任务专属指令——协议本身不必复述，被派方启动时会
   自动读到本文件。
-- 入口命令（prompt 落文件，stdin 喂入）：
-  - codex：`codex exec --full-auto -m gpt-5.5 -c model_reasoning_effort=high - < prompt.md`
+- 入口命令（prompt 落文件，stdin/--prompt-file 喂入）：
+  - codex：`codex exec --sandbox workspace-write -m gpt-5.5 -c model_reasoning_effort=high - < prompt.md`
   - claude：`claude -p --model sonnet --permission-mode bypassPermissions < prompt.md`
+  - grok：`grok --prompt-file prompt.md -m grok-4.5 --permission-mode bypassPermissions --cwd <dir>`
 - 长任务后台跑、stdout 落日志；超时杀进程是调用方的责任
-  （两个 CLI 都没有 timeout 旗标）。
-- 模型分配：简单任务 sonnet、难题 codex 5.5 high、多用 codex
-  （claude 无头路会撞 5h 会话限额中途阵亡）。
+  （三个 CLI 都没有 timeout 旗标）。
+- **谁·怎么派·适合什么·有什么坑 → 模型花名册 `docs/agent-roster.md`**（batch 标题树）：
+  `batch tree docs/agent-roster.md` 看全貌；`batch get docs/agent-roster.md#<模型>/无头调用`
+  取启动命令；`#<模型>/适合`、`#<模型>/坑` 看适配与雷区。速记：长活主力 codex（稳、
+  自留痕），利落设计/收尾插 grok（须喂饱额度），评审裁决插 opus，简单点缀 sonnet；
+  脆点——claude 无头撞 5h、grok 免费撞额度、codex 偶发网络断。
 - 收工判读顺序：先看 strand 的 close 状态与 entries；退出码只说明
   进程死活，stdout 的自报成功不作数。
 - worker 阵亡（非零退出/超时）→ strand 上的半途痕迹即接手点，
