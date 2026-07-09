@@ -1058,14 +1058,23 @@ pub(crate) fn cmd_show_entry(
 
 // ── Human picker ─────────────────────────────────────────
 
-pub(crate) fn cmd_pick(command: &str, print_id: bool, include_hidden: bool) -> Result<(), String> {
+pub(crate) fn cmd_pick(command: &str, print_id: bool, all: bool) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
-    let mut strands = projection::project_strands(&events, include_hidden);
-    strands.sort_by(|a, b| b.last_ts().cmp(a.last_ts()));
-    if strands.is_empty() {
-        return Err("no strands to pick".to_string());
+    let mut strands = projection::project_strands(&events, all);
+    if !all {
+        // Default picker view: active work only. Closed lines fold out (like
+        // orient); `--all` brings closed and hidden back.
+        strands.retain(|s| s.state() == "registered");
     }
+    if strands.is_empty() {
+        return Err(if all {
+            "no strands to pick".to_string()
+        } else {
+            "no active strands to pick — use --all for closed/hidden".to_string()
+        });
+    }
+    let rows = pick_forest_rows(&strands);
 
     let append_body = if !print_id && command == "append" {
         if atty::is(atty::Stream::Stdin) {
@@ -1081,7 +1090,7 @@ pub(crate) fn cmd_pick(command: &str, print_id: bool, include_hidden: bool) -> R
         None
     };
 
-    let selected = pick_strand_id(&strands)?;
+    let selected = pick_strand_id(&strands, &rows)?;
     if print_id {
         println!("{}", selected);
         return Ok(());
@@ -1117,30 +1126,82 @@ pub(crate) fn cmd_pick(command: &str, print_id: bool, include_hidden: bool) -> R
     }
 }
 
-/// Build the visible row for one strand in the picker: short id / optional
-/// slug / lifecycle state / first summary / last summary. Pure — unit-tested
-/// without a tty, since the interactive selection itself needs a real terminal.
-pub(crate) fn pick_label(strand: &projection::ProjectedStrand) -> String {
-    pick_label_with_state(strand, &pick_state_label(strand.state()))
+/// Build one picker row for a human. `seq` (1-based) replaces the 64-hex id
+/// (the id travels as fzf's hidden first column / `PickItem.id`). `depth` indents
+/// belongs-to children under their parent; `extra_parents` flags a strand with
+/// more than one in-set parent (the single-parent basis is an anomaly, so it is
+/// marked, not duplicated). The first summary takes the remaining width
+/// (fzf/terminal clips it); the tail lives in the preview pane.
+pub(crate) fn pick_label(
+    seq: usize,
+    depth: usize,
+    extra_parents: usize,
+    state_width: usize,
+    strand: &projection::ProjectedStrand,
+) -> String {
+    pick_row(seq, depth, extra_parents, state_width, strand, false)
 }
 
-fn pick_label_with_state(strand: &projection::ProjectedStrand, state: &str) -> String {
+fn pick_label_ansi(
+    seq: usize,
+    depth: usize,
+    extra_parents: usize,
+    state_width: usize,
+    strand: &projection::ProjectedStrand,
+) -> String {
+    pick_row(seq, depth, extra_parents, state_width, strand, true)
+}
+
+/// Widest state label among the rows, so the state column pads only as much as
+/// the current view needs — an all-`open` default view stays tight, a mixed
+/// `--all` view still aligns.
+fn pick_state_width(
+    strands: &[projection::ProjectedStrand],
+    rows: &[(usize, usize, usize)],
+) -> usize {
+    rows.iter()
+        .map(|&(_, idx, _)| pick_state_word(strands[idx].state()).chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+fn pick_row(
+    seq: usize,
+    depth: usize,
+    extra_parents: usize,
+    state_width: usize,
+    strand: &projection::ProjectedStrand,
+    ansi: bool,
+) -> String {
+    let state = strand.state();
+    let padded = format!("{:<width$}", pick_state_word(state), width = state_width);
+    let state_disp = match (ansi, pick_state_color(state)) {
+        (true, Some(color)) => format!("{}{}\u{1b}[0m", color, padded),
+        _ => padded,
+    };
+    let indent = if depth == 0 {
+        String::new()
+    } else {
+        format!("{}└ ", "  ".repeat(depth - 1))
+    };
     let slug = strand
         .slug
         .as_deref()
-        .map(|s| format!(" ({})", s))
+        .map(|s| format!("({}) ", s))
         .unwrap_or_default();
+    let mark = if extra_parents > 0 {
+        format!("  [+{}父]", extra_parents)
+    } else {
+        String::new()
+    };
+    let summary = strand.first_summary().replace(['\t', '\n', '\r'], " ");
     format!(
-        "{}{}  {}  {}  →  {}",
-        shorten(&strand.id),
-        slug,
-        state,
-        truncate(strand.first_summary(), 40),
-        truncate(strand.last_summary(), 40)
+        "{:>3}. {} {}{}{}{}",
+        seq, state_disp, indent, slug, summary, mark
     )
 }
 
-fn pick_state_label(state: &str) -> String {
+fn pick_state_word(state: &str) -> String {
     match state {
         "registered" => "○ open".to_string(),
         "closed:done" => "● done".to_string(),
@@ -1150,18 +1211,109 @@ fn pick_state_label(state: &str) -> String {
     }
 }
 
-fn pick_state_label_ansi(state: &str) -> String {
+fn pick_state_color(state: &str) -> Option<&'static str> {
     match state {
-        "registered" => "\u{1b}[32m○ open\u{1b}[0m".to_string(),
-        "closed:done" => "\u{1b}[34m● done\u{1b}[0m".to_string(),
-        "closed:failed" => "\u{1b}[31m● failed\u{1b}[0m".to_string(),
-        other if other.starts_with("closed:") => format!("● {}", &other["closed:".len()..]),
-        other => other.to_string(),
+        "registered" => Some("\u{1b}[32m"),
+        "closed:done" => Some("\u{1b}[34m"),
+        "closed:failed" => Some("\u{1b}[31m"),
+        _ => None,
     }
 }
 
-fn pick_label_ansi(strand: &projection::ProjectedStrand) -> String {
-    pick_label_with_state(strand, &pick_state_label_ansi(strand.state()))
+/// Flatten strands into a belongs-to forest in DFS pre-order, so a parent and
+/// its whole subtree stay contiguous (a flat last_ts sort would wedge unrelated
+/// lines between them). Families are ranked by their most-recent member; within
+/// a family, children are ranked the same way. Returns (depth, strand index,
+/// extra_parent_count). First in-set parent wins for nesting; a strand with more
+/// than one in-set parent is flagged via extra_parent_count, never duplicated.
+fn pick_forest_rows(strands: &[projection::ProjectedStrand]) -> Vec<(usize, usize, usize)> {
+    use std::collections::{HashMap, HashSet};
+    let idx_of: HashMap<&str, usize> = strands
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id.as_str(), i))
+        .collect();
+
+    let mut primary_parent: HashMap<usize, usize> = HashMap::new();
+    let mut extra_parents: HashMap<usize, usize> = HashMap::new();
+    for (i, s) in strands.iter().enumerate() {
+        let parents: Vec<usize> = s
+            .belongs_to_edges
+            .iter()
+            .filter_map(|p| idx_of.get(p.as_str()).copied())
+            .collect();
+        if let Some(&first) = parents.first() {
+            primary_parent.insert(i, first);
+            extra_parents.insert(i, parents.len() - 1);
+        }
+    }
+
+    let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (&child, &parent) in &primary_parent {
+        children.entry(parent).or_default().push(child);
+    }
+
+    // Subtree max-recency (last_ts), memoized; cycle-guarded defensively.
+    fn subtree_rec(
+        i: usize,
+        children: &HashMap<usize, Vec<usize>>,
+        strands: &[projection::ProjectedStrand],
+        memo: &mut HashMap<usize, String>,
+        visiting: &mut HashSet<usize>,
+    ) -> String {
+        if let Some(v) = memo.get(&i) {
+            return v.clone();
+        }
+        if !visiting.insert(i) {
+            return strands[i].last_ts().to_string();
+        }
+        let mut best = strands[i].last_ts().to_string();
+        if let Some(kids) = children.get(&i) {
+            for &k in kids {
+                let r = subtree_rec(k, children, strands, memo, visiting);
+                if r > best {
+                    best = r;
+                }
+            }
+        }
+        visiting.remove(&i);
+        memo.insert(i, best.clone());
+        best
+    }
+    let mut memo: HashMap<usize, String> = HashMap::new();
+    let mut visiting: HashSet<usize> = HashSet::new();
+    for i in 0..strands.len() {
+        subtree_rec(i, &children, strands, &mut memo, &mut visiting);
+    }
+    for i in 0..strands.len() {
+        memo.entry(i)
+            .or_insert_with(|| strands[i].last_ts().to_string());
+    }
+    let rank = |a: usize, b: usize| memo[&b].cmp(&memo[&a]).then_with(|| strands[a].id.cmp(&strands[b].id));
+
+    let mut roots: Vec<usize> = (0..strands.len())
+        .filter(|i| !primary_parent.contains_key(i))
+        .collect();
+    roots.sort_by(|&a, &b| rank(a, b));
+
+    // Iterative DFS pre-order: push reversed so children pop in ranked order.
+    let mut rows: Vec<(usize, usize, usize)> = Vec::new();
+    let mut visited: HashSet<usize> = HashSet::new();
+    let mut stack: Vec<(usize, usize)> = roots.into_iter().rev().map(|r| (r, 0usize)).collect();
+    while let Some((i, depth)) = stack.pop() {
+        if !visited.insert(i) {
+            continue;
+        }
+        rows.push((depth, i, extra_parents.get(&i).copied().unwrap_or(0)));
+        if let Some(kids) = children.get(&i) {
+            let mut kids = kids.clone();
+            kids.sort_by(|&a, &b| rank(a, b));
+            for k in kids.into_iter().rev() {
+                stack.push((k, depth + 1));
+            }
+        }
+    }
+    rows
 }
 
 /// One selectable row. `Display` renders the label so inquire shows it;
@@ -1181,7 +1333,10 @@ impl std::fmt::Display for PickItem {
 /// Interactive strand chooser: fzf when available (with a preview pane),
 /// otherwise an arrow-key inquire menu. stdout stays clean for --print-id. In a
 /// non-TTY context it fails closed rather than blocking on input.
-fn pick_strand_id(strands: &[projection::ProjectedStrand]) -> Result<String, String> {
+fn pick_strand_id(
+    strands: &[projection::ProjectedStrand],
+    rows: &[(usize, usize, usize)],
+) -> Result<String, String> {
     let interactive = atty::is(atty::Stream::Stdout) || atty::is(atty::Stream::Stderr);
     if !interactive {
         return Err(
@@ -1189,14 +1344,16 @@ fn pick_strand_id(strands: &[projection::ProjectedStrand]) -> Result<String, Str
                 .to_string(),
         );
     }
-    if let Some(selected) = pick_with_fzf(strands)? {
+    if let Some(selected) = pick_with_fzf(strands, rows)? {
         return Ok(selected);
     }
-    let items: Vec<PickItem> = strands
+    let state_w = pick_state_width(strands, rows);
+    let items: Vec<PickItem> = rows
         .iter()
-        .map(|strand| PickItem {
-            id: strand.id.clone(),
-            label: pick_label(strand),
+        .enumerate()
+        .map(|(seq0, &(depth, idx, extra))| PickItem {
+            id: strands[idx].id.clone(),
+            label: pick_label(seq0 + 1, depth, extra, state_w, &strands[idx]),
         })
         .collect();
     match inquire::Select::new("pick a strand", items)
@@ -1210,7 +1367,10 @@ fn pick_strand_id(strands: &[projection::ProjectedStrand]) -> Result<String, Str
     }
 }
 
-fn pick_with_fzf(strands: &[projection::ProjectedStrand]) -> Result<Option<String>, String> {
+fn pick_with_fzf(
+    strands: &[projection::ProjectedStrand],
+    rows: &[(usize, usize, usize)],
+) -> Result<Option<String>, String> {
     let exe = std::env::current_exe().map_err(|e| format!("pick failed: {}", e))?;
     let preview = format!("{} show {{1}} --tail 8", quote_preview_exe(&exe));
     let mut child = match Command::new("fzf")
@@ -1219,7 +1379,7 @@ fn pick_with_fzf(strands: &[projection::ProjectedStrand]) -> Result<Option<Strin
         .arg("--delimiter=\\t")
         .arg("--preview")
         .arg(preview)
-        .arg("--preview-window=right:50%")
+        .arg("--preview-window=right:50%:wrap")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -1235,9 +1395,15 @@ fn pick_with_fzf(strands: &[projection::ProjectedStrand]) -> Result<Option<Strin
             .stdin
             .take()
             .ok_or_else(|| "pick failed: fzf stdin unavailable".to_string())?;
-        for strand in strands {
-            writeln!(stdin, "{}\t{}", strand.id, pick_label_ansi(strand))
-                .map_err(|e| format!("pick failed: {}", e))?;
+        let state_w = pick_state_width(strands, rows);
+        for (seq0, &(depth, idx, extra)) in rows.iter().enumerate() {
+            writeln!(
+                stdin,
+                "{}\t{}",
+                strands[idx].id,
+                pick_label_ansi(seq0 + 1, depth, extra, state_w, &strands[idx])
+            )
+            .map_err(|e| format!("pick failed: {}", e))?;
         }
     }
 

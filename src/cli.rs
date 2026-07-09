@@ -408,7 +408,7 @@ Rules:
         /// Print the selected canonical full strand id instead of running a command
         #[arg(long = "print-id")]
         print_id: bool,
-        /// Include hidden strands in the picker
+        /// Include closed and hidden strands (default: only active + visible; --all is an alias)
         #[arg(long = "include-hidden", alias = "all")]
         include_hidden: bool,
     },

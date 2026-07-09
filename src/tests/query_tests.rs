@@ -1032,7 +1032,7 @@ fn pick_fails_in_non_tty_instead_of_waiting() {
 }
 
 #[test]
-fn pick_label_carries_id_prefix_state_first_and_last_summary() {
+fn pick_label_leads_with_seq_drops_id_and_tail() {
     let _env = setup();
     let id = create_strand("design the picker");
     cmd_append(
@@ -1050,22 +1050,26 @@ fn pick_label_carries_id_prefix_state_first_and_last_summary() {
     let (events, _) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
     let s = strands.iter().find(|s| s.id == id).unwrap();
-    let label = crate::commands::query::pick_label(s);
+    let label = crate::commands::query::pick_label(7, 0, 0, 6, s);
     assert!(
-        label.contains(&id[..8]),
-        "label carries the id prefix: {label}"
+        label.trim_start().starts_with("7."),
+        "row leads with the sequence number: {label}"
     );
-    assert!(label.contains("○ open"), "label carries state: {label}");
+    assert!(
+        !label.contains(&id[..8]),
+        "human row drops the 64-hex id (it travels hidden): {label}"
+    );
+    assert!(label.contains("○ open"), "row carries state: {label}");
     assert!(
         label.contains("design the picker"),
-        "label carries the first summary: {label}"
+        "row carries the first summary: {label}"
     );
     assert!(
-        label.contains("→"),
-        "label separates first and last: {label}"
+        !label.contains("→"),
+        "no tail arrow — the preview pane shows the tail: {label}"
     );
     assert!(
-        label.contains("preview the newest tail"),
-        "label carries the last summary: {label}"
+        !label.contains("preview the newest tail"),
+        "the tail summary is not crammed into the row: {label}"
     );
 }
