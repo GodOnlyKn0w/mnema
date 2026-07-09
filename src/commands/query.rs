@@ -475,6 +475,16 @@ pub(crate) fn orient_plan(events: &[(usize, Event)], req: &OrientRequest) -> Ori
 }
 
 /// Print the needs-judgment block (CORPUS §8, question ③) — nothing when clear.
+
+fn print_collaboration_pull(strands: &[projection::ProjectedStrand]) {
+    if let Some(forest) = projection::find_recent_collaboration_forest(strands) {
+        println!(
+            "collaboration: mnema explain collaboration | mnema tree --id {}",
+            shorten(&forest.root_id)
+        );
+    }
+}
+
 fn print_orient_notices(notices: &[String]) {
     if notices.is_empty() {
         return;
@@ -565,6 +575,7 @@ pub(crate) fn cmd_orient(
             print_orient_notices(&out.notices);
             println!("remind: {}", out.remind);
             println!("{}", out.pause);
+            print_collaboration_pull(strands);
         }
     } else if format == Some("json") {
         println!("{}", serde_json::to_string(&out).expect("serialize"));
@@ -608,6 +619,7 @@ pub(crate) fn cmd_orient(
         print_orient_notices(&out.notices);
         println!("remind: {}", out.remind);
         println!("{}", out.pause);
+        print_collaboration_pull(strands);
     }
 
     if skipped > 0 {

@@ -600,6 +600,120 @@ fn orient_is_pure_read() {
     assert_eq!(before, after, "orient must never write to the journal");
 }
 
+
+#[test]
+fn collaboration_forest_discovery_requires_synthesis_after_child_closes() {
+    let _env = setup();
+    let parent = create_strand("parent coordination task");
+    let child_a = create_strand("worker A");
+    let child_b = create_strand("worker B");
+    cmd_link(&child_a, &parent, Some("belongs-to"), false, None).unwrap();
+    cmd_link(&child_b, &parent, Some("belongs-to"), false, None).unwrap();
+    cmd_append(
+        Some("[coordination synthesis] too early"),
+        None,
+        false,
+        false,
+        None,
+        Some(&parent),
+        None,
+        None,
+    )
+    .unwrap();
+    cmd_close(&child_a, Some("done"), None, false).unwrap();
+    cmd_close(&child_b, Some("done"), None, false).unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    assert!(
+        projection::find_recent_collaboration_forest(&strands).is_none(),
+        "synthesis before the last child close must not qualify"
+    );
+
+    cmd_append(
+        Some("[coordination synthesis] after both workers closed"),
+        None,
+        false,
+        false,
+        None,
+        Some(&parent),
+        None,
+        None,
+    )
+    .unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let forest = projection::find_recent_collaboration_forest(&strands)
+        .expect("forest should qualify after late synthesis");
+    assert_eq!(forest.root_id, parent);
+}
+
+#[test]
+fn collaboration_forest_discovery_picks_recent_qualified_forest() {
+    let _env = setup();
+    let older = create_strand("older parent");
+    let newer = create_strand("newer parent");
+    for parent in [&older, &newer] {
+        let child_a = create_strand(&format!("worker A for {}", parent));
+        let child_b = create_strand(&format!("worker B for {}", parent));
+        cmd_link(&child_a, parent, Some("belongs-to"), false, None).unwrap();
+        cmd_link(&child_b, parent, Some("belongs-to"), false, None).unwrap();
+        cmd_close(&child_a, Some("done"), None, false).unwrap();
+        cmd_close(&child_b, Some("done"), None, false).unwrap();
+        cmd_append(
+            Some("[coordination synthesis] workers closed done"),
+            None,
+            false,
+            false,
+            None,
+            Some(parent),
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let forest = projection::find_recent_collaboration_forest(&strands)
+        .expect("one forest should qualify");
+    assert_eq!(forest.root_id, newer);
+}
+
+#[test]
+fn explain_collaboration_is_pure_read_and_points_to_local_tree() {
+    let _env = setup();
+    let parent = create_strand("parent coordination task");
+    let child_a = create_strand("worker A");
+    let child_b = create_strand("worker B");
+    cmd_link(&child_a, &parent, Some("belongs-to"), false, None).unwrap();
+    cmd_link(&child_b, &parent, Some("belongs-to"), false, None).unwrap();
+    cmd_close(&child_a, Some("done"), None, false).unwrap();
+    cmd_close(&child_b, Some("done"), None, false).unwrap();
+    cmd_append(
+        Some("[coordination synthesis] workers closed done"),
+        None,
+        false,
+        false,
+        None,
+        Some(&parent),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let path = ensure_journal().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let output = crate::commands::explain::cmd_explain("collaboration", false);
+    let after = std::fs::read(&path).unwrap();
+
+    assert_eq!(before, after, "explain collaboration must not write journal");
+    assert!(output.contains("mnema add --parent <母线>"));
+    assert!(output.contains(&format!("mnema tree --id {}", shorten(&parent))));
+}
+
 #[test]
 fn export_creates_file_with_metadata_header() {
     let _env = setup();
