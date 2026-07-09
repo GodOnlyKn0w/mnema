@@ -219,6 +219,163 @@ fn help_examples_parse_against_real_cli() {
 }
 
 #[test]
+fn remind_and_explain_taught_commands_parse_against_real_cli() {
+    let mut commands: Vec<(String, String)> = Vec::new();
+    collect_taught_commands("ORIENT_REMIND", ORIENT_REMIND, &mut commands);
+    for topic in diagnostics::topics() {
+        collect_taught_commands(
+            &format!("explain {}", topic.name),
+            topic.body,
+            &mut commands,
+        );
+    }
+
+    let mut checked = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for (source, command) in commands {
+        if !command.starts_with("mnema ") {
+            failures.push(format!(
+                "{} teaches a command without the `mnema` prefix: `{}`",
+                source, command
+            ));
+            continue;
+        }
+        checked += 1;
+        if let Err(e) = try_parse_example(&command) {
+            failures.push(format!("{}: {}", source, e));
+        }
+    }
+
+    assert!(
+        checked > 10,
+        "expected taught commands in ORIENT_REMIND/explain topics, found {}",
+        checked
+    );
+    assert!(
+        failures.is_empty(),
+        "broken taught commands in ORIENT_REMIND/explain topics:\n{}",
+        failures.join("\n")
+    );
+}
+
+fn collect_taught_commands(source: &str, text: &str, out: &mut Vec<(String, String)>) {
+    for (line_idx, line) in text.lines().enumerate() {
+        for fragment in line.split('|') {
+            if let Some(command) = extract_prefixed_command(fragment) {
+                out.push((format!("{}:{}", source, line_idx + 1), command));
+            } else if let Some(command) = extract_bare_taught_command(fragment) {
+                out.push((format!("{}:{}", source, line_idx + 1), command));
+            }
+        }
+    }
+}
+
+fn extract_prefixed_command(fragment: &str) -> Option<String> {
+    let start = fragment.find("mnema ")?;
+    let raw = &fragment[start..];
+    if raw.contains("命令") && !raw.contains("--") && !raw.contains('<') {
+        return None;
+    }
+    let command = clean_taught_command(raw);
+    if command == "mnema" {
+        None
+    } else {
+        Some(command)
+    }
+}
+
+fn extract_bare_taught_command(fragment: &str) -> Option<String> {
+    if fragment.contains("mnema ") {
+        return None;
+    }
+
+    let mut candidates: Vec<&str> = vec![fragment.trim()];
+    if let Some((_, rhs)) = fragment.rsplit_once('→') {
+        candidates.push(rhs.trim());
+    }
+    if let Some((_, rhs)) = fragment.rsplit_once('用') {
+        candidates.push(rhs.trim());
+    }
+
+    for candidate in candidates {
+        let candidate = candidate.trim_start_matches([':', '：', '-', ' ']);
+        let mut words = candidate.split_whitespace();
+        let Some(first) = words.next() else {
+            continue;
+        };
+        let Some(second) = words.next() else {
+            continue;
+        };
+        if is_mnema_subcommand(first) && (second.starts_with("--") || second.contains('<')) {
+            return Some(clean_taught_command(candidate));
+        }
+    }
+    None
+}
+
+fn is_mnema_subcommand(word: &str) -> bool {
+    matches!(
+        word,
+        "add"
+            | "append"
+            | "checkpoint"
+            | "close"
+            | "depends"
+            | "doctor"
+            | "export"
+            | "find"
+            | "hide"
+            | "init"
+            | "link"
+            | "list"
+            | "orient"
+            | "pick"
+            | "reopen"
+            | "search"
+            | "show"
+            | "timeline"
+            | "tree"
+            | "unhide"
+            | "cutover-v2"
+            | "explain"
+    )
+}
+
+fn clean_taught_command(raw: &str) -> String {
+    let mut tokens: Vec<String> = Vec::new();
+    for token in raw.split_whitespace() {
+        if token == "/" || token == "命令" || token.starts_with("[--") {
+            break;
+        }
+        let (cleaned, stop) = clean_taught_token(token);
+        if !cleaned.is_empty() {
+            tokens.push(cleaned);
+        }
+        if stop {
+            break;
+        }
+    }
+    tokens.join(" ")
+}
+
+fn clean_taught_token(token: &str) -> (String, bool) {
+    let mut cleaned = String::new();
+    for ch in token.chars() {
+        if matches!(
+            ch,
+            '。' | '；' | '，' | '：' | '（' | '）' | '(' | ')' | ',' | ';' | ':'
+        ) {
+            return (cleaned, true);
+        }
+        cleaned.push(ch);
+    }
+    let trimmed = cleaned
+        .trim_end_matches(['.', ',', ';', ':', ')', '。', '；', '，', '：', '）'])
+        .to_string();
+    (trimmed, false)
+}
+
+#[test]
 fn help_topic_references_exist() {
     // "引用即契约": any `mnema explain <word>` line in after_help where
     // <word> is all-lowercase must resolve via topic_lookup.

@@ -124,7 +124,7 @@ impl<'a> ExplainUnknownOutput<'a> {
 // ── orient --format json ───────────────────────────────────
 
 /// Orient remind line: the operating loop surfaced by orient outputs.
-pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → echo \"[decision] ...\" | mnema append --id <ID> | new matter → echo \"<summary>\" | mnema add | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | read/extract → --format json | jq（id/offset/status，非文本切割）| more → mnema --help";
+pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → echo \"[decision] ...\" | mnema append --id <ID> | new matter → echo \"<summary>\" | mnema add | matter concluded → mnema close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → mnema checkpoint --id <ID> --action \"<why>\" | read/extract → --format json | jq（id/offset/status，非文本切割）| more → mnema --help";
 
 /// Pause guidance — the one place it can live (CORPUS §8): the tool can't stop
 /// the irreversible moment and a cold-start LLM won't go looking for it, so its
