@@ -222,7 +222,7 @@ entry 形状模板：
         body: r#"协作只记录 journal 侧结构；怎么启动执行者属于外层约定。
 
 结构：
-  每路工作一条 strand；派生工作用 mnema add --parent <母线> 建 belongs-to 子线。
+  每路工作一条 strand；派生工作用 mnema add --parent <母线>，建 belongs-to 子线。
   子线 entry 首行自报身份：谁派的哪一路；不要把外层启动细节写成工具规范。
   belongs-to 方向是子指父：CHILD belongs-to PARENT，tree 把 CHILD 缩进到 PARENT 下。
   depends-on 方向是任务指阻塞者：TASK depends-on BLOCKER，BLOCKER 需要先推进。
