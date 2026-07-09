@@ -1,4 +1,5 @@
 use super::*;
+use std::ffi::OsString;
 
 #[test]
 fn chdir_flag_parses_before_subcommand() {
@@ -12,8 +13,7 @@ fn chdir_flag_parses_before_subcommand() {
 #[test]
 fn chdir_longform_parses() {
     use clap::CommandFactory;
-    let result =
-        Cli::command().try_get_matches_from(["mnema", "--chdir", "/some/dir", "orient"]);
+    let result = Cli::command().try_get_matches_from(["mnema", "--chdir", "/some/dir", "orient"]);
     assert!(result.is_ok(), "--chdir long form must parse: {:?}", result);
 }
 
@@ -228,6 +228,28 @@ fn remind_and_explain_taught_commands_parse_against_real_cli() {
             topic.body,
             &mut commands,
         );
+    }
+    for (source, args, kind) in [
+        (
+            "parse recovery add positional body",
+            vec!["mnema", "add", "x"],
+            clap::error::ErrorKind::UnknownArgument,
+        ),
+        (
+            "parse recovery append positional body",
+            vec!["mnema", "append", "x"],
+            clap::error::ErrorKind::UnknownArgument,
+        ),
+        (
+            "parse recovery missing checkpoint action",
+            vec!["mnema", "checkpoint", "--id", "0000019dd34b"],
+            clap::error::ErrorKind::MissingRequiredArgument,
+        ),
+    ] {
+        let args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
+        let hint = crate::cli::parse_error_recovery_hint(&args, kind)
+            .unwrap_or_else(|| panic!("{} produced no recovery hint", source));
+        collect_taught_commands(source, &hint, &mut commands);
     }
 
     let mut checked = 0usize;
@@ -591,8 +613,7 @@ fn grammar_write_commands_accept_id_flag_without_content_position() {
     );
     let stdin_flag = Cli::command().try_get_matches_from(["mnema", "append", "--stdin"]);
     assert!(stdin_flag.is_err(), "append --stdin must not parse");
-    let file_flag =
-        Cli::command().try_get_matches_from(["mnema", "append", "--file", "note.md"]);
+    let file_flag = Cli::command().try_get_matches_from(["mnema", "append", "--file", "note.md"]);
     assert!(file_flag.is_err(), "append --file must not parse");
 
     let checkpoint = Cli::command().try_get_matches_from([
@@ -1038,8 +1059,7 @@ fn id_target_flag_and_positional_equivalent() {
 #[test]
 fn id_target_conflict_rejected() {
     use clap::CommandFactory;
-    let result =
-        Cli::command().try_get_matches_from(["mnema", "show", "000653", "--id", "000653"]);
+    let result = Cli::command().try_get_matches_from(["mnema", "show", "000653", "--id", "000653"]);
     assert!(
         result.is_err(),
         "show with both positional and --id must be rejected"
@@ -1078,8 +1098,7 @@ fn last_flag_parses_on_read_and_append_commands() {
         assert!(r.is_ok(), "`{} --last` must parse: {:?}", cmd, r.err());
     }
     // checkpoint requires --action alongside --last
-    let r =
-        Cli::command().try_get_matches_from(["mnema", "checkpoint", "--last", "--action", "x"]);
+    let r = Cli::command().try_get_matches_from(["mnema", "checkpoint", "--last", "--action", "x"]);
     assert!(
         r.is_ok(),
         "`checkpoint --last --action` must parse: {:?}",
@@ -1112,8 +1131,7 @@ fn last_conflicts_with_explicit_id() {
 #[test]
 fn timeline_id_alias() {
     use clap::CommandFactory;
-    let result =
-        Cli::command().try_get_matches_from(["mnema", "timeline", "--id", "0000019dd34b"]);
+    let result = Cli::command().try_get_matches_from(["mnema", "timeline", "--id", "0000019dd34b"]);
     assert!(
         result.is_ok(),
         "timeline --id should parse via visible_alias on --strand: {:?}",

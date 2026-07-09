@@ -600,7 +600,6 @@ fn orient_is_pure_read() {
     assert_eq!(before, after, "orient must never write to the journal");
 }
 
-
 #[test]
 fn collaboration_forest_discovery_requires_synthesis_after_child_closes() {
     let _env = setup();
@@ -677,8 +676,8 @@ fn collaboration_forest_discovery_picks_recent_qualified_forest() {
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
-    let forest = projection::find_recent_collaboration_forest(&strands)
-        .expect("one forest should qualify");
+    let forest =
+        projection::find_recent_collaboration_forest(&strands).expect("one forest should qualify");
     assert_eq!(forest.root_id, newer);
 }
 
@@ -709,7 +708,10 @@ fn explain_collaboration_is_pure_read_and_points_to_local_tree() {
     let output = crate::commands::explain::cmd_explain("collaboration", false);
     let after = std::fs::read(&path).unwrap();
 
-    assert_eq!(before, after, "explain collaboration must not write journal");
+    assert_eq!(
+        before, after,
+        "explain collaboration must not write journal"
+    );
     assert!(output.contains("mnema add --parent <母线>"));
     assert!(output.contains(&format!("mnema tree --id {}", shorten(&parent))));
 }
@@ -1250,6 +1252,46 @@ fn orient_latest_friction_hands_off_fix_prefix() {
             .remind
             .contains(&format!("mnema append --id {}", shorten(&id))),
         "remind must include copyable append command: {}",
+        plan.output.remind
+    );
+}
+
+#[test]
+fn orient_latest_closed_line_teaches_successor_not_append_to_closed() {
+    let _env = setup();
+    let active = create_strand("still active");
+    let closed = create_strand("finished thread");
+    cmd_close(&closed, Some("done"), None, false).unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let plan = orient_plan(
+        &events,
+        &OrientRequest {
+            include_hidden: false,
+            limit: None,
+        },
+    );
+
+    assert!(
+        plan.output.remind.contains("mnema add --from"),
+        "closed latest line should produce a successor command: {}",
+        plan.output.remind
+    );
+    assert!(
+        !plan
+            .output
+            .remind
+            .contains(&format!("mnema append --id {}", shorten(&closed))),
+        "orient must not teach appending to a closed latest line: {}",
+        plan.output.remind
+    );
+    assert!(
+        !plan
+            .output
+            .remind
+            .contains(&format!("mnema append --id {}", shorten(&active))),
+        "closed global latest should not silently hand off an older active line: {}",
         plan.output.remind
     );
 }

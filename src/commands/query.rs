@@ -513,9 +513,21 @@ struct LatestOrientEntry<'a> {
 fn latest_visible_entry<'a>(
     strands: &'a [projection::ProjectedStrand],
     include_hidden: bool,
+) -> Option<(&'a projection::ProjectedStrand, &'a projection::LogEntry)> {
+    strands
+        .iter()
+        .filter(|s| !s.hidden || include_hidden)
+        .flat_map(|strand| strand.log.iter().map(move |entry| (strand, entry)))
+        .max_by_key(|(_, entry)| entry.offset)
+}
+
+fn latest_active_visible_entry<'a>(
+    strands: &'a [projection::ProjectedStrand],
+    include_hidden: bool,
 ) -> Option<LatestOrientEntry<'a>> {
     strands
         .iter()
+        .filter(|s| s.state() == "registered")
         .filter(|s| !s.hidden || include_hidden)
         .flat_map(|strand| {
             strand.log.iter().map(move |entry| LatestOrientEntry {
@@ -545,10 +557,39 @@ fn adaptive_orient_remind(
     score: u8,
 ) -> String {
     let link_hint = active_pair_hint(view);
-    let Some(latest) = latest_visible_entry(strands, include_hidden) else {
-        return "loop: 做一步·看现实变·再想 | write moments: 方案成形 / 判断被现实改变 / 收口或不可逆前 | start → echo \"<summary>\" | mnema add | writing drill → mnema explain writing | more → mnema --help".to_string();
+    let Some((latest_strand, latest_entry)) = latest_visible_entry(strands, include_hidden) else {
+        return r#"loop: 做一步·看现实变·再想 | write moments: 方案成形 / 判断被现实改变 / 收口或不可逆前 | start → echo "<summary>" | mnema add | writing drill → mnema explain writing | more → mnema --help"#.to_string();
     };
 
+    if latest_strand.state() != "registered" {
+        let strand = shorten(&latest_strand.id);
+        let from = latest_entry
+            .entry_id
+            .as_deref()
+            .map(shorten)
+            .unwrap_or_else(|| strand.clone());
+        let next = format!(
+            r#"next: latest entry on closed line {}; continue as successor → echo "<summary>" | mnema add --from {}"#,
+            strand, from
+        );
+        let teaching = if score < 30 {
+            " | write moments: 方案成形 / 判断被现实改变 / 收口或不可逆前 | template: mnema explain writing"
+        } else if score < 75 {
+            " | writing template: mnema explain writing"
+        } else {
+            " | more: mnema --help"
+        };
+        return match link_hint {
+            Some(hint) => format!(
+                "loop: 做一步·看现实变·再想 | {} | {}{}",
+                next, hint, teaching
+            ),
+            None => format!("loop: 做一步·看现实变·再想 | {}{}", next, teaching),
+        };
+    }
+
+    let latest = latest_active_visible_entry(strands, include_hidden)
+        .expect("latest visible registered strand should have a latest active entry");
     let strand = shorten(latest.strand_id);
     let entry_prefix = latest
         .entry
@@ -1426,7 +1467,11 @@ fn pick_forest_rows(strands: &[projection::ProjectedStrand]) -> Vec<(usize, usiz
         memo.entry(i)
             .or_insert_with(|| strands[i].last_ts().to_string());
     }
-    let rank = |a: usize, b: usize| memo[&b].cmp(&memo[&a]).then_with(|| strands[a].id.cmp(&strands[b].id));
+    let rank = |a: usize, b: usize| {
+        memo[&b]
+            .cmp(&memo[&a])
+            .then_with(|| strands[a].id.cmp(&strands[b].id))
+    };
 
     let mut roots: Vec<usize> = (0..strands.len())
         .filter(|i| !primary_parent.contains_key(i))

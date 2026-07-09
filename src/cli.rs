@@ -6,6 +6,7 @@ use crate::commands::write::*;
 use crate::diagnostics;
 use crate::journal::{JOURNAL_DIR, JOURNAL_FILE};
 use clap::{Parser, Subcommand, error::ErrorKind};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 fn version_info() -> &'static str {
@@ -779,17 +780,234 @@ pub(crate) fn main() {
 /// Parse argv into a `Cli`, or print clap's help/error and exit: code 0 for
 /// `--help`/`--version`, code 3 for a parse/usage error.
 fn parse_cli_or_exit() -> Cli {
-    match Cli::try_parse() {
+    let args: Vec<OsString> = std::env::args_os().collect();
+    match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(err) => {
-            let code = match err.kind() {
+            let kind = err.kind();
+            let code = match kind {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => 0,
                 _ => 3,
             };
+            let recovery = parse_error_recovery_hint(&args, kind);
             let _ = err.print();
+            if let Some(recovery) = recovery {
+                eprintln!("\n{}", recovery);
+            }
             std::process::exit(code);
         }
     }
+}
+
+pub(crate) fn parse_error_recovery_hint(args: &[OsString], kind: ErrorKind) -> Option<String> {
+    if matches!(kind, ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+        return None;
+    }
+    let tokens: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let (command_index, command) = first_cli_command(&tokens)?;
+    if matches!(command, "add" | "append") {
+        if let Some(hint) = stdin_body_recovery(command, &tokens[command_index + 1..]) {
+            return Some(hint);
+        }
+    }
+    if !is_known_cli_command(command) {
+        return nearest_cli_command(command).map(|nearest| {
+            format!(
+                "try this:
+  mnema {} --help",
+                nearest
+            )
+        });
+    }
+    canonical_cli_shape(command).map(|shape| {
+        format!(
+            "standard shape:
+  {}",
+            shape
+        )
+    })
+}
+
+fn first_cli_command(tokens: &[String]) -> Option<(usize, &str)> {
+    let mut i = 1usize;
+    while i < tokens.len() {
+        let token = tokens[i].as_str();
+        if token == "-C" || token == "--chdir" {
+            i += 2;
+            continue;
+        }
+        if token.starts_with("--chdir=") || (token.starts_with("-C") && token.len() > 2) {
+            i += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        return Some((i, token));
+    }
+    None
+}
+
+fn stdin_body_recovery(command: &str, rest: &[String]) -> Option<String> {
+    let mut kept: Vec<String> = Vec::new();
+    let mut body: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < rest.len() {
+        let token = rest[i].as_str();
+        if token.starts_with("--") {
+            kept.push(rest[i].clone());
+            if !token.contains('=') && stdin_command_flag_takes_value(command, token) {
+                if let Some(value) = rest.get(i + 1) {
+                    kept.push(value.clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            kept.push(rest[i].clone());
+            if stdin_command_flag_takes_value(command, token) {
+                if let Some(value) = rest.get(i + 1) {
+                    kept.push(value.clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        body.push(rest[i].clone());
+        i += 1;
+    }
+    if body.is_empty() {
+        return None;
+    }
+    let mut corrected = format!("mnema {}", command);
+    for token in kept {
+        corrected.push(' ');
+        corrected.push_str(&token);
+    }
+    Some(format!(
+        "try this:
+  echo {} | {}",
+        echo_double_quoted(&body.join(" ")),
+        corrected
+    ))
+}
+
+fn stdin_command_flag_takes_value(command: &str, flag: &str) -> bool {
+    let flag = flag.split_once('=').map(|(name, _)| name).unwrap_or(flag);
+    match command {
+        "add" => matches!(
+            flag,
+            "--format"
+                | "--parent"
+                | "--belongs-to"
+                | "--from"
+                | "--slug"
+                | "--type"
+                | "--provenance"
+        ),
+        "append" => matches!(
+            flag,
+            "--format" | "-f" | "--id" | "--provenance" | "--seen-offset" | "--why"
+        ),
+        _ => false,
+    }
+}
+
+fn echo_double_quoted(text: &str) -> String {
+    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{}\"", escaped)
+}
+
+fn canonical_cli_shape(command: &str) -> Option<&'static str> {
+    match command {
+        "add" => Some(r#"echo "<summary>" | mnema add"#),
+        "append" => Some(r#"echo "<entry>" | mnema append --id <ID>"#),
+        "checkpoint" => Some(r#"mnema checkpoint --id <ID> --action "<action and reason>""#),
+        "close" => Some("mnema close --id <ID>"),
+        "depends" => Some("mnema depends --id <ID>"),
+        "doctor" => Some("mnema doctor journal"),
+        "export" => Some("mnema export --out <PATH>"),
+        "find" => Some("mnema find <ID>"),
+        "hide" => Some("mnema hide --id <ID>"),
+        "init" => Some("mnema init"),
+        "link" => Some("mnema link <SOURCE> <TARGET> --edge-type depends-on"),
+        "list" => Some("mnema list"),
+        "orient" => Some("mnema orient"),
+        "pick" => Some("mnema pick show"),
+        "reopen" => Some("mnema reopen --id <ID>"),
+        "search" => Some("mnema search <query>"),
+        "show" => Some("mnema show --id <ID>"),
+        "timeline" => Some("mnema timeline"),
+        "tree" => Some("mnema tree --id <ID>"),
+        "unlink" => Some("mnema unlink <SOURCE> <TARGET> --edge-type depends-on"),
+        "unhide" => Some("mnema unhide --id <ID>"),
+        "cutover-v2" => Some("mnema cutover-v2 --out <PATH>"),
+        "explain" => Some("mnema explain grammar"),
+        _ => None,
+    }
+}
+
+fn is_known_cli_command(command: &str) -> bool {
+    canonical_cli_shape(command).is_some()
+}
+
+fn nearest_cli_command(command: &str) -> Option<&'static str> {
+    const COMMANDS: &[&str] = &[
+        "add",
+        "append",
+        "checkpoint",
+        "close",
+        "depends",
+        "doctor",
+        "export",
+        "find",
+        "hide",
+        "init",
+        "link",
+        "list",
+        "orient",
+        "pick",
+        "reopen",
+        "search",
+        "show",
+        "timeline",
+        "tree",
+        "unlink",
+        "unhide",
+        "cutover-v2",
+        "explain",
+    ];
+    COMMANDS
+        .iter()
+        .copied()
+        .map(|candidate| (candidate, edit_distance(command, candidate)))
+        .filter(|(_, distance)| *distance <= 2)
+        .min_by_key(|(_, distance)| *distance)
+        .map(|(candidate, _)| candidate)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+    let mut curr = vec![0usize; b_chars.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b_chars.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_chars.len()]
 }
 
 /// Apply `-C/--chdir` before any journal resolution; exit 3 on a missing or
