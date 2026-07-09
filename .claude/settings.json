@@ -20,7 +20,11 @@
       "PowerShell(git status *)",
       "PowerShell(git -C D:\\forks\\tasktree-core diff *)",
       "PowerShell(git -C D:\\forks\\tasktree-core log *)",
-      "PowerShell(git -C D:\\forks\\tasktree-core status *)"
+      "PowerShell(git -C D:\\forks\\tasktree-core status *)",
+      "Bash(mnema *)",
+      "PowerShell(mnema *)",
+      "PowerShell(Set-Location D:\\forks\\tasktree-core; mnema *)",
+      "Bash(cd /d/forks/tasktree-core && mnema *)"
     ]
   }
 }

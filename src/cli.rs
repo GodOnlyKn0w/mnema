@@ -555,12 +555,12 @@ Examples:
     /// Explain a diagnostic code or encyclopaedia topic
     ///
     /// Namespace rule: diagnostic codes begin with an uppercase letter
-    /// (W062, E053); topics are all-lowercase (card, markers, retry, json, jq, grammar, writing).
+    /// (W062, E053); topics are all-lowercase (card, markers, retry, json, jq, grammar, writing, collaboration).
     /// The two namespaces are mechanically disjoint.
     #[command(after_help = "\
 Namespaces:
   Diagnostic codes   uppercase-initial: W062, E053, w062 (case-insensitive)
-  Topics             all-lowercase:     card, markers, retry, json, jq, grammar, writing
+  Topics             all-lowercase:     card, markers, retry, json, jq, grammar, writing, collaboration
 
 Topics:
   card      卡片：统一输出文法单元（格式、字段、回显语义）
@@ -570,6 +570,7 @@ Topics:
   jq        jq 整型：把 --format json 输出切成你要的形
   grammar   文法契约：全 CLI 一致的参数与命名规则
   writing   写入时机、entry 模板、临时 journal 演练脚本
+  collaboration  协作 forest：多路工作在 journal 里的形状
 
 Examples:
   mnema explain W062
@@ -579,6 +580,7 @@ Examples:
   mnema explain retry
   mnema explain grammar
   mnema explain writing
+  mnema explain collaboration
   mnema explain W062 --format json
   mnema explain card --json")]
     Explain {

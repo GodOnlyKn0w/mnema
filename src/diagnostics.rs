@@ -217,6 +217,31 @@ entry 形状模板：
   mnema -C <tmp> timeline --links <ID>"#,
     },
     TopicInfo {
+        name: "collaboration",
+        title: "协作 forest——多路工作在 journal 里的形状",
+        body: r#"协作只记录 journal 侧结构；怎么启动执行者属于外层约定。
+
+结构：
+  每路工作一条 strand；派生工作用 mnema add --parent <母线> 建 belongs-to 子线。
+  子线 entry 首行自报身份：谁派的哪一路；不要把外层启动细节写成工具规范。
+  belongs-to 方向是子指父：CHILD belongs-to PARENT，tree 把 CHILD 缩进到 PARENT 下。
+  depends-on 方向是任务指阻塞者：TASK depends-on BLOCKER，BLOCKER 需要先推进。
+
+纪律：
+  交付物落在自己的 strand；外层 stdout 只留一个可追的 strand 指针。
+  worker 收工用 mnema close --id <ID> --as done|failed，不用 [done] 改生命周期。
+  协调者收工先读子线 entries 和 close 状态，不信外层 stdout 自报成功。
+  母线最后写综合/收束 entry，把子线结论合并成可审计结果。
+
+派发判据：
+  能并行摊开的审查、扫描、交叉验证才拆成多条子线。
+  串行实现、一次只能一路推进的改码，留在当前线自己做。
+
+常用读法：
+  mnema tree --id <母线>
+  mnema depends --id <任务线>"#,
+    },
+    TopicInfo {
         name: "grammar",
         title: "文法契约——全 CLI 一致的参数与命名规则",
         body: r#"目标线：单 id 命令两种写法等价（位置 <ID> 与 --id <ID>）；"最近活跃线"统一用 --last。
@@ -743,7 +768,7 @@ mod tests {
     fn explain_topics_resolve() {
         // All topics resolve in both text and JSON modes.
         for name in [
-            "card", "markers", "retry", "json", "jq", "grammar", "writing",
+            "card", "markers", "retry", "json", "jq", "grammar", "writing", "collaboration",
         ] {
             let text = cmd_explain(name, false);
             assert!(
