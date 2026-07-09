@@ -139,8 +139,10 @@ search（SearchOutput）：
   matches / count / query / marker
   ※ matches[]：strand_id / content / strand_type / hidden / entry_id / marker（entry_id=全哈希供 fixes=/--why；marker null=未筛）
 doctor edges（EdgesOutput）：
-  open_frictions / decisions_without_why / open_friction_count / decision_without_why_count
-  ※ 项：entry_id / strand_id / marker / content / offset（open unfixed friction + decision 无 --why）
+  open_frictions / decisions_without_why / open_friction_count / open_friction_active_count / decision_without_why_count
+  ※ 项：entry_id / strand_id / marker / content / offset
+  ※ unfixed friction=无 fixes= 指它（不按 home strand 开闭过滤）；active_count=其中 registered 线上
+  ※ decision 无 --why；--since N 只跳过 offset<=N 的存量 decision
 timeline（TimelineOutput）：
   timeline / truncated / count / max_offset
   ※ timeline[]：journal_offset / ts / strand_id / strand_type / kind / ts_skew
@@ -988,6 +990,7 @@ mod tests {
             open_frictions: vec![],
             decisions_without_why: vec![],
             open_friction_count: 0,
+            open_friction_active_count: 0,
             decision_without_why_count: 0,
         };
         let v = serde_json::to_value(&edges_sample).expect("serialize EdgesOutput");

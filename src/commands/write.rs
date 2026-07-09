@@ -328,11 +328,22 @@ pub(crate) fn cmd_add_with_parent_and_slug(
         if let Some((card, state)) = strand_card_fresh_with_state(&id) {
             print_card_with_state(&card, &state);
         }
+        // Hand-off chain: first line just born — put a paste-ready append next.
+        println!("{}", add_success_next_step(&id));
         if let Err(e) = crate::reference::remember_last_touched_current(&id) {
             eprintln!("[mnema] warning: {}", e);
         }
     }
     Ok(())
+}
+
+/// Paste-ready next step after a successful `add` (text surface only).
+/// Keeps the from-zero hand-off chain unbroken at "first line born".
+pub(crate) fn add_success_next_step(id: &str) -> String {
+    format!(
+        "next: echo \"<note>\" | mnema append --id {}",
+        crate::util::shorten(id)
+    )
 }
 
 pub(crate) struct AppendRequest<'a> {

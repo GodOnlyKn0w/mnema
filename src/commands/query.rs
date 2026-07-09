@@ -96,16 +96,21 @@ pub(crate) fn list_strands(
         });
     }
     if let Some(dur_str) = req.stale {
+        // Stale = handoff candidates: active (registered) and silent past threshold.
+        // Closed lines are noise here (last event is often the close itself).
         let secs = parse_duration(dur_str)?;
         let cutoff = now - chrono::Duration::seconds(secs as i64);
         let cutoff_str = cutoff.to_rfc3339();
         strands.retain(|n| {
-            let last_ts = n.last_ts();
-            !last_ts.is_empty() && last_ts < &cutoff_str
+            n.state() == "registered" && {
+                let last_ts = n.last_ts();
+                !last_ts.is_empty() && last_ts < &cutoff_str
+            }
         });
     }
     if let Some(offset) = req.stale_offset {
-        strands.retain(|n| n.last_offset() <= offset);
+        // Same handoff intent as --stale: only registered lines.
+        strands.retain(|n| n.state() == "registered" && n.last_offset() <= offset);
     }
     if let Some(offset) = req.since_offset {
         strands.retain(|n| n.last_offset() > offset);

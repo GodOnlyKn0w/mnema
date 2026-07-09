@@ -377,7 +377,10 @@ pub struct EdgesDisciplineItem {
 /// Edge-discipline self-check: (a) open unfixed `[friction]`, (b) `[decision]` lacking refs.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EdgesDisciplineReport {
+    /// Every unfixed `[friction]` (home strand open/closed does not matter).
     pub open_frictions: Vec<EdgesDisciplineItem>,
+    /// How many of [`Self::open_frictions`] live on a registered (active) strand.
+    pub open_friction_active_count: usize,
     pub decisions_without_why: Vec<EdgesDisciplineItem>,
 }
 
@@ -395,11 +398,24 @@ pub(crate) fn extract_fixes_prefix(content: &str) -> Option<&str> {
 
 /// Build the dangling edge-discipline report from a full strand projection.
 ///
-/// - **open frictions**: `[friction]` on a registered, non-hidden strand that no
-///   `[fixed] fixes=<prefix>` points at (prefix match against entry_id or append_id).
+/// - **unfixed frictions**: any `[friction]` that no `[fixed] fixes=<prefix>`
+///   points at (prefix match against entry_id or append_id). Home-strand
+///   open/closed is **not** a filter — a closed pilot line can still carry an
+///   unclosed design gap. Dual count: total list + how many sit on active
+///   (registered) strands. Hidden strands are skipped.
 /// - **decisions without why**: `[decision]` entries whose `refs` is empty
 ///   (no `--why` was recorded). Hidden strands are skipped.
+/// - `since_offset`: when set, skip `[decision]` entries at or before that
+///   journal offset (legacy pre-policy stock); frictions are never skipped.
 pub fn edges_discipline_report(strands: &[ProjectedStrand]) -> EdgesDisciplineReport {
+    edges_discipline_report_since(strands, None)
+}
+
+/// Same as [`edges_discipline_report`], with optional decision-offset floor.
+pub fn edges_discipline_report_since(
+    strands: &[ProjectedStrand],
+    since_offset: Option<usize>,
+) -> EdgesDisciplineReport {
     // Collect every fixes= target prefix across the whole journal.
     let mut fix_prefixes: Vec<&str> = Vec::new();
     for strand in strands {
@@ -430,18 +446,23 @@ pub fn edges_discipline_report(strands: &[ProjectedStrand]) -> EdgesDisciplineRe
     };
 
     let mut open_frictions = Vec::new();
+    let mut open_friction_active_count = 0usize;
     let mut decisions_without_why = Vec::new();
 
     for strand in strands {
         if strand.hidden {
             continue;
         }
-        let strand_open = strand.state() == "registered";
+        let strand_active = strand.state() == "registered";
         for entry in &strand.log {
             let marker = crate::markers::leading_marker(&entry.content).unwrap_or("");
             match marker {
-                "friction" if strand_open && !is_fixed(entry) => {
+                // Unfixed = no fixes= pointer; strand open/closed is irrelevant.
+                "friction" if !is_fixed(entry) => {
                     if let Some(entry_id) = entry.entry_id.clone() {
+                        if strand_active {
+                            open_friction_active_count += 1;
+                        }
                         open_frictions.push(EdgesDisciplineItem {
                             entry_id,
                             strand_id: strand.id.clone(),
@@ -452,6 +473,11 @@ pub fn edges_discipline_report(strands: &[ProjectedStrand]) -> EdgesDisciplineRe
                     }
                 }
                 "decision" if entry.refs.is_empty() => {
+                    if let Some(floor) = since_offset {
+                        if entry.offset <= floor {
+                            continue;
+                        }
+                    }
                     if let Some(entry_id) = entry.entry_id.clone() {
                         decisions_without_why.push(EdgesDisciplineItem {
                             entry_id,
@@ -469,6 +495,7 @@ pub fn edges_discipline_report(strands: &[ProjectedStrand]) -> EdgesDisciplineRe
 
     EdgesDisciplineReport {
         open_frictions,
+        open_friction_active_count,
         decisions_without_why,
     }
 }

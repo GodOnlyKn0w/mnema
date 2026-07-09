@@ -305,10 +305,12 @@ JSON shape: mnema explain json")]
         /// Filter by strand type (task|dag|why|session)
         #[arg(long = "type", value_name = "TYPE")]
         list_type: Option<String>,
-        /// Filter to strands silent for duration (s/m/h/d, e.g. 2h)
+        /// Filter to registered strands silent for duration (s/m/h/d, e.g. 2h).
+        /// Handoff candidates only — closed strands are excluded.
         #[arg(long, value_name = "DURATION")]
         stale: Option<String>,
-        /// Filter to strands with last entry offset <= N (silent)
+        /// Filter to registered strands with last entry offset <= N (silent).
+        /// Same handoff intent as --stale; closed strands are excluded.
         #[arg(long, value_name = "N", conflicts_with = "since_offset")]
         stale_offset: Option<usize>,
         /// Filter to strands with last entry offset > N (updated since)
@@ -764,16 +766,24 @@ enum DoctorTarget {
 Examples:
   mnema doctor edges
   mnema doctor edges --format json
+  mnema doctor edges --since 1200
 
 Read-only projection of the tool's own edge discipline:
-  (a) [friction] still open (strand registered) and not targeted by any
-      [fixed] fixes=<hash>
+  (a) unfixed [friction]: any [friction] not targeted by any
+      [fixed] fixes=<hash> — home-strand open/closed does not matter
+      (dual count: total / of which on active strands)
   (b) [decision] entries recorded without a --why ref
-JSON twin: open_frictions[] / decisions_without_why[] with entry_id.")]
+      (--since N skips decisions at offset <= N; pre-policy stock)
+JSON twin: open_frictions[] / decisions_without_why[] with entry_id;
+  open_friction_count + open_friction_active_count.")]
     Edges {
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
+        /// Skip [decision] entries at journal offset <= N (legacy pre-policy
+        /// stock). Unfixed frictions are never skipped by this floor.
+        #[arg(long, value_name = "N")]
+        since: Option<usize>,
     },
 }
 
@@ -1410,8 +1420,8 @@ fn run(command: &Commands) -> Result<(), String> {
         Commands::Doctor { target } => {
             let result = match target {
                 DoctorTarget::Journal => cmd_doctor_journal(),
-                DoctorTarget::Edges { format } => {
-                    cmd_doctor_edges(format.as_deref() == Some("json"))
+                DoctorTarget::Edges { format, since } => {
+                    cmd_doctor_edges(format.as_deref() == Some("json"), *since)
                 }
             };
             match result {

@@ -899,6 +899,24 @@ fn add_positional_content_creates_strand() {
 }
 
 #[test]
+fn add_success_next_step_hands_off_append_with_new_id() {
+    // From-zero hand-off: first line just born → paste-ready append next.
+    let id = "abcdef0123456789deadbeef";
+    let line = add_success_next_step(id);
+    let prefix = shorten(id);
+    assert!(
+        line.contains(&format!("mnema append --id {}", prefix)),
+        "next step must carry new id prefix: {line}"
+    );
+    assert!(
+        line.contains(r#"echo "<note>""#) || line.contains("echo \"<note>\""),
+        "next step must be an echo|append pipe: {line}"
+    );
+    // The taught command itself must parse against real grammar (CI gate).
+    try_parse_example(&line).unwrap_or_else(|e| panic!("add next step must parse: {e}"));
+}
+
+#[test]
 fn add_file_content_creates_strand() {
     let env = setup();
     let file_path = env.path().join("brief.md");

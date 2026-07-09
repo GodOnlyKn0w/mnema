@@ -224,16 +224,23 @@ fn check_cutover_certificate(
     report
 }
 
-/// Edge-discipline self-check: open unfixed frictions + decisions without --why.
+/// Edge-discipline self-check: unfixed frictions + decisions without --why.
 /// Advisory only — never fails the process (CORPUS §9: only integrity/parse fails).
-pub(crate) fn cmd_doctor_edges(format_json: bool) -> Result<bool, String> {
+///
+/// `since_offset`: when set, skip why-less decisions at offset <= floor
+/// (pre-policy stock); unfixed frictions are never filtered by this floor.
+pub(crate) fn cmd_doctor_edges(
+    format_json: bool,
+    since_offset: Option<usize>,
+) -> Result<bool, String> {
     let started = Instant::now();
     let path = ensure_journal()?;
     let (events, skipped) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
-    let report = projection::edges_discipline_report(&strands);
+    let report = projection::edges_discipline_report_since(&strands, since_offset);
     let out = output::EdgesOutput {
         open_friction_count: report.open_frictions.len(),
+        open_friction_active_count: report.open_friction_active_count,
         decision_without_why_count: report.decisions_without_why.len(),
         open_frictions: report
             .open_frictions
@@ -264,8 +271,8 @@ pub(crate) fn cmd_doctor_edges(format_json: bool) -> Result<bool, String> {
     } else {
         println!("Doctor Edges Report (edge-discipline self-check)");
         println!(
-            "  open unfixed [friction]: {}",
-            out.open_friction_count
+            "  unfixed [friction] total: {} (on active: {})",
+            out.open_friction_count, out.open_friction_active_count
         );
         for item in &out.open_frictions {
             println!(
@@ -275,10 +282,17 @@ pub(crate) fn cmd_doctor_edges(format_json: bool) -> Result<bool, String> {
                 item.content
             );
         }
-        println!(
-            "  [decision] without --why: {}",
-            out.decision_without_why_count
-        );
+        if let Some(floor) = since_offset {
+            println!(
+                "  [decision] without --why (offset > {}): {}",
+                floor, out.decision_without_why_count
+            );
+        } else {
+            println!(
+                "  [decision] without --why: {}",
+                out.decision_without_why_count
+            );
+        }
         for item in &out.decisions_without_why {
             println!(
                 "    {}  strand {}  {}",
@@ -288,7 +302,7 @@ pub(crate) fn cmd_doctor_edges(format_json: bool) -> Result<bool, String> {
             );
         }
         if out.open_friction_count == 0 && out.decision_without_why_count == 0 {
-            println!("  (clean — no open frictions, no why-less decisions)");
+            println!("  (clean — no unfixed frictions, no why-less decisions)");
         }
     }
 

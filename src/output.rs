@@ -754,11 +754,17 @@ pub struct EdgesItem {
 /// External contract for `doctor edges --format json`.
 /// Lists open unfixed `[friction]` entries and `[decision]` entries lacking
 /// a `--why` ref — the tool's self-check surface for its own edge discipline.
+///
+/// `open_friction_count` is the total unfixed list length (home strand open/
+/// closed does not matter). `open_friction_active_count` is the dual count:
+/// how many of those sit on a registered (active) strand.
 #[derive(Debug, Serialize)]
 pub struct EdgesOutput {
     pub open_frictions: Vec<EdgesItem>,
     pub decisions_without_why: Vec<EdgesItem>,
     pub open_friction_count: usize,
+    /// Subset of `open_friction_count` whose home strand is registered/active.
+    pub open_friction_active_count: usize,
     pub decision_without_why_count: usize,
 }
 

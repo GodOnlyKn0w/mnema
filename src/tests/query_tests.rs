@@ -1527,6 +1527,10 @@ fn edges_discipline_lists_open_friction_and_why_less_decision() {
         "only the unfixed open friction: {:?}",
         report.open_frictions
     );
+    assert_eq!(
+        report.open_friction_active_count, 1,
+        "unfixed friction is on the still-open strand"
+    );
     assert!(
         report.open_frictions[0]
             .content
@@ -1546,6 +1550,216 @@ fn edges_discipline_lists_open_friction_and_why_less_decision() {
             .contains("without rationale pin"),
         "why-less decision: {}",
         report.decisions_without_why[0].content
+    );
+}
+
+#[test]
+fn edges_discipline_counts_unfixed_friction_on_closed_strand() {
+    // Peer case: unfixed friction on a closed:done pilot line must still
+    // appear in unfixed total (not filtered by home-strand open/closed).
+    let _env = setup();
+    let closed_id = create_strand("closed pilot with dangling friction");
+    cmd_append(
+        Some("[friction] design gap still open; at=x; tried=y"),
+        None,
+        false,
+        false,
+        None,
+        Some(&closed_id),
+        None,
+        None,
+    )
+    .unwrap();
+    cmd_close(&closed_id, Some("done"), None, false).unwrap();
+
+    let active_id = create_strand("active with its own friction");
+    cmd_append(
+        Some("[friction] still on active; at=z; tried=w"),
+        None,
+        false,
+        false,
+        None,
+        Some(&active_id),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let report = projection::edges_discipline_report(&strands);
+
+    assert!(
+        report.open_frictions.len() >= 2,
+        "both closed-home and active-home unfixed frictions: {:?}",
+        report.open_frictions
+    );
+    let on_closed = report
+        .open_frictions
+        .iter()
+        .any(|i| i.strand_id == closed_id && i.content.contains("design gap still open"));
+    assert!(
+        on_closed,
+        "unfixed friction on closed strand must count in total: {:?}",
+        report.open_frictions
+    );
+    let on_active = report
+        .open_frictions
+        .iter()
+        .filter(|i| i.strand_id == active_id)
+        .count();
+    assert_eq!(on_active, 1);
+    // Dual count: active subset excludes the closed-home friction.
+    assert_eq!(
+        report.open_friction_active_count,
+        report
+            .open_frictions
+            .iter()
+            .filter(|i| {
+                strands
+                    .iter()
+                    .find(|s| s.id == i.strand_id)
+                    .map(|s| s.state() == "registered")
+                    .unwrap_or(false)
+            })
+            .count(),
+        "active_count must match registered-home unfixed frictions"
+    );
+    let closed_unfixed = report
+        .open_frictions
+        .iter()
+        .filter(|i| i.strand_id == closed_id)
+        .count();
+    assert_eq!(closed_unfixed, 1);
+    assert_eq!(
+        report.open_friction_active_count,
+        report.open_frictions.len() - closed_unfixed,
+        "dual count: total minus closed-home = active"
+    );
+}
+
+#[test]
+fn edges_discipline_since_skips_old_why_less_decisions_not_frictions() {
+    let _env = setup();
+    let id = create_strand("since floor base");
+    cmd_append(
+        Some("[decision] old stock without why"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    cmd_append(
+        Some("[friction] stays visible regardless of since"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let strand = strands.iter().find(|s| s.id == id).unwrap();
+    let old_decision_offset = strand
+        .log
+        .iter()
+        .find(|e| e.content.contains("old stock"))
+        .map(|e| e.offset)
+        .expect("old decision offset");
+    // New decision after the floor.
+    cmd_append(
+        Some("[decision] new without why"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    let (events2, _) = read_events_lossy(&path);
+    let strands2 = projection::project_strands(&events2, true);
+    let full = projection::edges_discipline_report(&strands2);
+    let filtered =
+        projection::edges_discipline_report_since(&strands2, Some(old_decision_offset));
+    assert!(
+        full.decisions_without_why.len() >= 2,
+        "baseline has both decisions: {:?}",
+        full.decisions_without_why
+    );
+    assert_eq!(
+        filtered.decisions_without_why.len(),
+        full.decisions_without_why
+            .iter()
+            .filter(|d| d.offset > old_decision_offset)
+            .count(),
+        "since floor drops pre-offset decisions"
+    );
+    assert!(
+        filtered
+            .decisions_without_why
+            .iter()
+            .any(|d| d.content.contains("new without why")),
+        "post-floor decision remains"
+    );
+    // Frictions never filtered by since.
+    assert_eq!(
+        filtered.open_frictions.len(),
+        full.open_frictions.len(),
+        "since must not hide unfixed frictions"
+    );
+}
+
+#[test]
+fn list_stale_excludes_closed_strands() {
+    let _env = setup();
+    let active_id = create_strand("active silent candidate");
+    let closed_id = create_strand("closed but old last entry");
+    cmd_close(&closed_id, Some("done"), None, false).unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    // Synthetic future now makes every current last_ts older than 2h.
+    let now = chrono::Utc::now() + chrono::Duration::hours(5);
+    let listed = list_strands(
+        &events,
+        &ListRequest {
+            include_hidden: false,
+            links: None,
+            backlinks: None,
+            state: None,
+            list_type: None,
+            stale: Some("2h"),
+            stale_offset: None,
+            since_offset: None,
+            allow_selection: false,
+        },
+        now,
+    )
+    .expect("list_strands --stale");
+
+    let ids: Vec<&str> = listed.iter().map(|s| s.id.as_str()).collect();
+    assert!(
+        ids.contains(&active_id.as_str()),
+        "registered silent line is a handoff candidate: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&closed_id.as_str()),
+        "closed line must not appear in --stale: {ids:?}"
+    );
+    assert!(
+        listed.iter().all(|s| s.state() == "registered"),
+        "every --stale row must be registered"
     );
 }
 
