@@ -360,9 +360,12 @@ append` 选线交互、正文管道，没有管道正文即报错，绝不从终
 ——工具少暴露一个规范化字段，jq 侧即多一批各自实现的错误
 版本）。边界立场：ref 反向查询先由 jq 承担，journal 达万条级
 后工具原生化（与 --backlinks 对称）；跨 journal 联邦查询只能
-由工具承担。工具不提供复合查询语言。典型组合：
+由工具承担。工具不提供复合查询语言。典型组合（**目标模型语法**，下例的
+`--under`/`.events`/`marker_head` 尚未实现；当前可用形态以 `mnema explain
+grammar` 与 `mnema explain json` 为准）：
 
 ```bash
+# 设想语法（非当前实现）：
 mnema timeline --under <母线> --since-offset 400 --format json \
   | jq '[.events[] | select(.marker_head == "decision")]'
 ```
