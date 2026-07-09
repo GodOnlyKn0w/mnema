@@ -91,6 +91,9 @@ fn resolve_rationale_ref(
             return Err(crate::reference::ambiguous_message(input, &candidates));
         }
         crate::reference::StrandLookup::Invalid(message) => return Err(message),
+        // Unified hash space: an entry-hash ref pins that exact entry. --why/--from
+        // want the specific entry itself, not its home strand's latest.
+        crate::reference::StrandLookup::ViaEntry { entry_id, .. } => return Ok(entry_id),
         crate::reference::StrandLookup::NotFound => {}
     }
     match projection::find_entry(all_strands, input) {

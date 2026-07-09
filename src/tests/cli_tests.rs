@@ -1151,3 +1151,14 @@ fn timeline_id_alias() {
 
 // show with explicit <ID> + --tail N must succeed (previously blocked by
 // the now-removed `requires = "last"` guard).
+
+#[test]
+fn timeline_tail_conflicts_with_limit() {
+    use clap::CommandFactory;
+    let result =
+        Cli::command().try_get_matches_from(["mnema", "timeline", "--tail", "2", "--limit", "2"]);
+    assert!(
+        result.is_err(),
+        "timeline --tail and --limit must be mutually exclusive"
+    );
+}

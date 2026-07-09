@@ -378,8 +378,7 @@ fn handles_orient_text_complete() {
             !card.catch_up.contains('\u{2026}') && !card.catch_up.contains("..."),
             "catch_up must not be truncated"
         );
-        try_parse_example(&card.catch_up)
-            .expect("orient catch_up must parse as a mnema command");
+        try_parse_example(&card.catch_up).expect("orient catch_up must parse as a mnema command");
         // The embedded handle is the short prefix, not the full 64-hex hash:
         // human-facing views spend prefixes, resolution accepts them.
         assert!(

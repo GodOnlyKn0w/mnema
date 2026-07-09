@@ -54,10 +54,17 @@ pub(crate) fn parse_provenance_arg(raw: Option<&str>) -> Result<Option<serde_jso
             if trimmed.is_empty() {
                 return Err("--provenance must be a non-empty JSON object".to_string());
             }
-            let v: serde_json::Value = serde_json::from_str(trimmed)
-                .map_err(|e| format!("--provenance is not valid JSON: {}", e))?;
+            let v: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+                format!(
+                    "--provenance is not valid JSON: {}\n  example: --provenance '{{\"key\":\"value\"}}'",
+                    e
+                )
+            })?;
             if !v.is_object() {
-                return Err("--provenance must be a JSON object".to_string());
+                return Err(
+                    "--provenance must be a JSON object\n  example: --provenance '{\"key\":\"value\"}'"
+                        .to_string(),
+                );
             }
             Ok(Some(v))
         }

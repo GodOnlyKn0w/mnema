@@ -4,3 +4,6 @@ target/
 
 # transient agent run logs
 .agents/
+
+# stray/temp cargo target dirs (random-suffixed)
+target*/

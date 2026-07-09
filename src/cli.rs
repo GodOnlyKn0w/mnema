@@ -656,9 +656,12 @@ Default is a dry run. --apply performs the cutover in .mnema/:\n  - moves journa
         /// Filter to events from strands in the tree rooted at ID
         #[arg(long, value_name = "ID", conflicts_with_all = ["strand", "links"])]
         tree: Option<String>,
-        /// Maximum events to return
-        #[arg(long, value_name = "N")]
+        /// Maximum events to return (from the start of the filtered window)
+        #[arg(long, value_name = "N", conflicts_with = "tail")]
         limit: Option<usize>,
+        /// Return only the last N events (recent tail of the filtered window)
+        #[arg(long, value_name = "N", conflicts_with = "limit")]
+        tail: Option<usize>,
     },
     /// Session-start orientation: menu of active strands with catch-up commands
     #[command(after_help = "\
@@ -1284,6 +1287,7 @@ fn run(command: &Commands) -> Result<(), String> {
             links,
             format,
             limit,
+            tail,
             tree,
         } => cmd_timeline(
             *since_offset,
@@ -1294,6 +1298,7 @@ fn run(command: &Commands) -> Result<(), String> {
             links.as_deref(),
             format.as_deref(),
             *limit,
+            *tail,
             tree.as_deref(),
         ),
         Commands::Explain { code, format, json } => {

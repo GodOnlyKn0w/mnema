@@ -274,6 +274,27 @@ pub(crate) fn cmd_search(
     );
     Ok(())
 }
+pub(crate) fn apply_timeline_window_limit(
+    entries: &mut Vec<projection::TimelineEntry>,
+    limit: Option<usize>,
+    tail: Option<usize>,
+) -> bool {
+    // Capture pre-truncation length so `truncated` tells the truth (F1): a
+    // hardcoded `false` here silently dropped events on the jq consumption path
+    // (--limit + pagination loops keying on `truncated` would miss the tail).
+    // --tail N keeps the last N (recent); --limit N keeps the first N (head).
+    let pre_truncate_len = entries.len();
+    if let Some(n) = tail {
+        let skip = entries.len().saturating_sub(n);
+        if skip > 0 {
+            entries.drain(0..skip);
+        }
+    } else if let Some(lim) = limit {
+        entries.truncate(lim);
+    }
+    entries.len() < pre_truncate_len
+}
+
 pub(crate) fn cmd_timeline(
     since_offset: Option<usize>,
     since_ts: Option<&str>,
@@ -283,6 +304,7 @@ pub(crate) fn cmd_timeline(
     links: Option<&str>,
     format_json: Option<&str>,
     limit: Option<usize>,
+    tail: Option<usize>,
     tree_root: Option<&str>,
 ) -> Result<(), String> {
     let path = ensure_journal()?;
@@ -350,14 +372,7 @@ pub(crate) fn cmd_timeline(
         }
     }
 
-    // Capture pre-truncation length so `truncated` tells the truth (F1): a
-    // hardcoded `false` here silently dropped events on the jq consumption path
-    // (--limit + pagination loops keying on `truncated` would miss the tail).
-    let pre_truncate_len = entries.len();
-    if let Some(lim) = limit {
-        entries.truncate(lim);
-    }
-    let truncated = entries.len() < pre_truncate_len;
+    let truncated = apply_timeline_window_limit(&mut entries, limit, tail);
 
     let count = entries.len();
     let max_offset = entries.last().map(|e| e.journal_offset).unwrap_or(0);

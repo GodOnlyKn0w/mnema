@@ -176,6 +176,13 @@ impl StrandCandidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StrandLookup {
     One(String),
+    /// Input matched a non-first entry hash prefix; resolve to its home strand.
+    /// Strand ids are themselves first-entry hashes, so first-entry prefixes
+    /// still land in `One` via the id-prefix path above.
+    ViaEntry {
+        strand_id: String,
+        entry_id: String,
+    },
     NotFound,
     Ambiguous(Vec<StrandCandidate>),
     Invalid(String),
@@ -185,6 +192,10 @@ impl StrandLookup {
     pub(crate) fn into_result(self, input: &str) -> Result<String, String> {
         match self {
             StrandLookup::One(id) => Ok(id),
+            // Unified hash space: entry prefixes resolve to the owning strand
+            // so show --id / append --id / etc. accept the same tokens agents
+            // receive from orient/append handoff, fixes=, refs:, --why, --from.
+            StrandLookup::ViaEntry { strand_id, .. } => Ok(strand_id),
             StrandLookup::NotFound => Err(format!("strand {} not found", input)),
             StrandLookup::Invalid(message) => Err(message),
             StrandLookup::Ambiguous(candidates) => Err(ambiguous_message(input, &candidates)),
@@ -245,9 +256,41 @@ pub(crate) fn lookup_strand_with_selection(
     }
 
     match candidates.len() {
-        0 => StrandLookup::NotFound,
+        0 => lookup_via_entry(strands, input),
         1 => StrandLookup::One(candidates[0].id.clone()),
         _ => StrandLookup::Ambiguous(candidates),
+    }
+}
+
+/// When no strand id/slug matches, try the unified entry-hash space.
+/// A unique entry hit becomes ViaEntry (home strand + full entry id) so
+/// callers can either resolve to the strand or teach the entry→strand link.
+fn lookup_via_entry(strands: &[ProjectedStrand], input: &str) -> StrandLookup {
+    use crate::projection::EntryLookup;
+    match crate::projection::find_entry(strands, input) {
+        EntryLookup::None => StrandLookup::NotFound,
+        EntryLookup::One { strand, entry } => {
+            let Some(entry_id) = entry.entry_id.clone() else {
+                return StrandLookup::NotFound;
+            };
+            // First-entry hash == strand id: if we are here, strand-prefix
+            // matching already failed, so this is a later entry (or a virtual
+            // id that is not a strand id). Still surface as ViaEntry so find
+            // can teach the home line.
+            StrandLookup::ViaEntry {
+                strand_id: strand.id.clone(),
+                entry_id,
+            }
+        }
+        EntryLookup::Ambiguous(entry_ids) => {
+            let sample: Vec<String> = entry_ids.iter().take(4).map(|id| shorten(id)).collect();
+            StrandLookup::Invalid(format!(
+                "entry handle {} is ambiguous: {} entries match (e.g. {}); use a longer prefix or mnema show --entry <hash>",
+                input,
+                entry_ids.len(),
+                sample.join(", ")
+            ))
+        }
     }
 }
 

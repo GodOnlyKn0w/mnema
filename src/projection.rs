@@ -433,7 +433,6 @@ pub(crate) struct VisibilityLedger {
     pub(crate) hidden_count: usize,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CollaborationForestCandidate {
     pub(crate) root_id: String,

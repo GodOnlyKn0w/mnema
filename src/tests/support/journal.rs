@@ -47,10 +47,7 @@ pub(in crate::tests) fn setup() -> TestEnv {
     TestEnv::new()
 }
 
-pub(in crate::tests) fn with_mnema_home<F: FnOnce() -> R, R>(
-    new_value: Option<&str>,
-    f: F,
-) -> R {
+pub(in crate::tests) fn with_mnema_home<F: FnOnce() -> R, R>(new_value: Option<&str>, f: F) -> R {
     let _env_lock = ENV_LOCK.lock().unwrap();
     let prev = std::env::var("MNEMA_HOME").ok();
     match new_value {

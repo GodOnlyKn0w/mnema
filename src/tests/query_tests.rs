@@ -1318,3 +1318,81 @@ fn orient_two_active_lines_suggests_link_candidate() {
     assert!(plan.output.remind.contains("--edge-type depends-on"));
     let _ = (first, second);
 }
+
+#[test]
+fn timeline_tail_keeps_last_events_not_head() {
+    let _env = setup();
+    let id = create_strand("timeline tail first");
+    for content in [
+        "timeline tail second",
+        "timeline tail third",
+        "timeline tail fourth",
+    ] {
+        cmd_append(
+            Some(content),
+            None,
+            false,
+            false,
+            None,
+            Some(&id),
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let mut entries = projection::project_timeline(&events);
+    let original_offsets: Vec<usize> = entries.iter().map(|e| e.journal_offset).collect();
+    assert!(
+        original_offsets.len() >= 4,
+        "test needs several timeline entries"
+    );
+
+    let truncated =
+        crate::commands::query::apply_timeline_window_limit(&mut entries, None, Some(2));
+    let tail_offsets: Vec<usize> = entries.iter().map(|e| e.journal_offset).collect();
+
+    assert!(truncated, "tail below total length must mark truncated");
+    assert_eq!(
+        tail_offsets,
+        original_offsets[original_offsets.len() - 2..].to_vec(),
+        "--tail N must keep the last N events"
+    );
+}
+
+#[test]
+fn timeline_limit_still_keeps_head_events() {
+    let _env = setup();
+    let id = create_strand("timeline limit first");
+    for content in ["timeline limit second", "timeline limit third"] {
+        cmd_append(
+            Some(content),
+            None,
+            false,
+            false,
+            None,
+            Some(&id),
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let mut entries = projection::project_timeline(&events);
+    let original_offsets: Vec<usize> = entries.iter().map(|e| e.journal_offset).collect();
+
+    let truncated =
+        crate::commands::query::apply_timeline_window_limit(&mut entries, Some(2), None);
+    let limited_offsets: Vec<usize> = entries.iter().map(|e| e.journal_offset).collect();
+
+    assert!(truncated, "limit below total length must mark truncated");
+    assert_eq!(
+        limited_offsets,
+        original_offsets[..2].to_vec(),
+        "--limit N must keep the first N events"
+    );
+}

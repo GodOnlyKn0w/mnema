@@ -159,10 +159,7 @@ impl From<&ProjectedStrand> for OrientStrand {
             summary: truncate(s.first_summary(), 70),
             last_entry: truncate(s.last_summary(), 70),
             last_offset: s.last_offset(),
-            catch_up: format!(
-                "mnema show --id {} --tail 8",
-                crate::util::shorten(&s.id)
-            ),
+            catch_up: format!("mnema show --id {} --tail 8", crate::util::shorten(&s.id)),
             lifecycle: s.state().to_string(),
         }
     }

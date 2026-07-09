@@ -766,12 +766,7 @@ fn cutover_v2_dry_run_does_not_rewrite_journal() {
     cmd_cutover_v2(false, None, None, true).unwrap();
 
     assert_eq!(fs::read_to_string(&journal).unwrap(), before);
-    assert!(
-        !env.path()
-            .join(".mnema")
-            .join("journal.v1.jsonl")
-            .exists()
-    );
+    assert!(!env.path().join(".mnema").join("journal.v1.jsonl").exists());
     assert!(
         !env.path()
             .join(".mnema")
@@ -924,4 +919,140 @@ fn cutover_v2_apply_archives_v1_and_imports_pure_v2_journal() {
         chrono::Utc::now(),
     );
     assert!(!report.integrity.has_errors(), "{:?}", report.integrity);
+}
+
+#[test]
+fn strand_lookup_accepts_non_first_entry_hash_prefix() {
+    let _env = setup();
+    let id = create_strand("entry lookup home");
+    cmd_append(
+        Some("entry lookup second"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let strand = strands.iter().find(|s| s.id == id).unwrap();
+    let entry_id = strand.log.last().and_then(|e| e.entry_id.clone()).unwrap();
+    let prefix = &entry_id[..16];
+
+    match crate::reference::lookup_strand_with_selection(&strands, prefix, false, 0) {
+        crate::reference::StrandLookup::ViaEntry {
+            strand_id,
+            entry_id: resolved_entry,
+        } => {
+            assert_eq!(strand_id, id);
+            assert_eq!(resolved_entry, entry_id);
+        }
+        other => panic!("non-first entry prefix must resolve ViaEntry: {:?}", other),
+    }
+}
+
+#[test]
+fn strand_lookup_keeps_first_entry_hash_as_strand_id() {
+    let _env = setup();
+    let id = create_strand("first entry stays strand");
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let first_entry = strands
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap()
+        .log
+        .first()
+        .and_then(|e| e.entry_id.clone())
+        .unwrap();
+    assert_eq!(first_entry, id, "first entry hash is the strand id");
+
+    match crate::reference::lookup_strand_with_selection(&strands, &first_entry[..16], false, 0) {
+        crate::reference::StrandLookup::One(resolved) => assert_eq!(resolved, id),
+        other => panic!("first entry prefix must remain One: {:?}", other),
+    }
+}
+
+#[test]
+fn strand_lookup_missing_entry_prefix_is_not_found() {
+    let _env = setup();
+    create_strand("entry lookup miss corpus");
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+
+    match crate::reference::lookup_strand_with_selection(&strands, "ffffffffffffffff", false, 0) {
+        crate::reference::StrandLookup::NotFound => {}
+        other => panic!("missing entry prefix must be NotFound: {:?}", other),
+    }
+}
+
+#[test]
+fn ambiguous_entry_hash_prefix_suggests_show_entry() {
+    let _env = setup();
+    let left = create_strand("ambiguous entry left");
+    let right = create_strand("ambiguous entry right");
+    let prefix = if left.starts_with("feed") || right.starts_with("feed") {
+        "cafe"
+    } else {
+        "feed"
+    };
+    let left_entry_id = format!("{}{}", prefix, "0".repeat(60));
+    let right_entry_id = format!("{}{}", prefix, "1".repeat(60));
+
+    with_journal_write_lock(|journal| {
+        append_event_unlocked(
+            journal,
+            &Event::LogAppended {
+                id: left.clone(),
+                ts: chrono::Utc::now().to_rfc3339(),
+                content: "left ambiguous entry".to_string(),
+                effect: None,
+                prev_entry_id: None,
+                entry_id: Some(left_entry_id),
+                refs: Vec::new(),
+                ref_: None,
+                append_id: None,
+                git: None,
+                provenance: None,
+            },
+        )?;
+        append_event_unlocked(
+            journal,
+            &Event::LogAppended {
+                id: right.clone(),
+                ts: chrono::Utc::now().to_rfc3339(),
+                content: "right ambiguous entry".to_string(),
+                effect: None,
+                prev_entry_id: None,
+                entry_id: Some(right_entry_id),
+                refs: Vec::new(),
+                ref_: None,
+                append_id: None,
+                git: None,
+                provenance: None,
+            },
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    match crate::reference::lookup_strand_with_selection(&strands, prefix, false, 0) {
+        crate::reference::StrandLookup::Invalid(message) => {
+            assert!(
+                message.contains("mnema show --entry <hash>"),
+                "ambiguous entry prefix must teach show --entry: {message}"
+            );
+        }
+        other => panic!("ambiguous entry prefix must be Invalid: {:?}", other),
+    }
 }

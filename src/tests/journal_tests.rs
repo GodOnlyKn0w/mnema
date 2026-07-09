@@ -363,3 +363,12 @@ fn doctor_integrity_detects_tampered_anchored_entry() {
         report.integrity
     );
 }
+
+#[test]
+fn provenance_parse_error_includes_json_example() {
+    let err = parse_provenance_arg(Some("not-json")).unwrap_err();
+    assert!(
+        err.contains(r#"example: --provenance '{"key":"value"}'"#),
+        "non-JSON provenance error must include example: {err}"
+    );
+}

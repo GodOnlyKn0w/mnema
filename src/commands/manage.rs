@@ -18,13 +18,14 @@ pub(crate) fn cmd_find(id: &str, format_json: bool) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
-    match crate::reference::resolve_strand_with_selection(
+    let lookup = crate::reference::lookup_strand_with_selection(
         &strands,
         id,
         !format_json,
         events.last().map(|(offset, _)| *offset).unwrap_or(0),
-    ) {
-        Ok(full_id) => {
+    );
+    match lookup {
+        crate::reference::StrandLookup::One(full_id) => {
             if format_json {
                 println!(
                     "{}",
@@ -34,7 +35,27 @@ pub(crate) fn cmd_find(id: &str, format_json: bool) -> Result<(), String> {
                 println!("{}", full_id);
             }
         }
-        Err(e) => return Err(e),
+        crate::reference::StrandLookup::ViaEntry {
+            strand_id,
+            entry_id,
+        } => {
+            // Teach the unified hash space: this prefix is an entry, not a
+            // strand id, and here is its home line (JSON still returns the
+            // strand id so consumers get a resolvable target).
+            if format_json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&output::FindOutput { id: strand_id }).unwrap()
+                );
+            } else {
+                println!("entry {} on strand {}", entry_id, strand_id);
+            }
+        }
+        other => {
+            // True miss, or ambiguous/invalid — surface the resolve error.
+            // ViaEntry is handled above; into_result never yields Ok here.
+            return Err(other.into_result(id).unwrap_err());
+        }
     }
     Ok(())
 }

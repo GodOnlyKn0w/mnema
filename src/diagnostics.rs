@@ -768,7 +768,14 @@ mod tests {
     fn explain_topics_resolve() {
         // All topics resolve in both text and JSON modes.
         for name in [
-            "card", "markers", "retry", "json", "jq", "grammar", "writing", "collaboration",
+            "card",
+            "markers",
+            "retry",
+            "json",
+            "jq",
+            "grammar",
+            "writing",
+            "collaboration",
         ] {
             let text = cmd_explain(name, false);
             assert!(
