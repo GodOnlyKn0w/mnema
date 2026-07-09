@@ -1073,3 +1073,92 @@ fn pick_label_leads_with_seq_drops_id_and_tail() {
         "the tail summary is not crammed into the row: {label}"
     );
 }
+
+#[test]
+fn orient_empty_teaches_writing_drill_and_add() {
+    let _env = setup();
+    let plan = orient_plan(
+        &[],
+        &OrientRequest {
+            include_hidden: false,
+            limit: None,
+        },
+    );
+    assert!(plan.output.active.is_empty());
+    assert!(plan.output.remind.contains("mnema add"));
+    assert!(plan.output.remind.contains("mnema explain writing"));
+}
+
+#[test]
+fn orient_latest_friction_hands_off_fix_prefix() {
+    let _env = setup();
+    let id = create_strand("fixable task");
+    cmd_append(
+        Some("[friction] parser fails; at=<file>:<line>; tried=<command>"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let plan = orient_plan(
+        &events,
+        &OrientRequest {
+            include_hidden: false,
+            limit: None,
+        },
+    );
+    let strands = projection::project_strands(&events, true);
+    let prefix = strands
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap()
+        .log
+        .last()
+        .and_then(|e| e.entry_id.as_deref())
+        .map(shorten)
+        .unwrap();
+    assert!(
+        plan.output
+            .remind
+            .contains(&format!("[fixed] fixes={}", prefix)),
+        "remind must hand off friction prefix: {}",
+        plan.output.remind
+    );
+    assert!(
+        plan.output
+            .remind
+            .contains(&format!("mnema append --id {}", shorten(&id))),
+        "remind must include copyable append command: {}",
+        plan.output.remind
+    );
+}
+
+#[test]
+fn orient_two_active_lines_suggests_link_candidate() {
+    let _env = setup();
+    let first = create_strand("first active");
+    let second = create_strand("second active");
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let plan = orient_plan(
+        &events,
+        &OrientRequest {
+            include_hidden: false,
+            limit: None,
+        },
+    );
+    assert!(
+        plan.output.remind.contains("mnema link"),
+        "two active lines should produce a link candidate: {}",
+        plan.output.remind
+    );
+    assert!(plan.output.remind.contains("--edge-type depends-on"));
+    let _ = (first, second);
+}

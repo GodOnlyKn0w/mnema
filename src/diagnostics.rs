@@ -62,7 +62,7 @@ JSON 形态（OrientStrand，写命令 result 字段 / orient active[]）：
   - summary:      第一条日志截断到 70 字符
   - last_entry:   最近一条日志截断到 70 字符
   - last_offset:  该线最近事件的 journal offset
-  - catch_up:     就绪的 timeline 追赶命令
+  - catch_up:     就绪的近内容窗口命令（mnema show --id <ID> --tail 8）
   - lifecycle:    生命周期（"registered" 或 "closed:<disposition>"）
 
 JSON shape 索引见 mnema explain json"#,
@@ -186,6 +186,36 @@ cutover-v2: applied / source_journal / archive_journal / map_path / source_event
 
 时间线切成精简视图：
   mnema timeline --format json | jq '.timeline[] | {ts, strand_id, kind}'"#,
+    },
+    TopicInfo {
+        name: "writing",
+        title: "写入范例——时机、形状、临时演练",
+        body: r#"这是合成示例，不描述宿主项目事实；具体内容只用占位符。
+
+什么时候写：
+  方案成形时：写决定、依据、验证锚点。
+  判断被现实改变时：写新观察和被推翻的假设。
+  收口或不可逆动作前：先 checkpoint，再 close 或执行动作。
+
+entry 形状模板：
+  [decision] <claim>; anchor=<file>:<line>; verify=<command>
+  [observed] <fact>; source=<command>; changes=<assumption>
+  [friction] <blocked thing>; at=<file>:<line>; tried=<command>
+  [fixed] fixes=<entry-hash> <what changed>; verified=<command>
+  [deliverable] <files changed>; build=<command>; test=<command>
+
+临时 journal 演练（把 <tmp>/<ID>/<entry-hash> 换成上一步输出）：
+  tmp=<tmp>
+  mnema -C <tmp> init
+  printf '%s\n' '[task] synthetic writing drill; not host facts' | mnema -C <tmp> add --format json
+  printf '%s\n' '[decision] choose <option>; anchor=<file>:<line>; verify=<command>' | mnema -C <tmp> append --id <ID>
+  printf '%s\n' '[friction] <blocked thing>; at=<file>:<line>; tried=<command>' | mnema -C <tmp> append --id <ID> --format json
+  printf '%s\n' '[fixed] fixes=<entry-hash> <what changed>; verified=<command>' | mnema -C <tmp> append --id <ID>
+  mnema -C <tmp> checkpoint --id <ID> --action "before irreversible <action>; reason=<reason>"
+  printf '%s\n' '[deliverable] changed=<file>; build=<command>; test=<command>' | mnema -C <tmp> append --id <ID>
+  mnema -C <tmp> close --id <ID> --as done
+  mnema -C <tmp> show --id <ID>
+  mnema -C <tmp> timeline --links <ID>"#,
     },
     TopicInfo {
         name: "grammar",
@@ -712,8 +742,10 @@ mod tests {
 
     #[test]
     fn explain_topics_resolve() {
-        // All four topics resolve in both text and JSON modes.
-        for name in ["card", "markers", "retry", "json"] {
+        // All topics resolve in both text and JSON modes.
+        for name in [
+            "card", "markers", "retry", "json", "jq", "grammar", "writing",
+        ] {
             let text = cmd_explain(name, false);
             assert!(
                 !text.contains("unknown code or topic"),

@@ -626,9 +626,16 @@ fn possible_marker_warning(stored: &str) -> Option<AppendMarkerWarning> {
     })
 }
 
+fn entry_id_prefix(entry_id: &Option<String>) -> Option<String> {
+    entry_id.as_deref().map(shorten)
+}
+
 fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
     if outcome.kind == AppendOutcomeKind::CreatedNew && format != Some("json") {
         println!("{}", outcome.strand_id);
+        if let Some(prefix) = entry_id_prefix(&outcome.entry_id) {
+            println!("entry_id_prefix: {}", prefix);
+        }
         if let Some((card, state)) = &outcome.card_state {
             print_card_with_state(card, state);
         }
@@ -670,6 +677,7 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
         let output = output::AppendOutput {
             strand_id: &outcome.strand_id,
             entry_id: &outcome.entry_id,
+            entry_id_prefix: entry_id_prefix(&outcome.entry_id),
             content_preview: outcome.stored_content.chars().take(120).collect::<String>(),
             provenance: &outcome.provenance,
             seen_offset: outcome.seen_offset,
@@ -697,9 +705,15 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
                 card.last_offset,
                 prod
             );
+            if let Some(prefix) = entry_id_prefix(&outcome.entry_id) {
+                println!("entry_id_prefix: {}", prefix);
+            }
             print_card_with_state(card, state);
         } else {
             println!("appended to {}{}", shorten(&outcome.strand_id), prod);
+            if let Some(prefix) = entry_id_prefix(&outcome.entry_id) {
+                println!("entry_id_prefix: {}", prefix);
+            }
         }
         if let Err(e) = crate::reference::remember_last_touched_current(&outcome.strand_id) {
             eprintln!("[mnema] warning: {}", e);
@@ -1172,6 +1186,7 @@ pub(crate) fn render_checkpoint_outcome(outcome: &CheckpointOutcome, format_json
             shown_entries: plan.shown_entries.len(),
             action: &plan.action,
             entry_id: &plan.entry_id,
+            entry_id_prefix: entry_id_prefix(&plan.entry_id),
             journal_appended: true,
             diagnostics_count: plan.diagnostics_count,
             result: outcome.card.clone(),
@@ -1222,6 +1237,7 @@ pub(crate) fn render_checkpoint_outcome(outcome: &CheckpointOutcome, format_json
     println!("  action: {}", plan.action);
     if let Some(id) = &plan.entry_id {
         println!("  entry_id: {}", id);
+        println!("  entry_id_prefix: {}", shorten(id));
     }
     println!("  appended to journal");
     println!("log:");

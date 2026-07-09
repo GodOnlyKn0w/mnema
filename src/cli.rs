@@ -54,7 +54,7 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   doctor        Diagnose journal integrity
   export        Export journal as standalone audit artifact
   cutover-v2    Rewrite/import current journal into pure v2 form
-  explain       Explain a diagnostic code or topic (markers, json, grammar, ...)
+  explain       Explain a diagnostic code or topic (markers, json, grammar, writing, ...)
 
 Run:  mnema <command> --help"
 )]
@@ -555,12 +555,12 @@ Examples:
     /// Explain a diagnostic code or encyclopaedia topic
     ///
     /// Namespace rule: diagnostic codes begin with an uppercase letter
-    /// (W062, E053); topics are all-lowercase (card, markers, retry, json, grammar).
+    /// (W062, E053); topics are all-lowercase (card, markers, retry, json, grammar, writing).
     /// The two namespaces are mechanically disjoint.
     #[command(after_help = "\
 Namespaces:
   Diagnostic codes   uppercase-initial: W062, E053, w062 (case-insensitive)
-  Topics             all-lowercase:     card, markers, retry, json, jq, grammar
+  Topics             all-lowercase:     card, markers, retry, json, jq, grammar, writing
 
 Topics:
   card      卡片：统一输出文法单元（格式、字段、回显语义）
@@ -568,6 +568,7 @@ Topics:
   retry     重试语义：哪些命令可盲目重试
   json      JSON 形态索引：各读命令 --format json 的顶层字段
   jq        jq 整型：把 --format json 输出切成你要的形
+  writing   写入时机、entry 模板、临时 journal 演练脚本
 
 Examples:
   mnema explain W062
@@ -575,6 +576,7 @@ Examples:
   mnema explain json
   mnema explain markers
   mnema explain retry
+  mnema explain writing
   mnema explain W062 --format json
   mnema explain card --json")]
     Explain {
@@ -661,10 +663,11 @@ Output per active strand:
   handle        Strand id (use with --id)
   summary       First entry (what this line of work is)
   last          Most recent entry (where it left off)
-  catch-up      Ready-to-run command showing what happened around this
-                strand since it was last touched (cursor = last_offset)
+  catch-up      Ready-to-run command showing this strand's recent content
+                window: mnema show --id <ID> --tail 8
 
 After orienting:
+  writing guide     mnema explain writing
   continue a line   echo \"[decision] ...\" | mnema append --id <ID>
   new matter        echo \"<summary>\" | mnema add
   matter concluded  mnema close --id <ID> [--as done|failed|cancelled|merged|verified]
@@ -690,7 +693,7 @@ JSON shape: mnema explain json")]
         /// Include hidden strands in the menu (default: exclude)
         #[arg(long)]
         include_hidden: bool,
-        /// Maximum strands in the menu, most recent first (default: 10)
+        /// Maximum strands in the menu, most recent first (default: adaptive by journal maturity)
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
         /// Render active strands as a belongs-to forest (parallel siblings visible under shared parent)

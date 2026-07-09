@@ -900,8 +900,8 @@ fn orient_remind_does_not_say_append_done() {
         ORIENT_REMIND
     );
     assert!(
-        ORIENT_REMIND.contains("close --id"),
-        "ORIENT_REMIND must mention 'close --id': {}",
+        ORIENT_REMIND.contains("mnema close --id"),
+        "ORIENT_REMIND must mention 'mnema close --id': {}",
         ORIENT_REMIND
     );
 }

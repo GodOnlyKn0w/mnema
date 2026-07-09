@@ -442,6 +442,7 @@ fn append_explicit_closed_strand_succeeds_and_json_carries_w059() {
     let dto = output::AppendOutput {
         strand_id: &outcome.strand_id,
         entry_id: &outcome.entry_id,
+        entry_id_prefix: outcome.entry_id.as_deref().map(crate::util::shorten),
         content_preview: outcome.stored_content.chars().take(120).collect::<String>(),
         provenance: &outcome.provenance,
         seen_offset: outcome.seen_offset,
@@ -497,6 +498,7 @@ fn append_open_strand_json_closed_target_is_null() {
     let dto = output::AppendOutput {
         strand_id: &outcome.strand_id,
         entry_id: &outcome.entry_id,
+        entry_id_prefix: outcome.entry_id.as_deref().map(crate::util::shorten),
         content_preview: outcome.stored_content.chars().take(120).collect::<String>(),
         provenance: &outcome.provenance,
         seen_offset: outcome.seen_offset,

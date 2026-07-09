@@ -449,7 +449,7 @@ pub(crate) fn cmd_timeline(
 
 pub(crate) struct OrientRequest {
     pub(crate) include_hidden: bool,
-    pub(crate) limit: usize,
+    pub(crate) limit: Option<usize>,
 }
 
 pub(crate) struct OrientPlan {
@@ -461,16 +461,141 @@ pub(crate) struct OrientPlan {
 pub(crate) fn orient_plan(events: &[(usize, Event)], req: &OrientRequest) -> OrientPlan {
     let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
     let strands = projection::project_strands(events, true);
-    let view = projection::build_orient_view(&strands, req.include_hidden, req.limit, max_offset);
+    let (entry_count, strand_count) = orient_maturity_counts(&strands, req.include_hidden);
+    let score = orient_maturity_score(entry_count, strand_count);
+    let limit = req.limit.unwrap_or_else(|| adaptive_orient_limit(score));
+    let view = projection::build_orient_view(&strands, req.include_hidden, limit, max_offset);
     let mut output = output::OrientOutput::from((&view, strands.as_slice()));
     // Questions ① and ③ (CORPUS §8): the integrity glance needs the raw event
     // stream, needs-judgment notices need the full strand set.
     output.integrity = integrity_glance(events);
     output.notices = projection::orient_notices(&strands);
+    output.remind = adaptive_orient_remind(&strands, &view, req.include_hidden, score);
     OrientPlan {
         strands,
         view,
         output,
+    }
+}
+
+fn orient_maturity_counts(
+    strands: &[projection::ProjectedStrand],
+    include_hidden: bool,
+) -> (usize, usize) {
+    let visible = strands.iter().filter(|s| !s.hidden || include_hidden);
+    let mut entry_count = 0usize;
+    let mut strand_count = 0usize;
+    for strand in visible {
+        entry_count += strand.log_count();
+        strand_count += 1;
+    }
+    (entry_count, strand_count)
+}
+
+fn orient_maturity_score(entry_count: usize, strand_count: usize) -> u8 {
+    if entry_count == 0 || strand_count == 0 {
+        return 0;
+    }
+    let entry_score = (entry_count.saturating_mul(100) / 40).min(100);
+    let strand_score = (strand_count.saturating_mul(100) / 8).min(100);
+    entry_score.min(strand_score) as u8
+}
+
+fn adaptive_orient_limit(score: u8) -> usize {
+    4 + ((score as usize) * 12 / 100)
+}
+
+struct LatestOrientEntry<'a> {
+    strand_id: &'a str,
+    entry: &'a projection::LogEntry,
+}
+
+fn latest_visible_entry<'a>(
+    strands: &'a [projection::ProjectedStrand],
+    include_hidden: bool,
+) -> Option<LatestOrientEntry<'a>> {
+    strands
+        .iter()
+        .filter(|s| !s.hidden || include_hidden)
+        .flat_map(|strand| {
+            strand.log.iter().map(move |entry| LatestOrientEntry {
+                strand_id: strand.id.as_str(),
+                entry,
+            })
+        })
+        .max_by_key(|candidate| candidate.entry.offset)
+}
+
+fn active_pair_hint(view: &projection::OrientView) -> Option<String> {
+    if view.active_ids.len() < 2 {
+        return None;
+    }
+    let source = shorten(&view.active_ids[0]);
+    let target = shorten(&view.active_ids[1]);
+    Some(format!(
+        "link candidate → mnema link {} {} --edge-type depends-on",
+        source, target
+    ))
+}
+
+fn adaptive_orient_remind(
+    strands: &[projection::ProjectedStrand],
+    view: &projection::OrientView,
+    include_hidden: bool,
+    score: u8,
+) -> String {
+    let link_hint = active_pair_hint(view);
+    let Some(latest) = latest_visible_entry(strands, include_hidden) else {
+        return "loop: 做一步·看现实变·再想 | write moments: 方案成形 / 判断被现实改变 / 收口或不可逆前 | start → echo \"<summary>\" | mnema add | writing drill → mnema explain writing | more → mnema --help".to_string();
+    };
+
+    let strand = shorten(latest.strand_id);
+    let entry_prefix = latest
+        .entry
+        .entry_id
+        .as_deref()
+        .map(shorten)
+        .unwrap_or_else(|| format!("offset{}", latest.entry.offset));
+    let marker = leading_marker(&latest.entry.content).unwrap_or("");
+    let next = match marker {
+        "friction" => format!(
+            "next: latest [friction] {} on {}; after fixing → echo \"[fixed] fixes={} <what changed>; verified=<command>\" | mnema append --id {}",
+            entry_prefix, strand, entry_prefix, strand
+        ),
+        "checkpoint" => format!(
+            "next: checkpoint {} was written; after action/verification → echo \"[observed] <result>; source=<command>\" | mnema append --id {}",
+            entry_prefix, strand
+        ),
+        "decision" => format!(
+            "next: test decision {} against reality → echo \"[observed] <fact>; source=<command>\" | mnema append --id {}",
+            entry_prefix, strand
+        ),
+        "deliverable" | "done" | "verified" | "failed" | "cancelled" | "merged" => {
+            format!(
+                "next: if concluded, close the line → mnema close --id {} [--as done|failed|cancelled|merged|verified]",
+                strand
+            )
+        }
+        _ => format!(
+            "next: continue from latest entry {} on {} → echo \"[progress] <what changed>; verify=<command>\" | mnema append --id {}",
+            entry_prefix, strand, strand
+        ),
+    };
+
+    let teaching = if score < 30 {
+        " | write moments: 方案成形 / 判断被现实改变 / 收口或不可逆前 | template: mnema explain writing"
+    } else if score < 75 {
+        " | writing template: mnema explain writing"
+    } else {
+        " | more: mnema --help"
+    };
+
+    match link_hint {
+        Some(hint) => format!(
+            "loop: 做一步·看现实变·再想 | {} | {}{}",
+            next, hint, teaching
+        ),
+        None => format!("loop: 做一步·看现实变·再想 | {}{}", next, teaching),
     }
 }
 
@@ -517,7 +642,7 @@ pub(crate) fn cmd_orient(
     let (events, skipped) = read_events_lossy(&path);
     let request = OrientRequest {
         include_hidden,
-        limit: limit.unwrap_or(10),
+        limit,
     };
     let plan = orient_plan(&events, &request);
     let strands = &plan.strands;

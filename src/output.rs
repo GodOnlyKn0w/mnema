@@ -124,7 +124,7 @@ impl<'a> ExplainUnknownOutput<'a> {
 // ── orient --format json ───────────────────────────────────
 
 /// Orient remind line: the operating loop surfaced by orient outputs.
-pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → echo \"[decision] ...\" | mnema append --id <ID> | new matter → echo \"<summary>\" | mnema add | matter concluded → close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → checkpoint --id <ID> --action \"<why>\" | read/extract → --format json | jq（id/offset/status，非文本切割）| more → mnema --help";
+pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → echo \"[decision] ...\" | mnema append --id <ID> | new matter → echo \"<summary>\" | mnema add | matter concluded → mnema close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → mnema checkpoint --id <ID> --action \"<why>\" | writing example → mnema explain writing | read/extract → --format json | jq（id/offset/status，非文本切割）| more → mnema --help";
 
 /// Pause guidance — the one place it can live (CORPUS §8): the tool can't stop
 /// the irreversible moment and a cold-start LLM won't go looking for it, so its
@@ -141,8 +141,8 @@ pub struct OrientStrand {
     pub summary: String,
     pub last_entry: String,
     pub last_offset: usize,
-    /// Ready-to-run catch-up command for this strand (ADR-0003: the cursor
-    /// lives on the strand's last_offset, not on an observer).
+    /// Ready-to-run catch-up command for this strand: a recent-content window
+    /// (`mnema show --id <id> --tail 8`), not an observer-offset delta.
     pub catch_up: String,
     /// Lifecycle state: "registered" (open) or "closed:<disposition>"
     /// (e.g. "closed:done", "closed:failed"). Set by close/reopen commands,
@@ -407,6 +407,7 @@ impl<'a> From<&'a crate::diagnostics::ClosedTargetWarning> for ClosedTargetOutpu
 pub(crate) struct AppendOutput<'a> {
     pub(crate) strand_id: &'a str,
     pub(crate) entry_id: &'a Option<String>,
+    pub(crate) entry_id_prefix: Option<String>,
     pub(crate) content_preview: String,
     pub(crate) provenance: &'a Option<serde_json::Value>,
     pub(crate) seen_offset: Option<usize>,
@@ -453,6 +454,7 @@ pub(crate) struct CheckpointOutput<'a> {
     pub(crate) shown_entries: usize,
     pub(crate) action: &'a str,
     pub(crate) entry_id: &'a Option<String>,
+    pub(crate) entry_id_prefix: Option<String>,
     pub(crate) journal_appended: bool,
     pub(crate) diagnostics_count: usize,
     pub(crate) result: Option<OrientStrand>,
