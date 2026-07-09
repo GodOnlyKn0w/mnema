@@ -1,1 +1,0 @@
-Ignoring 20 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["D:/forks/tasktree-core"].hasTrustDialogAccepted: true in C:\Users\Admin\.claude.json.

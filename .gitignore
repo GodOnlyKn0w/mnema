@@ -1,3 +1,6 @@
 .mnema/
 target/
 .worktrees/
+
+# transient agent run logs
+.agents/
