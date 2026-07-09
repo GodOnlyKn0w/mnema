@@ -33,7 +33,7 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   list          List strands
   show          Show one strand (--digest one-glance, --tail N recent)
   timeline      Chronological entries across strands (+linked)
-  search        Full-text search across entries
+  search        Full-text search (entry hashes; --marker filter)
   find          Resolve a strand id
   pick          Pick a strand from an arrow-key menu; append reads body from stdin
   tree          Strand forest (belongs-to nesting)
@@ -52,7 +52,7 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   init          Initialize .mnema/ journal
   hide          Hide a strand from active orient (parked, revivable)
   unhide        Unhide a strand
-  doctor        Diagnose journal integrity
+  doctor        Diagnose journal integrity (journal | edges)
   export        Export journal as standalone audit artifact
   cutover-v2    Rewrite/import current journal into pure v2 form
   explain       Explain a diagnostic code or topic (markers, json, grammar, writing, ...)
@@ -367,10 +367,24 @@ Examples:
         #[arg(long)]
         locked: bool,
     },
-    /// Full-text search across all log content
+    /// Full-text search across all log content (entry-level hits with hashes)
+    #[command(after_help = "\
+Examples:
+  mnema search friction
+  mnema search --marker friction
+  mnema search win_count --marker metric --format json
+  mnema search --marker decision --format json
+
+Each hit is entry-level: entry hash prefix + marker + first line.
+Use the hash for fixes=<hash> / --why <hash>. Filter with --marker
+(friction/decision/metric/… — see mnema explain markers).")]
     Search {
-        /// Search query (substring match, case-insensitive)
+        /// Search query (substring match, case-insensitive). Optional when --marker is set.
+        #[arg(default_value = "")]
         query: String,
+        /// Filter to entries whose leading marker matches NAME (with or without brackets)
+        #[arg(long, value_name = "NAME")]
+        marker: Option<String>,
         /// Include hidden strands in the result set (default: exclude)
         #[arg(long)]
         include_hidden: bool,
@@ -745,6 +759,22 @@ Examples:
 enum DoctorTarget {
     /// Check journal integrity
     Journal,
+    /// Edge-discipline self-check: open unfixed [friction] + [decision] without --why
+    #[command(after_help = "\
+Examples:
+  mnema doctor edges
+  mnema doctor edges --format json
+
+Read-only projection of the tool's own edge discipline:
+  (a) [friction] still open (strand registered) and not targeted by any
+      [fixed] fixes=<hash>
+  (b) [decision] entries recorded without a --why ref
+JSON twin: open_frictions[] / decisions_without_why[] with entry_id.")]
+    Edges {
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+    },
 }
 
 /// NOTE: Strand sort key is `max(log_appended.ts)` per strand.
@@ -1180,11 +1210,12 @@ fn run(command: &Commands) -> Result<(), String> {
         }
         Commands::Search {
             query,
+            marker,
             format,
             include_hidden,
         } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_search(query, fmt, *include_hidden)
+            cmd_search(query, fmt, *include_hidden, marker.as_deref())
         }
         Commands::Find {
             target,
@@ -1317,6 +1348,9 @@ fn run(command: &Commands) -> Result<(), String> {
         Commands::Doctor { target } => {
             let result = match target {
                 DoctorTarget::Journal => cmd_doctor_journal(),
+                DoctorTarget::Edges { format } => {
+                    cmd_doctor_edges(format.as_deref() == Some("json"))
+                }
             };
             match result {
                 Ok(true) => Err("journal issues detected".to_string()),

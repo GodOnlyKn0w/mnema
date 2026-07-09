@@ -128,25 +128,22 @@ Marker 语义（一行一条）：
   id / slug / hidden / summary / entry_count / status / state_marker / state_offset / last_entry_offset /
   edges / belongs_to_edges / depends_on_edges / strand_branch / events
   ※ events[].entry=日志行；last_entry_offset=下次 --seen-offset；belongs_to_edges=父 / depends_on_edges=阻塞者(F3)
-
 list（StrandListOutput.strands[]，StrandListItem）：
   id / slug / entry_count / first_summary / last_summary / hidden / strand_type /
   edges / belongs_to_edges / depends_on_edges / status / state_marker /
   state_offset / last_entry_ts / last_entry_offset
-
 orient（OrientOutput）：
-  max_offset / active / closed_count / hidden_count / integrity / notices / remind / pause
-  ※ active[] 是卡片数组（OrientStrand）见 mnema explain card
-
+  max_offset / active / closed_count / hidden_count / integrity / notices / remind / pause / stale_count
+  ※ active[] 卡片见 card；stale_count=活跃且末条 silent≥2h（指针 list --stale 2h）
 search（SearchOutput）：
-  matches / count / query
-  ※ matches[] 每元素：strand_id / content / strand_type / hidden
-
+  matches / count / query / marker
+  ※ matches[]：strand_id / content / strand_type / hidden / entry_id / marker（entry_id=全哈希供 fixes=/--why；marker null=未筛）
+doctor edges（EdgesOutput）：
+  open_frictions / decisions_without_why / open_friction_count / decision_without_why_count
+  ※ 项：entry_id / strand_id / marker / content / offset（open unfixed friction + decision 无 --why）
 timeline（TimelineOutput）：
   timeline / truncated / count / max_offset
-  ※ timeline[] 每元素：journal_offset / ts / strand_id /
-    strand_type / kind / ts_skew
-
+  ※ timeline[]：journal_offset / ts / strand_id / strand_type / kind / ts_skew
 append: seen_offset / seen_gap / warnings / closed_target / result；checkpoint: seen_offset / seen_gap / warnings / result
 add: id / status / provenance / slug / parent_id / edge_type / result；find: id
 hide / unhide: strand_id / status / noop / active_count / closed_count / hidden_count / result（卡片）
@@ -883,7 +880,8 @@ mod tests {
     #[test]
     fn json_topic_fields_match_serialization() {
         use crate::output::{
-            OrientOutput, SearchOutput, StrandDetailOutput, StrandListItem, TimelineOutput,
+            EdgesOutput, OrientOutput, SearchOutput, StrandDetailOutput, StrandListItem,
+            TimelineOutput,
         };
         let topic = topic_lookup("json").expect("json topic must exist");
 
@@ -950,6 +948,7 @@ mod tests {
             notices: vec![],
             remind: "".to_string(),
             pause: "".to_string(),
+            stale_count: 0,
         };
         let v = serde_json::to_value(&orient_sample).expect("serialize OrientOutput");
         for key in v.as_object().unwrap().keys() {
@@ -965,6 +964,7 @@ mod tests {
             matches: vec![],
             count: 0,
             query: "q".to_string(),
+            marker: None,
         };
         let v = serde_json::to_value(&search_sample).expect("serialize SearchOutput");
         for key in v.as_object().unwrap().keys() {
@@ -987,6 +987,22 @@ mod tests {
             assert!(
                 topic.body.contains(key.as_str()),
                 "json topic missing timeline field: {}",
+                key
+            );
+        }
+
+        // doctor edges → EdgesOutput
+        let edges_sample = EdgesOutput {
+            open_frictions: vec![],
+            decisions_without_why: vec![],
+            open_friction_count: 0,
+            decision_without_why_count: 0,
+        };
+        let v = serde_json::to_value(&edges_sample).expect("serialize EdgesOutput");
+        for key in v.as_object().unwrap().keys() {
+            assert!(
+                topic.body.contains(key.as_str()),
+                "json topic missing edges field: {}",
                 key
             );
         }

@@ -329,6 +329,7 @@ fn orient_tree_json_shape_is_nested() {
         notices: out.notices.clone(),
         remind: out.remind.clone(),
         pause: out.pause.clone(),
+        stale_count: out.stale_count,
     };
 
     let json_str = serde_json::to_string(&tree_out).unwrap();
@@ -872,7 +873,7 @@ fn search_default_excludes_hidden() {
     .unwrap();
     cmd_hide(&id, Some("noise"), false, None).unwrap();
     // Default: include_hidden=false → search skips the hidden strand.
-    let result = cmd_search("needle", false, false);
+    let result = cmd_search("needle", false, false, None);
     assert!(result.is_ok());
 }
 
@@ -905,7 +906,7 @@ fn search_include_hidden_projection_reports_hidden() {
         !visible.iter().any(|s| s.id == id),
         "hidden strand must not appear in default view"
     );
-    assert!(cmd_search("needle", false, true).is_ok());
+    assert!(cmd_search("needle", false, true, None).is_ok());
 }
 
 #[test]
@@ -1317,6 +1318,273 @@ fn orient_two_active_lines_suggests_link_candidate() {
     );
     assert!(plan.output.remind.contains("--edge-type depends-on"));
     let _ = (first, second);
+}
+
+// ── query-side batch: entry search / --marker / edges / orient stale ──
+
+#[test]
+fn search_returns_entry_level_hits_with_hash_and_marker() {
+    let _env = setup();
+    let id = create_strand("search entry base");
+    cmd_append(
+        Some("[friction] needle-entry-level; at=here; tried=x"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let result = search_events(
+        &events,
+        &SearchRequest {
+            query: "needle-entry-level",
+            include_hidden: false,
+            marker: None,
+        },
+    );
+    assert_eq!(result.output.count, 1);
+    let m = &result.output.matches[0];
+    assert_eq!(m.strand_id, id);
+    assert_eq!(m.marker, "friction");
+    let entry_id = m.entry_id.as_ref().expect("entry_id required");
+    assert!(entry_id.len() >= 12, "full entry hash expected");
+    // text row leads with the entry prefix (edge handoff), not strand id
+    let (prefix, marker_disp, _) = &result.text_rows[0];
+    assert_eq!(prefix, &shorten(entry_id));
+    assert_eq!(marker_disp, "[friction]");
+}
+
+#[test]
+fn search_marker_filter_keeps_only_named_marker() {
+    let _env = setup();
+    let id = create_strand("marker filter base");
+    cmd_append(
+        Some("[friction] only friction"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    cmd_append(
+        Some("[metric] win_count=26"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    cmd_append(
+        Some("[decision] ship it"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+
+    let metrics = search_events(
+        &events,
+        &SearchRequest {
+            query: "",
+            include_hidden: false,
+            marker: Some("metric"),
+        },
+    );
+    assert_eq!(metrics.output.count, 1);
+    assert_eq!(metrics.output.matches[0].marker, "metric");
+    assert!(
+        metrics.output.matches[0]
+            .content
+            .contains("win_count=26")
+    );
+    assert_eq!(metrics.output.marker.as_deref(), Some("metric"));
+
+    // Bracket form of --marker also works.
+    let frictions = search_events(
+        &events,
+        &SearchRequest {
+            query: "",
+            include_hidden: false,
+            marker: Some("friction"),
+        },
+    );
+    assert_eq!(frictions.output.count, 1);
+    assert_eq!(frictions.output.matches[0].marker, "friction");
+    assert!(frictions.output.matches[0].entry_id.is_some());
+}
+
+#[test]
+fn edges_discipline_lists_open_friction_and_why_less_decision() {
+    let _env = setup();
+    let id = create_strand("edges discipline base");
+    // Open friction (should appear).
+    cmd_append(
+        Some("[friction] still blocked; at=x; tried=y"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    // Decision without --why (should appear).
+    cmd_append(
+        Some("[decision] choose A without rationale pin"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    // Friction that gets fixed (should NOT appear as open).
+    cmd_append(
+        Some("[friction] was broken; at=z; tried=w"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let strand = strands.iter().find(|s| s.id == id).unwrap();
+    let fixed_friction = strand
+        .log
+        .iter()
+        .rev()
+        .find(|e| e.content.starts_with("[friction] was broken"))
+        .and_then(|e| e.entry_id.clone())
+        .expect("fixed friction entry_id");
+    let fixed_prefix = shorten(&fixed_friction);
+    cmd_append(
+        Some(&format!(
+            "[fixed] fixes={} repaired; verified=test",
+            fixed_prefix
+        )),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+    )
+    .unwrap();
+    // Decision WITH --why (should NOT appear).
+    let why_target = strand
+        .log
+        .first()
+        .and_then(|e| e.entry_id.clone())
+        .expect("first entry id");
+    cmd_append_with_seen_offset(
+        Some("[decision] choose B with pin"),
+        None,
+        false,
+        false,
+        None,
+        Some(&id),
+        None,
+        None,
+        None,
+        Some(&why_target),
+    )
+    .unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let report = projection::edges_discipline_report(&strands);
+
+    assert_eq!(
+        report.open_frictions.len(),
+        1,
+        "only the unfixed open friction: {:?}",
+        report.open_frictions
+    );
+    assert!(
+        report.open_frictions[0]
+            .content
+            .contains("still blocked"),
+        "open friction content: {}",
+        report.open_frictions[0].content
+    );
+    assert_eq!(
+        report.decisions_without_why.len(),
+        1,
+        "only the why-less decision: {:?}",
+        report.decisions_without_why
+    );
+    assert!(
+        report.decisions_without_why[0]
+            .content
+            .contains("without rationale pin"),
+        "why-less decision: {}",
+        report.decisions_without_why[0].content
+    );
+}
+
+#[test]
+fn orient_stale_count_counts_active_silent_past_threshold() {
+    let _env = setup();
+    let _fresh = create_strand("fresh active line");
+    let stale_id = create_strand("stale active line");
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    // Synthetic future "now" makes every current entry older than the 2h threshold.
+    let now = chrono::Utc::now() + chrono::Duration::hours(5);
+    let count = count_stale_active(&strands, false, now, ORIENT_STALE_SECS);
+    assert!(
+        count >= 2,
+        "both active lines silent ≥2h under future now, got {count}"
+    );
+
+    // Closed strands do not count as stale-active.
+    cmd_close(&stale_id, Some("done"), None, false).unwrap();
+    let (events2, _) = read_events_lossy(&path);
+    let strands2 = projection::project_strands(&events2, true);
+    let count2 = count_stale_active(&strands2, false, now, ORIENT_STALE_SECS);
+    assert_eq!(
+        count2,
+        count - 1,
+        "closing one strand drops stale_count by 1"
+    );
+
+    let plan = orient_plan_at(
+        &events2,
+        &OrientRequest {
+            include_hidden: false,
+            limit: None,
+        },
+        now,
+    );
+    assert_eq!(plan.output.stale_count, count2);
 }
 
 #[test]

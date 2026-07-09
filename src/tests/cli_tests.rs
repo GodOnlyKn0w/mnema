@@ -815,6 +815,7 @@ fn grammar_json_field_naming() {
             matches: vec![],
             count: 0,
             query: String::new(),
+            marker: None,
         })
         .unwrap(),
         serde_json::to_value(output::TimelineOutput {

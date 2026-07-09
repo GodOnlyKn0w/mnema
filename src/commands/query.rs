@@ -192,38 +192,78 @@ pub(crate) fn cmd_list(
 pub(crate) struct SearchRequest<'a> {
     pub(crate) query: &'a str,
     pub(crate) include_hidden: bool,
+    /// Bare marker name without brackets (e.g. "friction"); None = unrestricted.
+    pub(crate) marker: Option<&'a str>,
 }
 
 pub(crate) struct SearchResult {
     pub(crate) output: output::SearchOutput,
-    pub(crate) text_rows: Vec<(String, String)>,
+    /// text rows: (entry_prefix, marker_display, content)
+    pub(crate) text_rows: Vec<(String, String, String)>,
+}
+
+/// Normalize a `--marker` argument to the bare leading-marker form.
+/// Accepts `friction` or `[friction]`; empty → error.
+pub(crate) fn normalize_marker_filter(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("--marker requires a non-empty name (e.g. friction, decision, metric)".into());
+    }
+    let bare = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed)
+        .trim();
+    if bare.is_empty() {
+        return Err("--marker requires a non-empty name (e.g. friction, decision, metric)".into());
+    }
+    Ok(bare.to_ascii_lowercase())
 }
 
 pub(crate) fn search_events(events: &[(usize, Event)], req: &SearchRequest<'_>) -> SearchResult {
     let q = req.query.to_lowercase();
-    let strands = projection::project_strands(events, req.include_hidden);
-    let strand_map: std::collections::HashMap<&str, &projection::ProjectedStrand> =
-        strands.iter().map(|s| (s.id.as_str(), s)).collect();
+    let marker_filter = req.marker.map(|m| m.to_ascii_lowercase());
+    // Project with include_hidden so entry_id is always folded; filter per-strand below.
+    let strands = projection::project_strands(events, true);
 
     let mut matches = Vec::new();
     let mut text_rows = Vec::new();
-    for (_, event) in events {
-        if let Event::LogAppended { content, .. } = event {
-            if content.to_lowercase().contains(&q) {
-                let strand_id = event.strand_id().expect("strand-scoped event").to_string();
-                if !strand_map.contains_key(strand_id.as_str()) {
+    for strand in &strands {
+        if strand.hidden && !req.include_hidden {
+            continue;
+        }
+        for entry in &strand.log {
+            if !q.is_empty() && !entry.content.to_lowercase().contains(&q) {
+                continue;
+            }
+            let marker_name = leading_marker(&entry.content)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if let Some(ref want) = marker_filter {
+                if marker_name != *want {
                     continue;
                 }
-                let projected = strand_map.get(strand_id.as_str());
-                let content = truncate(content, 70);
-                text_rows.push((shorten(&strand_id), content.clone()));
-                matches.push(output::SearchMatch {
-                    strand_id,
-                    content,
-                    strand_type: projected.and_then(|s| s.strand_type.clone()),
-                    hidden: projected.map(|s| s.hidden).unwrap_or(false),
-                });
             }
+            let content = truncate(&entry.content, 70);
+            let entry_id = entry.entry_id.clone();
+            let entry_prefix = entry_id
+                .as_deref()
+                .map(shorten)
+                .unwrap_or_else(|| format!("offset{}", entry.offset));
+            let marker_display = if marker_name.is_empty() {
+                String::new()
+            } else {
+                format!("[{}]", marker_name)
+            };
+            text_rows.push((entry_prefix, marker_display, content.clone()));
+            matches.push(output::SearchMatch {
+                strand_id: strand.id.clone(),
+                content,
+                strand_type: strand.strand_type.clone(),
+                hidden: strand.hidden,
+                entry_id,
+                marker: marker_name,
+            });
         }
     }
     let count = matches.len();
@@ -232,6 +272,7 @@ pub(crate) fn search_events(events: &[(usize, Event)], req: &SearchRequest<'_>) 
             matches,
             count,
             query: req.query.to_string(),
+            marker: marker_filter,
         },
         text_rows,
     }
@@ -241,13 +282,22 @@ pub(crate) fn cmd_search(
     query: &str,
     format_json: bool,
     include_hidden: bool,
+    marker: Option<&str>,
 ) -> Result<(), String> {
     let started = Instant::now();
+    let marker_norm = match marker {
+        Some(raw) => Some(normalize_marker_filter(raw)?),
+        None => None,
+    };
+    if query.is_empty() && marker_norm.is_none() {
+        return Err("search requires a query and/or --marker".into());
+    }
     let path = ensure_journal()?;
     let (events, skipped) = read_events_lossy(&path);
     let request = SearchRequest {
         query,
         include_hidden,
+        marker: marker_norm.as_deref(),
     };
     let result = search_events(&events, &request);
 
@@ -257,10 +307,19 @@ pub(crate) fn cmd_search(
             serde_json::to_string(&result.output).expect("serialize")
         );
     } else if result.output.count == 0 {
-        println!("(no matches for: {})", query);
+        match (query.is_empty(), marker_norm.as_deref()) {
+            (false, Some(m)) => println!("(no matches for: {} --marker {})", query, m),
+            (false, None) => println!("(no matches for: {})", query),
+            (true, Some(m)) => println!("(no matches for --marker {})", m),
+            (true, None) => println!("(no matches)"),
+        }
     } else {
-        for (id, content) in &result.text_rows {
-            println!("{}  {}", id, content);
+        for (entry_prefix, marker_disp, content) in &result.text_rows {
+            if marker_disp.is_empty() {
+                println!("{}  {}", entry_prefix, content);
+            } else {
+                println!("{}  {}  {}", entry_prefix, marker_disp, content);
+            }
         }
     }
 
@@ -473,7 +532,39 @@ pub(crate) struct OrientPlan {
     pub(crate) output: output::OrientOutput,
 }
 
+/// Default stale threshold surfaced by orient (matches `list --stale` help example).
+pub(crate) const ORIENT_STALE_DURATION: &str = "2h";
+pub(crate) const ORIENT_STALE_SECS: i64 = 2 * 3600;
+
+/// Count active, non-hidden strands whose last entry is older than `cutoff`.
+pub(crate) fn count_stale_active(
+    strands: &[projection::ProjectedStrand],
+    include_hidden: bool,
+    now: chrono::DateTime<chrono::Utc>,
+    stale_secs: i64,
+) -> usize {
+    let cutoff = now - chrono::Duration::seconds(stale_secs);
+    let cutoff_str = cutoff.to_rfc3339();
+    strands
+        .iter()
+        .filter(|s| s.state() == "registered")
+        .filter(|s| !s.hidden || include_hidden)
+        .filter(|s| {
+            let last_ts = s.last_ts();
+            !last_ts.is_empty() && last_ts < cutoff_str.as_str()
+        })
+        .count()
+}
+
 pub(crate) fn orient_plan(events: &[(usize, Event)], req: &OrientRequest) -> OrientPlan {
+    orient_plan_at(events, req, chrono::Utc::now())
+}
+
+pub(crate) fn orient_plan_at(
+    events: &[(usize, Event)],
+    req: &OrientRequest,
+    now: chrono::DateTime<chrono::Utc>,
+) -> OrientPlan {
     let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
     let strands = projection::project_strands(events, true);
     let (entry_count, strand_count) = orient_maturity_counts(&strands, req.include_hidden);
@@ -486,11 +577,21 @@ pub(crate) fn orient_plan(events: &[(usize, Event)], req: &OrientRequest) -> Ori
     output.integrity = integrity_glance(events);
     output.notices = projection::orient_notices(&strands);
     output.remind = adaptive_orient_remind(&strands, &view, req.include_hidden, score);
+    output.stale_count =
+        count_stale_active(&strands, req.include_hidden, now, ORIENT_STALE_SECS);
     OrientPlan {
         strands,
         view,
         output,
     }
+}
+
+fn print_orient_stale(stale_count: usize) {
+    // Always print so the discovery surface exists even when the count is zero.
+    println!(
+        "stale: {} active silent ≥{} → mnema list --stale {}",
+        stale_count, ORIENT_STALE_DURATION, ORIENT_STALE_DURATION
+    );
 }
 
 fn orient_maturity_counts(
@@ -736,6 +837,7 @@ pub(crate) fn cmd_orient(
             notices: out.notices.clone(),
             remind: out.remind.clone(),
             pause: out.pause.clone(),
+            stale_count: out.stale_count,
         };
 
         if format == Some("json") {
@@ -749,6 +851,7 @@ pub(crate) fn cmd_orient(
                 out.hidden_count
             );
             println!("integrity: {}", out.integrity);
+            print_orient_stale(out.stale_count);
             print_orient_forest(&tree_out.roots, 0);
             if out.active.is_empty() {
                 println!("(no active strands) — start one: echo \"<summary>\" | mnema add");
@@ -769,6 +872,7 @@ pub(crate) fn cmd_orient(
             out.hidden_count
         );
         println!("integrity: {}", out.integrity);
+        print_orient_stale(out.stale_count);
         for s in &out.active {
             let type_info = s
                 .strand_type

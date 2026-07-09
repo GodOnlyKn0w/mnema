@@ -364,6 +364,115 @@ pub(crate) fn live_link_entry_ids(
         .collect()
 }
 
+/// One dangling edge-discipline item (open unfixed friction, or decision without why).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgesDisciplineItem {
+    pub entry_id: String,
+    pub strand_id: String,
+    pub marker: String,
+    pub content: String,
+    pub offset: usize,
+}
+
+/// Edge-discipline self-check: (a) open unfixed `[friction]`, (b) `[decision]` lacking refs.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EdgesDisciplineReport {
+    pub open_frictions: Vec<EdgesDisciplineItem>,
+    pub decisions_without_why: Vec<EdgesDisciplineItem>,
+}
+
+/// Extract `fixes=<hex prefix ≥8>` token from a `[fixed]` entry body, if present.
+pub(crate) fn extract_fixes_prefix(content: &str) -> Option<&str> {
+    content.split_whitespace().find_map(|tok| {
+        let prefix = tok.strip_prefix("fixes=")?;
+        if prefix.len() >= 8 && prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+            Some(prefix)
+        } else {
+            None
+        }
+    })
+}
+
+/// Build the dangling edge-discipline report from a full strand projection.
+///
+/// - **open frictions**: `[friction]` on a registered, non-hidden strand that no
+///   `[fixed] fixes=<prefix>` points at (prefix match against entry_id or append_id).
+/// - **decisions without why**: `[decision]` entries whose `refs` is empty
+///   (no `--why` was recorded). Hidden strands are skipped.
+pub fn edges_discipline_report(strands: &[ProjectedStrand]) -> EdgesDisciplineReport {
+    // Collect every fixes= target prefix across the whole journal.
+    let mut fix_prefixes: Vec<&str> = Vec::new();
+    for strand in strands {
+        for entry in &strand.log {
+            if crate::markers::leading_marker(&entry.content) == Some("fixed") {
+                if let Some(p) = extract_fixes_prefix(&entry.content) {
+                    fix_prefixes.push(p);
+                }
+            }
+        }
+    }
+
+    let is_fixed = |entry: &LogEntry| -> bool {
+        let candidates: Vec<&str> = entry
+            .entry_id
+            .as_deref()
+            .into_iter()
+            .chain(entry.append_id.as_deref())
+            .collect();
+        if candidates.is_empty() {
+            return false;
+        }
+        fix_prefixes.iter().any(|prefix| {
+            candidates
+                .iter()
+                .any(|id| id.starts_with(prefix) || prefix.starts_with(id))
+        })
+    };
+
+    let mut open_frictions = Vec::new();
+    let mut decisions_without_why = Vec::new();
+
+    for strand in strands {
+        if strand.hidden {
+            continue;
+        }
+        let strand_open = strand.state() == "registered";
+        for entry in &strand.log {
+            let marker = crate::markers::leading_marker(&entry.content).unwrap_or("");
+            match marker {
+                "friction" if strand_open && !is_fixed(entry) => {
+                    if let Some(entry_id) = entry.entry_id.clone() {
+                        open_frictions.push(EdgesDisciplineItem {
+                            entry_id,
+                            strand_id: strand.id.clone(),
+                            marker: marker.to_string(),
+                            content: crate::util::truncate(&entry.content, 70),
+                            offset: entry.offset,
+                        });
+                    }
+                }
+                "decision" if entry.refs.is_empty() => {
+                    if let Some(entry_id) = entry.entry_id.clone() {
+                        decisions_without_why.push(EdgesDisciplineItem {
+                            entry_id,
+                            strand_id: strand.id.clone(),
+                            marker: marker.to_string(),
+                            content: crate::util::truncate(&entry.content, 70),
+                            offset: entry.offset,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    EdgesDisciplineReport {
+        open_frictions,
+        decisions_without_why,
+    }
+}
+
 /// Needs-judgment notices for orient (CORPUS §8, question ③): active,
 /// non-hidden strands whose last entry carries a closing-annotation marker
 /// (`[done]`/`[verified]`/…) yet the strand is still open. A fact for the

@@ -104,7 +104,7 @@ fn show_search_unchanged() {
     let r = cmd_show(Some(&id), false, None, false, false, false, None);
     assert!(r.is_ok());
     // search
-    let r = cmd_search("entry", false, false);
+    let r = cmd_search("entry", false, false, None);
     assert!(r.is_ok());
 }
 
@@ -448,32 +448,22 @@ fn handles_list_search_ids_intact() {
         item.id.len()
     );
 
-    // search JSON: SearchMatch.strand_id must be the full id; content may be truncated
-    let q = "unique_search_token_xyz".to_lowercase();
-    let strand_map: std::collections::HashMap<&str, &projection::ProjectedStrand> =
-        strands.iter().map(|s| (s.id.as_str(), s)).collect();
-    let mut search_matches: Vec<output::SearchMatch> = Vec::new();
-    for (_, event) in &events {
-        if let Event::LogAppended { content, .. } = event {
-            if content.to_lowercase().contains(&q) {
-                let strand_id_full = event.strand_id().expect("strand-scoped event").to_string();
-                if strand_map.contains_key(strand_id_full.as_str()) {
-                    let projected = strand_map.get(strand_id_full.as_str());
-                    search_matches.push(output::SearchMatch {
-                        strand_id: strand_id_full,
-                        content: truncate(content, 70),
-                        strand_type: projected.and_then(|s| s.strand_type.clone()),
-                        hidden: projected.map(|s| s.hidden).unwrap_or(false),
-                    });
-                }
-            }
-        }
-    }
+    // search JSON: SearchMatch.strand_id must be the full id; content may be truncated;
+    // entry_id is the matching line's full hash (edge-discipline handoff).
+    let result = search_events(
+        &events,
+        &SearchRequest {
+            query: "unique_search_token_xyz",
+            include_hidden: false,
+            marker: None,
+        },
+    );
+    let search_matches = &result.output.matches;
     assert!(
         !search_matches.is_empty(),
         "search must find at least one match"
     );
-    for m in &search_matches {
+    for m in search_matches {
         // strand_id: full id, no truncation marker
         assert!(
             !m.strand_id.contains('\u{2026}') && !m.strand_id.contains("..."),
@@ -488,6 +478,10 @@ fn handles_list_search_ids_intact() {
             assert_eq!(
                 m.strand_id, id,
                 "SearchMatch.strand_id must equal full strand id"
+            );
+            assert!(
+                m.entry_id.as_ref().map(|e| e.len() >= 12).unwrap_or(false),
+                "SearchMatch.entry_id must be present and full-length"
             );
         }
         // content is prose — truncation allowed; just verify it doesn't crash
@@ -665,30 +659,21 @@ fn handles_truncate_never_applied_to_ids() {
         "orient JSON: id must not contain truncation marker"
     );
 
-    // search --format json: full id
-    let q = "unique_audit_token_abc123".to_lowercase();
-    let strand_map: std::collections::HashMap<&str, &projection::ProjectedStrand> =
-        strands.iter().map(|s| (s.id.as_str(), s)).collect();
-    let mut found_match: Option<output::SearchMatch> = None;
-    for (_, event) in &events {
-        if let Event::LogAppended { content, .. } = event {
-            if content.to_lowercase().contains(&q) {
-                let strand_id_full = event.strand_id().expect("strand-scoped event").to_string();
-                if strand_map.contains_key(strand_id_full.as_str()) {
-                    let projected = strand_map.get(strand_id_full.as_str());
-                    if strand_id_full == id {
-                        found_match = Some(output::SearchMatch {
-                            strand_id: strand_id_full,
-                            content: truncate(content, 70),
-                            strand_type: projected.and_then(|s| s.strand_type.clone()),
-                            hidden: projected.map(|s| s.hidden).unwrap_or(false),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    let m = found_match.expect("search must find our entry");
+    // search --format json: full strand id + entry id
+    let result = search_events(
+        &events,
+        &SearchRequest {
+            query: "unique_audit_token_abc123",
+            include_hidden: false,
+            marker: None,
+        },
+    );
+    let m = result
+        .output
+        .matches
+        .iter()
+        .find(|m| m.strand_id == id)
+        .expect("search must find our entry");
     assert_eq!(
         m.strand_id, id,
         "search JSON: strand_id must equal full strand id"
@@ -696,6 +681,10 @@ fn handles_truncate_never_applied_to_ids() {
     assert!(
         !m.strand_id.contains('\u{2026}') && !m.strand_id.contains("..."),
         "search JSON: strand_id must not contain truncation marker"
+    );
+    assert!(
+        m.entry_id.as_ref().map(|e| e.len() >= 12).unwrap_or(false),
+        "search JSON: entry_id must be present"
     );
 }
 

@@ -214,6 +214,9 @@ pub struct OrientOutput {
     pub remind: String,
     /// Pause full text (question ④) — see ORIENT_PAUSE.
     pub pause: String,
+    /// Active, non-hidden strands whose last entry is older than the orient
+    /// stale threshold (2h). Pure read projection; use `mnema list --stale 2h`.
+    pub stale_count: usize,
 }
 
 impl From<(&OrientView, &[ProjectedStrand])> for OrientOutput {
@@ -233,6 +236,7 @@ impl From<(&OrientView, &[ProjectedStrand])> for OrientOutput {
             notices: Vec::new(),
             remind: ORIENT_REMIND.to_string(),
             pause: ORIENT_PAUSE.to_string(),
+            stale_count: 0,
         }
     }
 }
@@ -252,6 +256,8 @@ pub struct OrientTreeOutput {
     pub notices: Vec<String>,
     pub remind: String,
     pub pause: String,
+    /// Same meaning as `OrientOutput.stale_count`.
+    pub stale_count: usize,
 }
 
 // ── query JSON DTOs ────────────────────────────────────────
@@ -706,12 +712,21 @@ pub struct StrandDetailOutput {
 // ── search --format json ───────────────────────────────────
 
 /// One match entry in search results.
+///
+/// Entry-level identity: `entry_id` is the full content-addressed hash of the
+/// matching log line (the value needed for `fixes=` / `--why`). `marker` is the
+/// leading bracket token without brackets (e.g. `"friction"`), or `""` when the
+/// line has no `[...]` prefix. Existing fields are preserved (schema only grows).
 #[derive(Debug, Serialize)]
 pub struct SearchMatch {
     pub strand_id: String,
     pub content: String,
     pub strand_type: Option<String>,
     pub hidden: bool,
+    /// Full entry hash of the matching log line; null only for unprojectable rows.
+    pub entry_id: Option<String>,
+    /// Leading marker name without brackets; empty string when unmarked.
+    pub marker: String,
 }
 
 /// Top-level search output.
@@ -720,6 +735,31 @@ pub struct SearchOutput {
     pub matches: Vec<SearchMatch>,
     pub count: usize,
     pub query: String,
+    /// Marker filter applied (`--marker`), if any; null when unrestricted.
+    pub marker: Option<String>,
+}
+
+// ── doctor edges --format json ─────────────────────────────
+
+/// One entry in the edge-discipline dangling report.
+#[derive(Debug, Serialize)]
+pub struct EdgesItem {
+    pub entry_id: String,
+    pub strand_id: String,
+    pub marker: String,
+    pub content: String,
+    pub offset: usize,
+}
+
+/// External contract for `doctor edges --format json`.
+/// Lists open unfixed `[friction]` entries and `[decision]` entries lacking
+/// a `--why` ref — the tool's self-check surface for its own edge discipline.
+#[derive(Debug, Serialize)]
+pub struct EdgesOutput {
+    pub open_frictions: Vec<EdgesItem>,
+    pub decisions_without_why: Vec<EdgesItem>,
+    pub open_friction_count: usize,
+    pub decision_without_why_count: usize,
 }
 
 // ── From impls: projection → DTO ───────────────────────────

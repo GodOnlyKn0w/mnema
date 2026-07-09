@@ -1,9 +1,11 @@
-/// Doctor command family: cmd_doctor_journal.
+/// Doctor command family: cmd_doctor_journal, cmd_doctor_edges.
 ///
 /// The command owns filesystem IO and text rendering. Journal health facts and
 /// audit findings are built in diagnostics as read-side projections.
 use crate::event::Event;
 use crate::journal::*;
+use crate::output;
+use crate::util::shorten;
 use crate::{diagnostics, projection};
 use std::time::Instant;
 
@@ -217,6 +219,85 @@ fn check_cutover_certificate(
     }
 
     report
+}
+
+/// Edge-discipline self-check: open unfixed frictions + decisions without --why.
+/// Advisory only — never fails the process (CORPUS §9: only integrity/parse fails).
+pub(crate) fn cmd_doctor_edges(format_json: bool) -> Result<bool, String> {
+    let started = Instant::now();
+    let path = ensure_journal()?;
+    let (events, skipped) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let report = projection::edges_discipline_report(&strands);
+    let out = output::EdgesOutput {
+        open_friction_count: report.open_frictions.len(),
+        decision_without_why_count: report.decisions_without_why.len(),
+        open_frictions: report
+            .open_frictions
+            .into_iter()
+            .map(|i| output::EdgesItem {
+                entry_id: i.entry_id,
+                strand_id: i.strand_id,
+                marker: i.marker,
+                content: i.content,
+                offset: i.offset,
+            })
+            .collect(),
+        decisions_without_why: report
+            .decisions_without_why
+            .into_iter()
+            .map(|i| output::EdgesItem {
+                entry_id: i.entry_id,
+                strand_id: i.strand_id,
+                marker: i.marker,
+                content: i.content,
+                offset: i.offset,
+            })
+            .collect(),
+    };
+
+    if format_json {
+        println!("{}", serde_json::to_string(&out).expect("serialize"));
+    } else {
+        println!("Doctor Edges Report (edge-discipline self-check)");
+        println!(
+            "  open unfixed [friction]: {}",
+            out.open_friction_count
+        );
+        for item in &out.open_frictions {
+            println!(
+                "    {}  strand {}  {}",
+                shorten(&item.entry_id),
+                shorten(&item.strand_id),
+                item.content
+            );
+        }
+        println!(
+            "  [decision] without --why: {}",
+            out.decision_without_why_count
+        );
+        for item in &out.decisions_without_why {
+            println!(
+                "    {}  strand {}  {}",
+                shorten(&item.entry_id),
+                shorten(&item.strand_id),
+                item.content
+            );
+        }
+        if out.open_friction_count == 0 && out.decision_without_why_count == 0 {
+            println!("  (clean — no open frictions, no why-less decisions)");
+        }
+    }
+
+    if skipped > 0 {
+        return Err(format!(
+            "corrupt: [mnema] WARNING: {} corrupted lines skipped",
+            skipped
+        ));
+    }
+    eprintln!("[mnema] doctor edges: {:.0?}", started.elapsed());
+    // Advisory: never fail the process solely for open edges.
+    Ok(false)
 }
 
 fn first_jsonl_lines_bytes(bytes: &[u8], line_count: usize) -> Option<Vec<u8>> {
