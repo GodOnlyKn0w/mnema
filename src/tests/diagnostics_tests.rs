@@ -453,6 +453,8 @@ fn append_explicit_closed_strand_succeeds_and_json_carries_w059() {
             .as_ref()
             .map(output::ClosedTargetOutput::from),
         result: outcome.card_state.as_ref().map(|(card, _)| card.clone()),
+        resolved_by: outcome.resolved_by,
+        active_count: outcome.active_count,
     };
     let json = serde_json::to_value(&dto).expect("append DTO must serialize");
     assert_eq!(json["closed_target"]["code"], "W059");
@@ -509,6 +511,8 @@ fn append_open_strand_json_closed_target_is_null() {
             .as_ref()
             .map(output::ClosedTargetOutput::from),
         result: outcome.card_state.as_ref().map(|(card, _)| card.clone()),
+        resolved_by: outcome.resolved_by,
+        active_count: outcome.active_count,
     };
     let json = serde_json::to_value(&dto).expect("append DTO must serialize");
     assert!(json["closed_target"].is_null());

@@ -146,7 +146,7 @@ doctor edges（EdgesOutput）：
 timeline（TimelineOutput）：
   timeline / truncated / count / max_offset
   ※ timeline[]：journal_offset / ts / strand_id / strand_type / kind / ts_skew
-append: seen_offset / seen_gap / warnings / closed_target / result；checkpoint: seen_offset / seen_gap / warnings / result
+append: seen_offset / seen_gap / warnings / closed_target / result / resolved_by / active_count；checkpoint: seen_offset / seen_gap / warnings / result
 add: id / status / provenance / slug / parent_id / edge_type / result；find: id
 hide / unhide: strand_id / status / noop / active_count / closed_count / hidden_count / result（卡片）
 link: source_id / target_id / edge_type / status / result.source / result.target（卡片）

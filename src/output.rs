@@ -418,6 +418,11 @@ pub(crate) struct AppendOutput<'a> {
     pub(crate) warnings: Vec<SeenOffsetWarningOutput<'a>>,
     pub(crate) closed_target: Option<ClosedTargetOutput<'a>>,
     pub(crate) result: Option<OrientStrand>,
+    /// How the target was chosen when no explicit --id (`most_recent_active_strand`).
+    /// Null for explicit --id / --new. Additive field (JSON contract: fields only grow).
+    pub(crate) resolved_by: Option<&'a str>,
+    /// Active (non-closed) strand count at default-resolve time; null when not default-resolved.
+    pub(crate) active_count: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]

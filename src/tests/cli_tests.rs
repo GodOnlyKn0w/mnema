@@ -632,6 +632,47 @@ fn parse_recovery_append_id_shaped_positional_routes_to_id_flag() {
         hint
     );
 
+    // Short real prefix (6 hex, was missed when threshold was >=8) → --id
+    let args: Vec<OsString> = ["mnema", "append", "abc123", "内容"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    let hint = crate::cli::parse_error_recovery_hint(&args, kind)
+        .expect("6-hex prefix + body must produce recovery");
+    assert!(
+        hint.contains("mnema append --id abc123"),
+        "6-hex prefix must route to --id, got:\n{}",
+        hint
+    );
+    assert!(
+        hint.contains(r#"echo "内容""#),
+        "body only in echo for short hex id, got:\n{}",
+        hint
+    );
+    assert!(
+        !hint.contains(r#"echo "abc123 内容""#),
+        "must not fold 6-hex id into echo body, got:\n{}",
+        hint
+    );
+
+    // 9-hex still routes to --id (regression guard)
+    let args: Vec<OsString> = ["mnema", "append", "deadbeef1", "内容"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    let hint = crate::cli::parse_error_recovery_hint(&args, kind)
+        .expect("9-hex prefix + body must produce recovery");
+    assert!(
+        hint.contains("mnema append --id deadbeef1"),
+        "9-hex prefix must keep --id route, got:\n{}",
+        hint
+    );
+    assert!(
+        !hint.contains(r#"echo "deadbeef1 内容""#),
+        "must not fold 9-hex id into body, got:\n{}",
+        hint
+    );
+
     // append <pure id> → append --id <id> (body via stdin; no echo of id)
     let args: Vec<OsString> = ["mnema", "append", "0000019dd34b"]
         .into_iter()
@@ -668,6 +709,24 @@ fn parse_recovery_append_id_shaped_positional_routes_to_id_flag() {
         hint
     );
 
+    // Short non-hex word stays body (not mistaken for id prefix)
+    let args: Vec<OsString> = ["mnema", "append", "note", "more"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    let hint = crate::cli::parse_error_recovery_hint(&args, kind)
+        .expect("short non-hex must produce recovery");
+    assert!(
+        hint.contains(r#"echo "note more" | mnema append"#),
+        "non-hex short token must stay body, got:\n{}",
+        hint
+    );
+    assert!(
+        !hint.contains("--id"),
+        "non-hex short token must not invent --id, got:\n{}",
+        hint
+    );
+
     // add: id-shaped token must not be taught as strand summary body
     let args: Vec<OsString> = ["mnema", "add", "812e60f3252f", "real summary"]
         .into_iter()
@@ -683,6 +742,24 @@ fn parse_recovery_append_id_shaped_positional_routes_to_id_flag() {
     assert!(
         !hint.contains("812e60f3252f"),
         "add recovery must not echo id-shaped token, got:\n{}",
+        hint
+    );
+
+    // add: short hex (>=4) also stripped from body
+    let args: Vec<OsString> = ["mnema", "add", "abc123", "real summary"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    let hint = crate::cli::parse_error_recovery_hint(&args, kind)
+        .expect("add with 6-hex + text must recover");
+    assert!(
+        hint.contains(r#"echo "real summary" | mnema add"#),
+        "add must strip 6-hex token from body, got:\n{}",
+        hint
+    );
+    assert!(
+        !hint.contains("abc123"),
+        "add recovery must not echo 6-hex token, got:\n{}",
         hint
     );
 }

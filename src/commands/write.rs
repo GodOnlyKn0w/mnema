@@ -384,6 +384,10 @@ pub(crate) struct AppendOutcome {
     pub(crate) marker_warning: Option<AppendMarkerWarning>,
     pub(crate) closing_marker_warning: bool,
     pub(crate) card_state: Option<(OrientStrand, String)>,
+    /// How the target was chosen when no explicit --id. None for --id / --new.
+    pub(crate) resolved_by: Option<&'static str>,
+    /// Active (non-closed, visible) strand count at default-resolve time.
+    pub(crate) active_count: Option<usize>,
 }
 #[cfg(test)]
 pub(crate) fn cmd_append(
@@ -546,13 +550,15 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
             marker_warning: None,
             closing_marker_warning: false,
             card_state: strand_card_fresh_with_state(&new_id),
+            resolved_by: None,
+            active_count: None,
         });
     }
 
     let all_strands = projection::project_strands(&events, true);
     let target_id = req.explicit_id.or(req.legacy_id);
-    let full_id = if let Some(id) = target_id {
-        crate::reference::resolve_strand_with_selection(
+    let (full_id, resolved_by, active_count) = if let Some(id) = target_id {
+        let full = crate::reference::resolve_strand_with_selection(
             &all_strands,
             id,
             req.allow_selection,
@@ -565,12 +571,18 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
                 );
             }
             msg
-        })?
+        })?;
+        (full, None, None)
     } else {
         let visible_strands = projection::project_strands(&events, false);
+        let active_count = count_active_strands(&visible_strands);
         let recent = resolve_most_recent_strand(&visible_strands)
             .ok_or("no active strand — use 'add', 'append --new', or pass --id")?;
-        recent.id.clone()
+        (
+            recent.id.clone(),
+            Some("most_recent_active_strand"),
+            Some(active_count),
+        )
     };
 
     let target_strand = all_strands
@@ -621,6 +633,8 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         marker_warning,
         closing_marker_warning,
         card_state,
+        resolved_by,
+        active_count,
     })
 }
 
@@ -702,6 +716,8 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
                 .as_ref()
                 .map(output::ClosedTargetOutput::from),
             result: outcome.card_state.as_ref().map(|(card, _)| card.clone()),
+            resolved_by: outcome.resolved_by,
+            active_count: outcome.active_count,
         };
         println!("{}", serde_json::to_string(&output).unwrap());
     } else {
@@ -719,12 +735,22 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
                 card.last_offset,
                 prod
             );
+            if let (Some(_), Some(n)) = (outcome.resolved_by, outcome.active_count) {
+                if let Some(line) = multi_active_resolve_disclosure(&outcome.strand_id, n) {
+                    println!("{}", line);
+                }
+            }
             if let Some(prefix) = entry_id_prefix(&outcome.entry_id) {
                 println!("entry_id_prefix: {}", prefix);
             }
             print_card_with_state(card, state);
         } else {
             println!("appended to {}{}", shorten(&outcome.strand_id), prod);
+            if let (Some(_), Some(n)) = (outcome.resolved_by, outcome.active_count) {
+                if let Some(line) = multi_active_resolve_disclosure(&outcome.strand_id, n) {
+                    println!("{}", line);
+                }
+            }
             if let Some(prefix) = entry_id_prefix(&outcome.entry_id) {
                 println!("entry_id_prefix: {}", prefix);
             }
@@ -891,6 +917,31 @@ pub(crate) fn resolve_most_recent_strand(
     sorted.into_iter().next()
 }
 
+/// Count strands that default/most-recent resolution would consider (non-closed).
+pub(crate) fn count_active_strands(strands: &[projection::ProjectedStrand]) -> usize {
+    strands
+        .iter()
+        .filter(|s| !s.state().starts_with("closed"))
+        .count()
+}
+
+/// Text teaching line when default resolution silently picked among N>=2 active lines.
+/// Silent choice among alternatives is a landmine; name the pick and the count.
+pub(crate) fn multi_active_resolve_disclosure(
+    strand_id: &str,
+    active_count: usize,
+) -> Option<String> {
+    if active_count >= 2 {
+        Some(format!(
+            "resolved to {}（most recent of {} active lines; pass --id to target another）",
+            shorten(strand_id),
+            active_count
+        ))
+    } else {
+        None
+    }
+}
+
 pub(crate) fn escape_checkpoint_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -918,6 +969,8 @@ pub(crate) struct CheckpointPlan {
     pub(crate) strand_id: String,
     pub(crate) strand_state: String,
     pub(crate) resolved_by: &'static str,
+    /// Active (non-closed) strand count in the resolve set (visible or all per flags).
+    pub(crate) active_count: usize,
     pub(crate) action: String,
     // The planned entry's request fields (no fake Event: the real entry is
     // constructed once at commit, which recomputes ts/entry_id).
@@ -978,7 +1031,7 @@ pub(crate) fn plan_checkpoint(
     let all_strands = projection::project_strands(events, true);
     let visible_strands = projection::project_strands(events, req.include_hidden);
 
-    let (strand, resolved_by) = if let Some(id) = req.requested_id {
+    let (strand, resolved_by, active_count) = if let Some(id) = req.requested_id {
         let full = crate::reference::resolve_strand_with_selection(
             &all_strands,
             id,
@@ -1003,8 +1056,9 @@ pub(crate) fn plan_checkpoint(
                 false,
             )
         })?;
-        (strand, "explicit --id")
+        (strand, "explicit --id", count_active_strands(&visible_strands))
     } else {
+        let active_count = count_active_strands(&visible_strands);
         let strand = resolve_most_recent_strand(&visible_strands).ok_or_else(|| {
             checkpoint_failure(
                 1,
@@ -1014,7 +1068,7 @@ pub(crate) fn plan_checkpoint(
                 false,
             )
         })?;
-        (strand, "most_recent_active_strand")
+        (strand, "most_recent_active_strand", active_count)
     };
 
     let strand_last_offset = strand.last_offset();
@@ -1119,6 +1173,7 @@ pub(crate) fn plan_checkpoint(
         strand_id: strand.id.clone(),
         strand_state: strand.state().to_string(),
         resolved_by,
+        active_count,
         action: req.action.to_string(),
         content,
         prev_entry_id,
@@ -1223,6 +1278,11 @@ pub(crate) fn render_checkpoint_outcome(outcome: &CheckpointOutcome, format_json
         plan.strand_state
     );
     println!("  resolved_by: {}", plan.resolved_by);
+    if plan.resolved_by == "most_recent_active_strand" {
+        if let Some(line) = multi_active_resolve_disclosure(&plan.strand_id, plan.active_count) {
+            println!("  {}", line);
+        }
+    }
 
     let staleness_part = plan
         .staleness_seconds

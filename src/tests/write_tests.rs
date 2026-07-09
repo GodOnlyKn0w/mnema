@@ -51,6 +51,150 @@ fn positional_append_most_recent() {
     assert!(has_content);
 }
 
+/// Default resolve among ≥2 active lines must surface a teaching disclosure
+/// (silent pick is a landmine). Single active line stays quiet.
+#[test]
+fn append_default_multi_active_discloses_resolve() {
+    let _env = setup();
+    let _a = create_strand("line a");
+    let b = create_strand("line b");
+
+    let multi = execute_append(AppendRequest {
+        content: Some("note multi"),
+        legacy_id: None,
+        new: false,
+        stdin: false,
+        file: None,
+        explicit_id: None,
+        provenance_raw: None,
+        seen_offset: None,
+        why: None,
+        allow_selection: false,
+    })
+    .expect("default append with 2 active must succeed");
+    assert_eq!(multi.strand_id, b);
+    assert_eq!(multi.resolved_by, Some("most_recent_active_strand"));
+    assert_eq!(multi.active_count, Some(2));
+    let disclosure = multi_active_resolve_disclosure(&multi.strand_id, multi.active_count.unwrap())
+        .expect("2 active lines must produce resolve disclosure");
+    assert!(
+        disclosure.contains("resolved to"),
+        "disclosure must name the pick: {disclosure}"
+    );
+    assert!(
+        disclosure.contains("most recent of 2 active lines"),
+        "disclosure must name the count: {disclosure}"
+    );
+    assert!(
+        disclosure.contains("pass --id"),
+        "disclosure must teach --id: {disclosure}"
+    );
+    assert!(
+        disclosure.contains(&shorten(&b)),
+        "disclosure must carry the chosen prefix: {disclosure}"
+    );
+
+    // Explicit --id: no default-resolve metadata (no silent-pick story).
+    let explicit = execute_append(AppendRequest {
+        content: Some("note explicit"),
+        legacy_id: None,
+        new: false,
+        stdin: false,
+        file: None,
+        explicit_id: Some(&b),
+        provenance_raw: None,
+        seen_offset: None,
+        why: None,
+        allow_selection: false,
+    })
+    .expect("explicit append must succeed");
+    assert_eq!(explicit.resolved_by, None);
+    assert_eq!(explicit.active_count, None);
+}
+
+#[test]
+fn append_default_single_active_no_resolve_disclosure() {
+    let _env = setup();
+    let only = create_strand("solo line");
+
+    let outcome = execute_append(AppendRequest {
+        content: Some("note solo"),
+        legacy_id: None,
+        new: false,
+        stdin: false,
+        file: None,
+        explicit_id: None,
+        provenance_raw: None,
+        seen_offset: None,
+        why: None,
+        allow_selection: false,
+    })
+    .expect("default append with 1 active must succeed");
+    assert_eq!(outcome.strand_id, only);
+    assert_eq!(outcome.resolved_by, Some("most_recent_active_strand"));
+    assert_eq!(outcome.active_count, Some(1));
+    assert!(
+        multi_active_resolve_disclosure(&outcome.strand_id, 1).is_none(),
+        "single active line must not emit resolve disclosure"
+    );
+}
+
+#[test]
+fn checkpoint_default_multi_active_discloses_resolve() {
+    let _env = setup();
+    let _a = create_strand("cp line a");
+    let b = create_strand("cp line b");
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let plan = plan_checkpoint(
+        &events,
+        CheckpointRequest {
+            requested_id: None,
+            action: "before risky step",
+            tail: None,
+            include_hidden: false,
+            provenance_raw: None,
+            seen_offset: None,
+            allow_selection: false,
+        },
+        chrono::Utc::now(),
+    )
+    .expect("default checkpoint with 2 active must plan");
+    assert_eq!(plan.strand_id, b);
+    assert_eq!(plan.resolved_by, "most_recent_active_strand");
+    assert_eq!(plan.active_count, 2);
+    let disclosure = multi_active_resolve_disclosure(&plan.strand_id, plan.active_count)
+        .expect("2 active lines must produce checkpoint resolve disclosure");
+    assert!(disclosure.contains("most recent of 2 active lines"));
+}
+
+#[test]
+fn checkpoint_default_single_active_no_resolve_disclosure() {
+    let _env = setup();
+    let solo = create_strand("cp solo");
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let plan = plan_checkpoint(
+        &events,
+        CheckpointRequest {
+            requested_id: None,
+            action: "solo action",
+            tail: None,
+            include_hidden: false,
+            provenance_raw: None,
+            seen_offset: None,
+            allow_selection: false,
+        },
+        chrono::Utc::now(),
+    )
+    .expect("default checkpoint with 1 active must plan");
+    assert_eq!(plan.strand_id, solo);
+    assert_eq!(plan.resolved_by, "most_recent_active_strand");
+    assert_eq!(plan.active_count, 1);
+    assert!(multi_active_resolve_disclosure(&plan.strand_id, 1).is_none());
+}
+
 #[test]
 fn append_default_skips_closed_strand() {
     // The most-recently-touched strand is closed; --last/default must fall

@@ -898,11 +898,12 @@ fn first_cli_command(tokens: &[String]) -> Option<(usize, &str)> {
     None
 }
 
-/// Strand-id prefix shape used by find/show etc.: all hex, length >= 8.
-/// Rescue must not treat such tokens as entry body — that writes dirty data
-/// (or the wrong line) when callers paste a rejected positional id.
+/// Strand-id prefix shape for rescue: all hex, length >= 4.
+/// Aligns with what mnema can actually resolve (find/show accept short
+/// prefixes). Threshold was >=8 and missed real prefixes like `abc123`
+/// (6 hex), folding them into the entry body and teaching dirty writes.
 fn looks_like_strand_id_token(token: &str) -> bool {
-    token.len() >= 8 && token.bytes().all(|b| b.is_ascii_hexdigit())
+    token.len() >= 4 && token.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn flag_list_has_id(kept: &[String]) -> bool {
