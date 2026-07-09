@@ -560,7 +560,7 @@ pub(crate) fn cmd_orient(
             println!("integrity: {}", out.integrity);
             print_orient_forest(&tree_out.roots, 0);
             if out.active.is_empty() {
-                println!("(no active strands) — start one: mnema add \"<summary>\"");
+                println!("(no active strands) — start one: echo \"<summary>\" | mnema add");
             }
             print_orient_notices(&out.notices);
             println!("remind: {}", out.remind);
@@ -603,7 +603,7 @@ pub(crate) fn cmd_orient(
             println!("    catch-up: {}", s.catch_up);
         }
         if out.active.is_empty() {
-            println!("(no active strands) — start one: mnema add \"<summary>\"");
+            println!("(no active strands) — start one: echo \"<summary>\" | mnema add");
         }
         print_orient_notices(&out.notices);
         println!("remind: {}", out.remind);
