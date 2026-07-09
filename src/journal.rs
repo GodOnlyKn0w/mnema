@@ -35,6 +35,8 @@ impl JournalAppendOutcome {
 }
 pub(crate) const JOURNAL_DIR: &str = ".mnema";
 pub(crate) const JOURNAL_FILE: &str = ".mnema/journal.jsonl";
+/// Sidecar identity metadata (not part of the append-only hash chain).
+pub(crate) const JOURNAL_ID_FILE: &str = "journal-id.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JournalParseDiagnostic {
@@ -117,6 +119,122 @@ pub(crate) fn ensure_journal() -> Result<PathBuf, String> {
 /// Return path to .mnema/journal.lock (dedicated lock file, not the journal itself).
 pub(crate) fn journal_lock_path() -> Result<PathBuf, String> {
     Ok(resolve_journal_dir()?.join("journal.lock"))
+}
+
+/// Path to the journal-id sidecar under a resolved `.mnema/` directory.
+pub(crate) fn journal_id_path_in(journal_dir: &std::path::Path) -> PathBuf {
+    journal_dir.join(JOURNAL_ID_FILE)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct JournalIdFile {
+    /// Stable random journal identity (64 hex). Written once; never rewritten.
+    journal_id: String,
+}
+
+fn generate_journal_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut hasher = Sha256::new();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    hasher.update(ts.to_le_bytes());
+    hasher.update(std::process::id().to_le_bytes());
+    // Extra entropy: hash path + thread so two concurrent inits diverge.
+    if let Ok(cwd) = std::env::current_dir() {
+        hasher.update(cwd.display().to_string().as_bytes());
+    }
+    hasher.update(format!("{:?}", std::thread::current().id()).as_bytes());
+    // Mix a few more nanos reads against clock quantization.
+    let ts2 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    hasher.update(ts2.to_le_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn is_valid_journal_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn read_journal_id_file(path: &std::path::Path) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+    let parsed: JournalIdFile = serde_json::from_str(&text)
+        .map_err(|e| format!("corrupt journal-id file {}: {}", path.display(), e))?;
+    if !is_valid_journal_id(&parsed.journal_id) {
+        return Err(format!(
+            "corrupt journal-id in {}: expected 64 hex digits",
+            path.display()
+        ));
+    }
+    Ok(Some(parsed.journal_id))
+}
+
+/// Create the journal-id sidecar only if absent (create_new). Never overwrites.
+fn write_journal_id_file_new(path: &std::path::Path, journal_id: &str) -> Result<(), String> {
+    use std::io::Write;
+    let payload = JournalIdFile {
+        journal_id: journal_id.to_string(),
+    };
+    let text = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("cannot serialize journal-id: {}", e))?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut f) => {
+            f.write_all(text.as_bytes())
+                .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(format!(
+            "journal-id already exists at {}",
+            path.display()
+        )),
+        Err(e) => Err(format!("cannot create {}: {}", path.display(), e)),
+    }
+}
+
+/// Return the stable journal-id for a `.mnema/` directory, creating one
+/// idempotently if missing. Identity lives in a sidecar file — never in the
+/// append-only journal chain (metadata, not content).
+pub(crate) fn ensure_journal_id_in(journal_dir: &std::path::Path) -> Result<String, String> {
+    let path = journal_id_path_in(journal_dir);
+    if let Some(existing) = read_journal_id_file(&path)? {
+        return Ok(existing);
+    }
+    let id = generate_journal_id();
+    // create_new: if a peer won the race, re-read their value.
+    match write_journal_id_file_new(&path, &id) {
+        Ok(()) => Ok(id),
+        Err(_) => match read_journal_id_file(&path)? {
+            Some(existing) => Ok(existing),
+            None => {
+                write_journal_id_file_new(&path, &id)?;
+                Ok(id)
+            }
+        },
+    }
+}
+
+/// Resolve journal dir then ensure its stable journal-id exists.
+pub(crate) fn ensure_journal_id() -> Result<String, String> {
+    ensure_journal_id_in(&resolve_journal_dir()?)
+}
+
+/// Read journal-id if present; do not create. Used by pure-read paths that
+/// must not invent identity as a side effect of inspection.
+#[allow(dead_code)]
+pub(crate) fn read_journal_id() -> Result<Option<String>, String> {
+    let path = journal_id_path_in(&resolve_journal_dir()?);
+    read_journal_id_file(&path)
 }
 
 /// Write-path warnings leave Journal Core through this injected sink; the

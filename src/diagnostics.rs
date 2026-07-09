@@ -108,7 +108,7 @@ Marker 语义（一行一条）：
 可盲目重试（幂等）：
   hide     已隐藏时显式 no-op（不写事件，输出"already hidden"）
   unhide   已可见时显式 no-op（不写事件，输出"already visible"）
-  init     已存在时跳过文件创建；总是打印初始化消息；目录幂等
+  init     已存在时跳过文件创建与 journal-id 覆写；总是打印初始化消息；目录幂等
 
 不可盲目重试（有副作用）：
   append   重复写入新的 LogAppended 事件；
@@ -244,7 +244,6 @@ entry 形状模板：
         body: r#"目标线：单 id 命令两种写法等价（位置 <ID> 与 --id <ID>）；"最近活跃线"统一用 --last。
 读+追加命令（show/find/hide/unhide/tree/depends/append/checkpoint）缺省即 --last；
 close/reopen 收口动作强制显式指名、禁 --last/缺省；正文只走 stdin，故 add/append 无位置参数；timeline 的 --id 等价 --strand。
-
 旗标词表（同一概念只有一个名字）：
   --include-hidden  含隐藏线（checkpoint/pick 主名；--all 为兼容别名）
   mnema list --all  （list 的隐藏线开关例外：只认 --all）
@@ -253,20 +252,13 @@ close/reopen 收口动作强制显式指名、禁 --last/缺省；正文只走 s
   --tail <N>        只限显示、不改账，对任何目标可用
   --edge-type       link 的边类型（--type 是 deprecated 别名）
   --why / --from    引依据/记来源：线前缀=其最新条，entry 哈希前缀=精确该条；读取用 mnema show --entry <HASH>（--deref 展开链，--before/--after 邻域）
-
-JSON 命名法：
-  复数名词 = 数组（events / matches / strands / active / timeline）
-  计数 = count 或 *_count（entry_count / closed_count / hidden_count）
-  自身身份 = id；引用他者 = <noun>_id（如 search 的 strand_id）
-  id / strand_id 一律全宽 64 hex 内容 hash，跨输出可 join
-
+JSON 命名法：复数名词=数组；计数=count/*_count；自身身份=id；引用他者=<noun>_id；id/strand_id 全宽 64 hex 可 join。
+跨 journal 引用（书写约定，本版不解析、doctor 不校格式）：<journal-id>:<strand>:<entry>
+  journal-id=64 hex 存 .mnema/journal-id.json（sidecar，不进哈希链；init 生成/旧仓 doctor 幂等补写，永不变）；strand/entry 为 ≥8 hex 前缀；整线可 <journal-id>:<strand>:；读 id：mnema doctor journal。
 写命令三件套：写 journal 必收 --provenance、必有 --format json 孪生、写后回显卡片（见 mnema explain card）。
 （孪生与 provenance 的覆盖缺口见一致性 CI 豁免表，按批清偿。）
-
-全局旗标：
-  -C <DIR> / --chdir  如同在 DIR 启动；journal 解析与相对路径随之；DIR 不存在 → exit 3。
+全局旗标：-C <DIR> / --chdir  如同在 DIR 启动；journal 解析与相对路径随之；DIR 不存在 → exit 3。
 exit code：0 成功 / 1 命令执行失败 / 2 journal 不可读或损坏 / 3 解析或参数非法。
-
 永久豁免（点名豁免，防"看起来漏了"的二次猜测）：
   doctor 子命令风格（mnema doctor journal）；pick（交互选择器；机器入口用显式 --id 或 mnema pick --print-id）
   add/append 正文位置参数、--stdin、--file 已在 v2 迁移中移除

@@ -241,6 +241,16 @@ fn remind_and_explain_taught_commands_parse_against_real_cli() {
             clap::error::ErrorKind::UnknownArgument,
         ),
         (
+            "parse recovery append id+body positional",
+            vec!["mnema", "append", "812e60f3252f", "my note"],
+            clap::error::ErrorKind::UnknownArgument,
+        ),
+        (
+            "parse recovery append pure-id positional",
+            vec!["mnema", "append", "0000019dd34b"],
+            clap::error::ErrorKind::UnknownArgument,
+        ),
+        (
             "parse recovery missing checkpoint action",
             vec!["mnema", "checkpoint", "--id", "0000019dd34b"],
             clap::error::ErrorKind::MissingRequiredArgument,
@@ -587,6 +597,95 @@ fn depends_help_frames_upstreams_as_review_context() {
     );
 }
 // ── context exposure axis (ADR-0002) ──
+
+/// wish1 rescue must route id-shaped positionals to --id, never echo them
+/// into the entry body (that teaches dirty writes onto the wrong line).
+#[test]
+fn parse_recovery_append_id_shaped_positional_routes_to_id_flag() {
+    let kind = clap::error::ErrorKind::UnknownArgument;
+
+    // append <id> <body...> → echo body | append --id <id>
+    let args: Vec<OsString> = ["mnema", "append", "812e60f3252f", "my note"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    let hint = crate::cli::parse_error_recovery_hint(&args, kind)
+        .expect("id+body positional must produce recovery");
+    assert!(
+        hint.contains("mnema append --id 812e60f3252f"),
+        "must route id to --id, got:\n{}",
+        hint
+    );
+    assert!(
+        hint.contains(r#"echo "my note""#),
+        "body only in echo, got:\n{}",
+        hint
+    );
+    assert!(
+        !hint.contains(r#"echo "812e60f3252f my note""#),
+        "must not fold id into echo body, got:\n{}",
+        hint
+    );
+    assert!(
+        !hint.contains(r#"echo "812e60f3252f""#),
+        "must not echo bare id as body, got:\n{}",
+        hint
+    );
+
+    // append <pure id> → append --id <id> (body via stdin; no echo of id)
+    let args: Vec<OsString> = ["mnema", "append", "0000019dd34b"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    let hint = crate::cli::parse_error_recovery_hint(&args, kind)
+        .expect("pure-id positional must produce recovery");
+    assert!(
+        hint.contains("mnema append --id 0000019dd34b"),
+        "pure id must become --id form, got:\n{}",
+        hint
+    );
+    assert!(
+        !hint.contains("echo "),
+        "pure id must not be echoed as body, got:\n{}",
+        hint
+    );
+
+    // append "普通非 id 文本" → keep bare echo | append
+    let args: Vec<OsString> = ["mnema", "append", "普通非 id 文本"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    let hint = crate::cli::parse_error_recovery_hint(&args, kind)
+        .expect("plain-text positional must produce recovery");
+    assert!(
+        hint.contains(r#"echo "普通非 id 文本" | mnema append"#),
+        "plain text must stay bare append, got:\n{}",
+        hint
+    );
+    assert!(
+        !hint.contains("--id"),
+        "plain text must not invent --id, got:\n{}",
+        hint
+    );
+
+    // add: id-shaped token must not be taught as strand summary body
+    let args: Vec<OsString> = ["mnema", "add", "812e60f3252f", "real summary"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    let hint = crate::cli::parse_error_recovery_hint(&args, kind)
+        .expect("add with id-shaped + text must recover");
+    assert!(
+        hint.contains(r#"echo "real summary" | mnema add"#),
+        "add must strip id-shaped token from body, got:\n{}",
+        hint
+    );
+    assert!(
+        !hint.contains("812e60f3252f"),
+        "add recovery must not echo id-shaped token, got:\n{}",
+        hint
+    );
+}
 
 #[test]
 fn grammar_write_commands_accept_id_flag_without_content_position() {

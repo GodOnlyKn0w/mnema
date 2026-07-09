@@ -288,10 +288,15 @@ hide、unhide、reopen。
   的 journal 只有一条路：你读懂、认下，用自己的话记一条，注明来源。
 - **明文 JSONL。** 工具二进制缺失时，cat/grep/jq 仍可读取全部
   历史。记录的存活期必须长于工具。
-- **跨 journal 引用。** journal 身份 = 首条事件的哈希。跨
-  journal ref = journal 身份 + entry 哈希。联邦查询（只读）：
-  本地注册表记录已知 journal，时间线可跨库归并——库内顺序
-  精确，库间按时间戳近似，如实标注。
+- **跨 journal 引用。** 目标模型里 journal 身份曾拟为首条事件
+  哈希；落地最小版改为 sidecar 稳定 id：`.mnema/journal-id.json`
+  （init 时随机生成、一次写定、永不变；不进 append-only 哈希链，
+  避免身份元数据扰动完整性）。跨 journal 引用的**书写约定**为
+  `<journal-id>:<strand>:<entry>`（strand/entry 可用 ≥8 hex 前缀；
+  整线可写 `<journal-id>:<strand>:`）。本版只立约定 + 稳定 id 地基；
+  doctor 格式校验与联邦查询暂缓。读本仓 id：`mnema doctor journal`。
+  远期联邦查询（只读）：本地注册表记录已知 journal，时间线可跨库
+  归并——库内顺序精确，库间按时间戳近似，如实标注。
 - **纳入 git。** 单机场景收益明确：clone 即备份，历史随仓库
   迁移，并为哈希提供外部锚定（第 3 节）。多机场景以内容寻址
   落地为前提（否则合并时序号冲突，既有引用失效）。可见性须

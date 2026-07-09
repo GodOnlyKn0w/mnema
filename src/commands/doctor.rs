@@ -31,7 +31,10 @@ pub(crate) fn cmd_doctor_journal() -> Result<bool, String> {
     );
     report.cutover_certificate = check_cutover_certificate(&journal_dir, &path, &raw);
 
-    render_doctor_report(&path, &report);
+    // journal-id is sidecar identity metadata (not on the hash chain). Ensure
+    // one exists for legacy journals that predate the field — idempotent.
+    let journal_id = ensure_journal_id_in(&journal_dir)?;
+    render_doctor_report(&path, &report, Some(&journal_id));
 
     // Measure fresh projection timing.
     let projection_start = Instant::now();
@@ -320,9 +323,16 @@ fn first_jsonl_lines_bytes(bytes: &[u8], line_count: usize) -> Option<Vec<u8>> {
     }
     if line_count == 0 { Some(out) } else { None }
 }
-fn render_doctor_report(path: &std::path::Path, report: &diagnostics::DoctorJournalReport) {
+fn render_doctor_report(
+    path: &std::path::Path,
+    report: &diagnostics::DoctorJournalReport,
+    journal_id: Option<&str>,
+) {
     println!("Doctor Journal Report");
     println!("  journal: {}", path.display());
+    if let Some(id) = journal_id {
+        println!("  journal-id: {}", id);
+    }
     println!(
         "  lines: {}, corrupted: {}, orphan events: {}",
         report.total_lines,

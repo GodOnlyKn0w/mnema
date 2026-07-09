@@ -217,6 +217,86 @@ fn append_with_provenance_stores_it() {
     assert!(found, "provenance must be stored on the event");
 }
 
+/// Wish4 min: journal-id is sidecar identity, stable across re-reads,
+/// and old journals (no file) get one idempotently without touching the chain.
+#[test]
+fn journal_id_created_stable_and_idempotent_for_legacy() {
+    let env = setup();
+    let mnema = env.path().join(".mnema");
+    let id_path = mnema.join(JOURNAL_ID_FILE);
+    assert!(
+        !id_path.exists(),
+        "TestEnv legacy journal must start without journal-id sidecar"
+    );
+
+    // First ensure (legacy path): creates a 64-hex id once.
+    let id1 = ensure_journal_id_in(&mnema).expect("ensure journal-id");
+    assert_eq!(id1.len(), 64, "journal-id must be 64 hex chars");
+    assert!(
+        id1.bytes().all(|b| b.is_ascii_hexdigit()),
+        "journal-id must be hex: {}",
+        id1
+    );
+    assert!(id_path.exists(), "sidecar file must exist after ensure");
+
+    // Second ensure: same value (stable / idempotent).
+    let id2 = ensure_journal_id_in(&mnema).expect("re-ensure journal-id");
+    assert_eq!(id1, id2, "journal-id must not change on re-read");
+
+    // ensure_journal_id via resolve_journal_dir (cwd is env.path).
+    let id3 = ensure_journal_id().expect("ensure_journal_id via resolve");
+    assert_eq!(id1, id3, "resolved ensure must return same id");
+
+    // Sidecar is not part of the journal.jsonl content.
+    let journal_raw = fs::read_to_string(mnema.join("journal.jsonl")).unwrap_or_default();
+    assert!(
+        !journal_raw.contains(&id1),
+        "journal-id must not be written into the append-only journal file"
+    );
+
+    // File payload shape.
+    let text = fs::read_to_string(&id_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).expect("journal-id.json parses");
+    assert_eq!(v["journal_id"].as_str(), Some(id1.as_str()));
+}
+
+#[test]
+fn journal_id_init_dir_creates_stable_id() {
+    // Mirrors cmd_init's layout: empty .mnema + journal.jsonl + ensure id.
+    let _lock = CWD_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let prev = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+    let result = (|| {
+        let mnema = dir.path().join(JOURNAL_DIR);
+        fs::create_dir_all(&mnema).unwrap();
+        fs::write(mnema.join("journal.jsonl"), "").unwrap();
+        let id_a = ensure_journal_id_in(&mnema)?;
+        let id_b = ensure_journal_id_in(&mnema)?;
+        assert_eq!(id_a, id_b);
+        assert!(mnema.join(JOURNAL_ID_FILE).exists());
+        Ok::<(), String>(())
+    })();
+    std::env::set_current_dir(prev).unwrap();
+    result.expect("init-shaped journal-id path");
+}
+
+#[test]
+fn doctor_journal_ensures_legacy_journal_id() {
+    let env = setup();
+    let id_path = env.path().join(".mnema").join(JOURNAL_ID_FILE);
+    assert!(!id_path.exists());
+    // doctor is a read-side surface that must still mint missing ids
+    // so operators always have a stable handle to cite.
+    let _failed = crate::commands::doctor::cmd_doctor_journal().unwrap();
+    assert!(
+        id_path.exists(),
+        "doctor journal must ensure journal-id for legacy journals"
+    );
+    let id = ensure_journal_id().unwrap();
+    assert_eq!(id.len(), 64);
+}
+
 #[test]
 fn append_without_provenance_has_none() {
     let _env = setup();

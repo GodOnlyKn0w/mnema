@@ -790,7 +790,10 @@ fn cmd_init() -> Result<(), String> {
     if !lock_path.exists() {
         std::fs::write(&lock_path, "").map_err(|e| format!("cannot create journal.lock: {}", e))?;
     }
+    // Stable journal identity (sidecar; not on the append-only hash chain).
+    let journal_id = crate::journal::ensure_journal_id_in(&dir)?;
     println!("Initialized empty mnema in .mnema/");
+    println!("  journal-id: {}", journal_id);
     Ok(())
 }
 
@@ -885,6 +888,18 @@ fn first_cli_command(tokens: &[String]) -> Option<(usize, &str)> {
     None
 }
 
+/// Strand-id prefix shape used by find/show etc.: all hex, length >= 8.
+/// Rescue must not treat such tokens as entry body — that writes dirty data
+/// (or the wrong line) when callers paste a rejected positional id.
+fn looks_like_strand_id_token(token: &str) -> bool {
+    token.len() >= 8 && token.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn flag_list_has_id(kept: &[String]) -> bool {
+    kept.iter()
+        .any(|t| t == "--id" || t.starts_with("--id="))
+}
+
 fn stdin_body_recovery(command: &str, rest: &[String]) -> Option<String> {
     let mut kept: Vec<String> = Vec::new();
     let mut body: Vec<String> = Vec::new();
@@ -921,6 +936,53 @@ fn stdin_body_recovery(command: &str, rest: &[String]) -> Option<String> {
     if body.is_empty() {
         return None;
     }
+
+    // append: leading id-shaped token is a mis-placed strand target → --id.
+    // Never echo that token as body (teaches dirty write to wrong line).
+    if command == "append" && looks_like_strand_id_token(&body[0]) {
+        let id = body[0].as_str();
+        let text = body[1..].join(" ");
+        let mut corrected = format!("mnema {}", command);
+        for token in &kept {
+            corrected.push(' ');
+            corrected.push_str(token);
+        }
+        if !flag_list_has_id(&kept) {
+            corrected.push_str(" --id ");
+            corrected.push_str(id);
+        }
+        if text.is_empty() {
+            // Pure id: point at the line; body still comes from stdin.
+            return Some(format!(
+                "try this:
+  {}",
+                corrected
+            ));
+        }
+        return Some(format!(
+            "try this:
+  echo {} | {}",
+            echo_double_quoted(&text),
+            corrected
+        ));
+    }
+
+    // add has no target id; strip id-shaped tokens so rescue never
+    // suggests writing a strand hash as the new strand's summary.
+    let body_text = if command == "add" {
+        let text: Vec<&str> = body
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|t| !looks_like_strand_id_token(t))
+            .collect();
+        if text.is_empty() {
+            return None;
+        }
+        text.join(" ")
+    } else {
+        body.join(" ")
+    };
+
     let mut corrected = format!("mnema {}", command);
     for token in kept {
         corrected.push(' ');
@@ -929,7 +991,7 @@ fn stdin_body_recovery(command: &str, rest: &[String]) -> Option<String> {
     Some(format!(
         "try this:
   echo {} | {}",
-        echo_double_quoted(&body.join(" ")),
+        echo_double_quoted(&body_text),
         corrected
     ))
 }
