@@ -565,7 +565,9 @@ fn subtree_ids_descends_through_belongs_to_children() {
     let strands = projection::project_strands(&events, true);
 
     // From parent: the whole chain is reachable.
-    let from_parent = tree::subtree_ids(&parent, &strands).expect("parent resolves");
+    let from_parent = crate::scope::Scope::subtree(&parent)
+        .resolve_ids(&strands)
+        .expect("parent resolves");
     assert!(from_parent.contains(&parent), "root included");
     assert!(from_parent.contains(&child), "child reachable from parent");
     assert!(
@@ -574,7 +576,9 @@ fn subtree_ids_descends_through_belongs_to_children() {
     );
 
     // From child: parent is an ancestor, must NOT be in the descendant set.
-    let from_child = tree::subtree_ids(&child, &strands).expect("child resolves");
+    let from_child = crate::scope::Scope::subtree(&child)
+        .resolve_ids(&strands)
+        .expect("child resolves");
     assert!(from_child.contains(&child), "root included");
     assert!(
         from_child.contains(&grandchild),

@@ -9,6 +9,7 @@ mod output;
 mod projection;
 mod reference;
 mod render;
+mod scope;
 mod tree;
 mod util;
 

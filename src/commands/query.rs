@@ -441,18 +441,19 @@ pub(crate) fn cmd_timeline(
         entries.retain(|e| linked_ids.contains(&e.strand_id));
     }
 
-    // Filter by subtree — only events from strands reachable from root via edges
-    if let Some(root_id) = tree_root {
+    let scope = if let Some(root_id) = tree_root {
         let full_root = crate::reference::resolve_strand_with_selection(
             &canonical_strands,
             root_id,
             allow_selection,
             current_max_offset,
         )?;
-        if let Some(tree_ids) = tree::subtree_ids(&full_root, &canonical_strands) {
-            entries.retain(|e| tree_ids.contains(&e.strand_id));
-        }
-    }
+        crate::scope::Scope::subtree(full_root)
+    } else {
+        crate::scope::Scope::journal()
+    };
+    let scope_ids = scope.resolve_ids(&canonical_strands)?;
+    entries.retain(|entry| scope_ids.contains(&entry.strand_id));
 
     let truncated = apply_timeline_window_limit(&mut entries, limit, tail);
 
