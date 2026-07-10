@@ -520,6 +520,7 @@ dependencies = [
  "chrono",
  "clap",
  "fs2",
+ "getrandom",
  "hex",
  "inquire",
  "serde",

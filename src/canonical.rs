@@ -303,6 +303,12 @@ pub(crate) fn deterministic_v2_import_seed(source_journal_id: &str, old_strand_i
     hex::encode(hasher.finalize())
 }
 
+pub(crate) fn random_genesis_seed() -> Result<String, String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| format!("generate genesis seed: {error}"))?;
+    Ok(hex::encode(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +407,14 @@ mod tests {
             seed,
             deterministic_v2_import_seed(&"aa".repeat(32), &"22".repeat(32))
         );
+    }
+
+    #[test]
+    fn random_genesis_seed_has_the_canonical_shape() {
+        let seed = random_genesis_seed().unwrap();
+        assert_eq!(seed.len(), 64);
+        assert!(seed.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        genesis(&seed, Vec::new()).validate().unwrap();
     }
 
     #[test]
