@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn add_auto_detects_structural_task_and_session_markers() {
+    let _env = setup();
+    for (content, expected_type) in [("[task] marked task", "task"), ("[session] marked session", "session")] {
+        cmd_add_with_parent(
+            Some(content),
+            false,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let path = ensure_journal().unwrap();
+        let (events, _) = read_events_lossy(&path);
+        let strand = projection::project_strands(&events, true)
+            .into_iter()
+            .find(|strand| strand.first_summary() == content)
+            .expect("new marked strand is projected");
+        assert_eq!(strand.strand_type.as_deref(), Some(expected_type));
+    }
+}
+
+#[test]
 fn append_explicit_empty_id_errors() {
     let _env = setup();
     create_strand("existing strand");

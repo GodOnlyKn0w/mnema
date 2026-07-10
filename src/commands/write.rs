@@ -214,6 +214,10 @@ pub(crate) fn cmd_add_with_parent_and_slug(
     let resolved_type = strand_type.or_else(|| {
         if stored.starts_with("para group ") {
             Some("dag")
+        } else if stored.starts_with("[task]") {
+            Some("task")
+        } else if stored.starts_with("[session]") {
+            Some("session")
         } else if stored.starts_with('[')
             && stored.len() > 2
             && stored[1..]
