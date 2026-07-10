@@ -217,13 +217,6 @@ pub(crate) fn ambiguous_message(input: &str, candidates: &[StrandCandidate]) -> 
     )
 }
 
-/// Resolve a human strand handle against the canonical full strand set.
-/// Command-specific filtering happens after this step so one handle cannot
-/// point at different strands in different commands.
-pub(crate) fn lookup_strand(strands: &[ProjectedStrand], input: &str) -> StrandLookup {
-    lookup_strand_with_selection(strands, input, false, 0)
-}
-
 pub(crate) fn lookup_strand_with_selection(
     strands: &[ProjectedStrand],
     input: &str,
@@ -292,10 +285,6 @@ fn lookup_via_entry(strands: &[ProjectedStrand], input: &str) -> StrandLookup {
             ))
         }
     }
-}
-
-pub(crate) fn resolve_strand(strands: &[ProjectedStrand], input: &str) -> Result<String, String> {
-    lookup_strand(strands, input).into_result(input)
 }
 
 pub(crate) fn resolve_strand_with_selection(

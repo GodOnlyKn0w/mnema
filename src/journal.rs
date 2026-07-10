@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub(crate) struct JournalAppendOutcome {
+    #[allow(dead_code)]
     pub(crate) event: Event,
     pub(crate) entry_id: Option<String>,
 }
@@ -225,6 +226,7 @@ pub(crate) fn ensure_journal_id_in(journal_dir: &std::path::Path) -> Result<Stri
 }
 
 /// Resolve journal dir then ensure its stable journal-id exists.
+#[cfg(test)]
 pub(crate) fn ensure_journal_id() -> Result<String, String> {
     ensure_journal_id_in(&resolve_journal_dir()?)
 }
@@ -519,10 +521,6 @@ fn read_journal_lossy_reader<R: BufRead>(reader: R) -> JournalRead {
         }
     }
     read
-}
-/// Extract Event values from offset-paired events, discarding offsets.
-pub(crate) fn events_only(offset_events: &[(usize, Event)]) -> Vec<&Event> {
-    offset_events.iter().map(|(_, e)| e).collect()
 }
 
 pub(crate) fn read_events_strict(path: &PathBuf) -> Result<Vec<(usize, Event)>, String> {

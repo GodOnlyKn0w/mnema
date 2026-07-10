@@ -280,7 +280,10 @@ pub fn topics() -> &'static [TopicInfo] {
 // ── Data model ──────────────────────────────────────────────
 
 /// Fixed recovery kinds. Each diagnostic must use one of these.
+/// Non-Manual variants are reserved for future executable recoveries; output
+/// serialises the full vocabulary even though the catalog currently uses Manual.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum RecoveryKind {
     /// Verify a task's completion.
     Verify,
@@ -324,6 +327,7 @@ pub struct DiagnosticInfo {
 
 #[derive(Debug, Clone)]
 pub enum Severity {
+    #[allow(dead_code)] // reserved for future E-severity codes
     Error,
     Warning,
 }
@@ -508,6 +512,7 @@ pub fn lookup(code: &str) -> Option<&'static DiagnosticInfo> {
 /// Full catalog access for closure checks (examples-as-contract CI and
 /// the two-way closure tests: every emitted code resolves, every entry
 /// has a live producer).
+#[cfg(test)]
 pub fn catalog() -> &'static [DiagnosticInfo] {
     CATALOG
 }
@@ -515,12 +520,9 @@ pub fn catalog() -> &'static [DiagnosticInfo] {
 mod runtime;
 pub(crate) use runtime::*;
 
+#[cfg(test)]
 pub fn all_codes() -> Vec<&'static str> {
     CATALOG.iter().map(|d| d.code).collect()
-}
-
-pub fn catalog_size() -> usize {
-    CATALOG.len()
 }
 
 mod audit;

@@ -150,6 +150,7 @@ pub(crate) fn cmd_add_from_stdin(
         provenance_raw,
     )
 }
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_add_with_parent(
     content: Option<&str>,

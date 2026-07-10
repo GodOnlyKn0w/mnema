@@ -28,6 +28,8 @@ pub struct LogEntry {
     pub prev_entry_id: Option<String>,
     pub entry_id: Option<String>,
     pub refs: Vec<String>,
+    /// Legacy v1 strand@offset pin — stored for replay fidelity, not read.
+    #[allow(dead_code)]
     pub ref_: Option<String>,
     pub append_id: Option<String>,
     pub provenance: Option<serde_json::Value>,
@@ -84,20 +86,6 @@ pub enum TimelineEventKind {
     },
     StrandReopened,
 }
-// ── State Markers ──────────────────────────────────────────
-
-/// Legacy content-based state markers — kept for display/annotation purposes
-/// only. These no longer affect compute_state; lifecycle state is set
-/// by legacy StrandClosed / StrandReopened events and v2 close/reopen effects.
-pub const STATE_MARKERS: &[&str] = &[
-    "[merged]",
-    "[cancelled]",
-    "[failed]",
-    "[verified]",
-    "[done]",
-    "[dispatched]",
-    "[registered]",
-];
 
 /// Valid close dispositions — owned by the event factory alongside the
 /// close effect constructor; re-exported here for read-side callers.
@@ -201,14 +189,6 @@ pub fn compute_state_from_events(
         Some((_, EntryEffect::Reopen)) => ("registered".to_string(), String::new(), 0),
         _ => ("registered".to_string(), String::new(), 0),
     }
-}
-/// Compute canonical state from log entries (legacy stub — used only for
-/// test compatibility during the transition. Prefer compute_state_from_events
-/// when the event stream is available).
-/// Returns (state, marker_name, marker_offset).
-pub fn compute_state(log: &[LogEntry]) -> (String, String, usize) {
-    let _ = log; // legacy markers no longer drive state
-    ("registered".to_string(), String::new(), 0)
 }
 
 // ── Projected Strand ───────────────────────────────────────
@@ -407,6 +387,7 @@ pub(crate) fn extract_fixes_prefix(content: &str) -> Option<&str> {
 ///   (no `--why` was recorded). Hidden strands are skipped.
 /// - `since_offset`: when set, skip `[decision]` entries at or before that
 ///   journal offset (legacy pre-policy stock); frictions are never skipped.
+#[cfg(test)]
 pub fn edges_discipline_report(strands: &[ProjectedStrand]) -> EdgesDisciplineReport {
     edges_discipline_report_since(strands, None)
 }

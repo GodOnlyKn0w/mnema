@@ -3,9 +3,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::process::Command;
-use std::sync::atomic::{AtomicU16, Ordering};
-
-static ID_COUNTER: AtomicU16 = AtomicU16::new(0);
 
 /// Git context captured at append time — optional, never blocks append.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,26 +249,6 @@ fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
-/// Legacy non-strand ID format: 24 hex digits = microsecond timestamp (16) + PID (4) + counter (4).
-/// PID prevents collision across processes on a single machine; counter prevents
-/// collision within a process in the same microsecond.
-///
-/// Collision probability per microsecond per machine: ~2^-64 (negligible).
-/// Sufficient for single-machine use. Insufficient for distributed deployment:
-/// two machines may independently assign the same PID in the same microsecond.
-/// If per-agent sub-journals on different machines are introduced, switch to a
-/// random nonce or machine-level unique identifier.
-fn generate_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as u64;
-    let pid = std::process::id() as u16;
-    let counter = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-    format!("{:016x}{:04x}{:04x}", ts, pid, counter)
-}
-
 /// Legacy content-derived ID for a log append.
 /// sha256(strand_id + ts + content) — deterministic, survives journal repairs.
 pub fn compute_append_id(strand_id: &str, ts: &str, content: &str) -> String {
@@ -465,6 +442,7 @@ pub fn make_journal_anchor(events: &[Event]) -> Event {
     }
 }
 
+#[cfg(test)]
 pub fn make_strand_created(content: &str, strand_type: Option<&str>) -> (Event, Event) {
     make_strand_created_with_provenance(content, strand_type, None)
 }
@@ -536,23 +514,14 @@ pub fn make_strand_created_with_refs_and_slug(
 /// metadata blob attached to the entry. `None` produces an event identical
 /// to the pre-provenance schema; older consumers see the same JSON shape
 /// thanks to `skip_serializing_if`.
+#[cfg(test)]
 pub fn make_log_appended(id: &str, content: &str, provenance: Option<serde_json::Value>) -> Event {
     make_log_appended_entry(id, None, content, Vec::new(), None, provenance)
 }
 
-/// Like `make_log_appended` but sets the entry's legacy `ref_` rationale
-/// pointer. New callers should prefer `make_log_appended_entry` with `refs`.
-pub fn make_log_appended_with_ref(
-    id: &str,
-    content: &str,
-    ref_: Option<&str>,
-    provenance: Option<serde_json::Value>,
-) -> Event {
-    make_log_appended_entry(id, None, content, Vec::new(), ref_, provenance)
-}
-
 /// Build a v2 chained log entry. `refs` are entry hashes; `legacy_ref` is the
 /// transitional v1 strand@offset pin kept while callers migrate.
+#[cfg(test)]
 pub fn make_log_appended_entry(
     id: &str,
     prev_entry_id: Option<&str>,
@@ -608,31 +577,13 @@ pub fn make_log_appended_entry_with_effect(
         provenance,
     }
 }
-/// Build a `CheckpointCreated` event. `provenance` follows the same
-/// contract as on `LogAppended`; pass `None` for the original behaviour.
-pub fn make_checkpoint(
-    id: &str,
-    observed: &str,
-    action: &str,
-    provenance: Option<serde_json::Value>,
-) -> Event {
-    let ts = now();
-    Event::CheckpointCreated {
-        id: id.to_string(),
-        ts,
-        observed: observed.to_string(),
-        action: action.to_string(),
-        append_id: None,
-        provenance,
-    }
-}
 
 // ── effect entry content/effect pairs ──────────────────────
 // An effect entry's durable content mirrors its machine effect ("link
 // belongs-to <id>", "close disposition=done", ...). That pairing is event
-// construction knowledge with a single owner: these constructors. Both the
-// Event factories below and command-layer append requests must go through
-// them; nothing else spells the content templates.
+// construction knowledge with a single owner: these entry_parts helpers.
+// Command-layer append requests must go through them; nothing else spells
+// the content templates.
 
 /// Valid close dispositions accepted by `mnema close --as <DISPOSITION>`.
 pub const CLOSE_DISPOSITIONS: &[&str] = &["done", "failed", "cancelled", "merged", "verified"];
@@ -708,106 +659,10 @@ pub fn make_edge_linked(
     )
 }
 
-/// Build an unlink effect entry (F5). Symmetric with `make_edge_linked`:
-/// carries edge_type (which typed edge to remove), the reversed link entry id
-/// (CORPUS §4), and provenance.
-pub fn make_edge_unlinked(
-    source_id: &str,
-    prev_entry_id: Option<&str>,
-    target_id: &str,
-    edge_type: Option<&str>,
-    link_entry_id: Option<String>,
-    provenance: Option<serde_json::Value>,
-) -> Event {
-    let edge_type = edge_type.unwrap_or("depends-on");
-    let (content, effect) = unlink_entry_parts(target_id, edge_type, link_entry_id);
-    make_log_appended_entry_with_effect(
-        source_id,
-        prev_entry_id,
-        &content,
-        Vec::new(),
-        None,
-        Some(effect),
-        provenance,
-    )
-}
-
-/// Build a close effect entry.
-/// `disposition` must be in `CLOSE_DISPOSITIONS`.
-pub fn make_strand_closed(
-    id: &str,
-    prev_entry_id: Option<&str>,
-    disposition: &str,
-    provenance: Option<serde_json::Value>,
-) -> Event {
-    let (content, effect) = close_entry_parts(disposition, None);
-    make_log_appended_entry_with_effect(
-        id,
-        prev_entry_id,
-        &content,
-        Vec::new(),
-        None,
-        Some(effect),
-        provenance,
-    )
-}
-
-/// Build a reopen effect entry.
-pub fn make_strand_reopened(
-    id: &str,
-    prev_entry_id: Option<&str>,
-    provenance: Option<serde_json::Value>,
-) -> Event {
-    let (content, effect) = reopen_entry_parts(None);
-    make_log_appended_entry_with_effect(
-        id,
-        prev_entry_id,
-        &content,
-        Vec::new(),
-        None,
-        Some(effect),
-        provenance,
-    )
-}
-
-pub fn make_strand_hidden(
-    id: &str,
-    prev_entry_id: Option<&str>,
-    reason: Option<&str>,
-    provenance: Option<serde_json::Value>,
-) -> Event {
-    let (content, effect) = hide_entry_parts(reason);
-    make_log_appended_entry_with_effect(
-        id,
-        prev_entry_id,
-        &content,
-        Vec::new(),
-        None,
-        Some(effect),
-        provenance,
-    )
-}
-
-pub fn make_strand_unhidden(
-    id: &str,
-    prev_entry_id: Option<&str>,
-    provenance: Option<serde_json::Value>,
-) -> Event {
-    let (content, effect) = unhide_entry_parts();
-    make_log_appended_entry_with_effect(
-        id,
-        prev_entry_id,
-        &content,
-        Vec::new(),
-        None,
-        Some(effect),
-        provenance,
-    )
-}
-
 /// Resolve a strand-id prefix to a unique full strand id, scanning
 /// `StrandCreated` events. This legacy event-only helper knows nothing about
 /// slugs or selection handles; command paths should prefer `reference`.
+#[cfg(test)]
 pub(crate) fn find_strand(events: &[(usize, Event)], id: &str) -> Option<String> {
     if id.trim().is_empty() {
         return None;
@@ -827,37 +682,5 @@ pub(crate) fn find_strand(events: &[(usize, Event)], id: &str) -> Option<String>
         Some(matches[0].clone())
     } else {
         None
-    }
-}
-
-/// Resolve a strand ID prefix to a full strand ID, returning Result.
-pub(crate) fn resolve_id(events: &[(usize, Event)], id: &str) -> Result<String, String> {
-    let matches: Vec<String> = events
-        .iter()
-        .filter_map(|(_, e)| {
-            if let Event::StrandCreated { id: nid, .. } = e {
-                Some(nid.clone())
-            } else {
-                None
-            }
-        })
-        .filter(|nid| nid.starts_with(id))
-        .collect();
-    match matches.len() {
-        1 => Ok(matches[0].clone()),
-        0 => Err(format!("strand {} not found", id)),
-        _ => {
-            let sample: Vec<String> = matches
-                .iter()
-                .take(4)
-                .map(|candidate| crate::util::shorten(candidate))
-                .collect();
-            Err(format!(
-                "strand prefix {} is ambiguous: {} strands match (e.g. {})",
-                id,
-                matches.len(),
-                sample.join(", ")
-            ))
-        }
     }
 }

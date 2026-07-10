@@ -139,6 +139,7 @@ const MARKERS: &[MarkerSpec] = &[
     },
 ];
 
+#[cfg(test)]
 const MARKER_SPELLINGS: &[&str] = &[
     "[decision]",
     "[constraint]",
@@ -175,6 +176,7 @@ pub(crate) fn known() -> &'static [MarkerSpec] {
     MARKERS
 }
 
+#[cfg(test)]
 pub(crate) fn known_marker_spellings() -> &'static [&'static str] {
     MARKER_SPELLINGS
 }
@@ -219,6 +221,7 @@ pub(crate) fn split_marker(content: &str) -> (&str, &str) {
     (&trimmed[..marker_end], trimmed[marker_end..].trim())
 }
 
+#[cfg(test)]
 pub(crate) fn extract_from_text(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = s.as_bytes();
