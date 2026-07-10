@@ -405,14 +405,18 @@ mod tests {
         assert_eq!(review.upstream_count, 2);
         assert_eq!(review.registered_upstream_count, 1);
         assert_eq!(review.upstreams.len(), 2);
-        assert!(review
-            .upstreams
-            .iter()
-            .any(|u| u.id == "open" && u.lifecycle == "registered"));
-        assert!(review
-            .upstreams
-            .iter()
-            .any(|u| u.id == "closed" && u.lifecycle == "closed:done"));
+        assert!(
+            review
+                .upstreams
+                .iter()
+                .any(|u| u.id == "open" && u.lifecycle == "registered")
+        );
+        assert!(
+            review
+                .upstreams
+                .iter()
+                .any(|u| u.id == "closed" && u.lifecycle == "closed:done")
+        );
         assert!(review.upstreams[0].show_command.contains("show --id"));
     }
 

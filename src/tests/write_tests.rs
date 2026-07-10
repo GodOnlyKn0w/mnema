@@ -3,18 +3,11 @@ use super::*;
 #[test]
 fn add_auto_detects_structural_task_and_session_markers() {
     let _env = setup();
-    for (content, expected_type) in [("[task] marked task", "task"), ("[session] marked session", "session")] {
-        cmd_add_with_parent(
-            Some(content),
-            false,
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+    for (content, expected_type) in [
+        ("[task] marked task", "task"),
+        ("[session] marked session", "session"),
+    ] {
+        cmd_add_with_parent(Some(content), false, None, false, None, None, None, None).unwrap();
 
         let path = ensure_journal().unwrap();
         let (events, _) = read_events_lossy(&path);
@@ -1288,14 +1281,7 @@ fn v2_why_strand_shorthand_skips_latest_structural_effect() {
     )
     .unwrap();
     let structural_target = create_strand("structural target");
-    cmd_link(
-        &basis,
-        &structural_target,
-        Some("depends-on"),
-        false,
-        None,
-    )
-    .unwrap();
+    cmd_link(&basis, &structural_target, Some("depends-on"), false, None).unwrap();
     let consumer = create_strand("consumer strand");
 
     let path = ensure_journal().unwrap();

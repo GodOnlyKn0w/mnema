@@ -437,15 +437,7 @@ fn convert_event(state: &mut ConvertState, offset: usize, event: &Event) -> Resu
             action,
             provenance,
             ..
-        } => convert_checkpoint(
-            state,
-            offset,
-            id,
-            ts,
-            observed,
-            action,
-            provenance.as_ref(),
-        ),
+        } => convert_checkpoint(state, offset, id, ts, observed, action, provenance.as_ref()),
         Event::SubjectBound {
             id,
             ts,
@@ -649,7 +641,9 @@ fn emit_entry(
             .insert(old_strand_id.to_string(), new_strand_id.clone());
     }
     if let Some(old) = old_entry_id {
-        state.entry_map.insert(old.to_string(), new_entry_id.clone());
+        state
+            .entry_map
+            .insert(old.to_string(), new_entry_id.clone());
     }
     // Also map new entry under itself for link_entry_id that already points at
     // v3 ids after expansion (key-tombstone path passes mapped ids).
@@ -989,13 +983,17 @@ fn check_projection_equivalence(
                 v2_strands.insert(id.clone());
             }
             Event::LogAppended {
-                id, effect, content, ..
+                id,
+                effect,
+                content,
+                ..
             } => {
                 v2_strands.insert(id.clone());
                 v2_entry_events += 1;
                 match effect {
                     Some(EntryEffect::Link { target, edge_type }) => {
-                        *live.entry(id.clone())
+                        *live
+                            .entry(id.clone())
                             .or_default()
                             .entry((target.clone(), edge_type.clone()))
                             .or_default() += 1;
@@ -1050,8 +1048,11 @@ fn check_projection_equivalence(
             } => {
                 v2_strands.insert(id.clone());
                 v2_entry_events += 1;
-                let et = edge_type.clone().unwrap_or_else(|| "depends-on".to_string());
-                *live.entry(id.clone())
+                let et = edge_type
+                    .clone()
+                    .unwrap_or_else(|| "depends-on".to_string());
+                *live
+                    .entry(id.clone())
                     .or_default()
                     .entry((to.clone(), et))
                     .or_default() += 1;
@@ -1062,11 +1063,10 @@ fn check_projection_equivalence(
             } => {
                 v2_strands.insert(id.clone());
                 v2_entry_events += 1;
-                let et = edge_type.clone().unwrap_or_else(|| "depends-on".to_string());
-                if let Some(n) = live
-                    .get_mut(id)
-                    .and_then(|m| m.remove(&(to.clone(), et)))
-                {
+                let et = edge_type
+                    .clone()
+                    .unwrap_or_else(|| "depends-on".to_string());
+                if let Some(n) = live.get_mut(id).and_then(|m| m.remove(&(to.clone(), et))) {
                     v2_edges = v2_edges.saturating_sub(n);
                 }
             }
@@ -1544,16 +1544,11 @@ fn effect_payload_to_v2(effect: EffectPayloadV3) -> EntryEffect {
 
 pub(crate) fn plan_from_journal_dir(journal_dir: &Path) -> Result<CutoverV3Plan, String> {
     if load_active_manifest(journal_dir)?.is_some() {
-        return Err(
-            "active-journal.json already present; journal is already on v3".to_string(),
-        );
+        return Err("active-journal.json already present; journal is already on v3".to_string());
     }
     let source_path = journal_dir.join("journal.jsonl");
     if !source_path.exists() {
-        return Err(format!(
-            "source journal missing: {}",
-            source_path.display()
-        ));
+        return Err(format!("source journal missing: {}", source_path.display()));
     }
     let source_bytes = std::fs::read(&source_path)
         .map_err(|e| format!("read source journal {}: {e}", source_path.display()))?;

@@ -147,16 +147,9 @@ pub(crate) fn resolve_active_journal_in(
                 path.display()
             ));
         }
-        // Verify artifact hash when possible — mismatch is integrity failure.
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("read active v3 journal {}: {e}", path.display()))?;
-        let sha = sha256_bytes(&bytes);
-        if sha != manifest.active.sha256 {
-            return Err(format!(
-                "active v3 journal hash mismatch: manifest {}, file {}",
-                manifest.active.sha256, sha
-            ));
-        }
+        // `active.sha256` commits the prepared artifact at activation time.
+        // The active journal then grows append-only; current integrity is
+        // established by strict record validation and the final anchor.
         return Ok(ActiveJournal::V3 {
             journal_id: manifest.journal_id.clone(),
             path,
@@ -253,10 +246,9 @@ fn write_journal_id_file_new(path: &std::path::Path, journal_id: &str) -> Result
                 .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
             Ok(())
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(format!(
-            "journal-id already exists at {}",
-            path.display()
-        )),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(format!("journal-id already exists at {}", path.display()))
+        }
         Err(e) => Err(format!("cannot create {}: {}", path.display(), e)),
     }
 }
@@ -472,7 +464,13 @@ pub(crate) fn append_event_unlocked(
     writeln!(journal, "{}", line).map_err(|e| format!("write error: {}", e))
 }
 
-pub(crate) fn append_events(events: &[Event]) -> Result<(), String> {
+#[derive(Debug, Default)]
+pub(crate) struct JournalBatchAppendOutcome {
+    pub(crate) strand_ids: std::collections::HashMap<String, String>,
+    pub(crate) entry_ids: std::collections::HashMap<String, String>,
+}
+
+pub(crate) fn append_events(events: &[Event]) -> Result<JournalBatchAppendOutcome, String> {
     if let ActiveJournal::V3 {
         journal_id, path, ..
     } = resolve_active_journal()?
@@ -480,20 +478,31 @@ pub(crate) fn append_events(events: &[Event]) -> Result<(), String> {
         return append_events_as_v3(&path, &journal_id, events);
     }
     with_journal_write_lock(|journal| {
+        let mut outcome = JournalBatchAppendOutcome::default();
         for event in events {
             append_event_unlocked(journal, event)?;
+            if let Event::StrandCreated { id, .. } = event {
+                outcome.strand_ids.insert(id.clone(), id.clone());
+            }
+            if let Event::LogAppended {
+                entry_id: Some(entry_id),
+                ..
+            } = event
+            {
+                outcome.entry_ids.insert(entry_id.clone(), entry_id.clone());
+            }
         }
-        Ok(())
+        Ok(outcome)
     })
 }
 
-/// Translate a batch of v2-shaped factory events into v3 records and rewrite
-/// the active v3 journal (drop final anchor → append entries → new anchor).
+/// Translate a batch of v2-shaped factory events into v3 records and append
+/// the domain records plus a final anchor under one exclusive lock.
 fn append_events_as_v3(
     path: &std::path::Path,
     journal_id: &str,
     events: &[Event],
-) -> Result<(), String> {
+) -> Result<JournalBatchAppendOutcome, String> {
     let lock_path = journal_lock_path()?;
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
@@ -504,122 +513,223 @@ fn append_events_as_v3(
     fs2::FileExt::lock_exclusive(&lock_file)
         .map_err(|e| format!("cannot acquire journal lock: {e}"))?;
 
-    let result = (|| {
-        let mut records = crate::journal_v3::read_records_strict(path, journal_id)?;
-        if matches!(records.last(), Some(crate::canonical::JournalRecordV3::Anchor(_))) {
-            records.pop();
-        }
-        for event in events {
-            push_event_as_v3_record(&mut records, journal_id, event)?;
-        }
-        let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
-        let anchor = crate::journal_v3::make_anchor(journal_id, &records, created_at)?;
-        records.push(anchor);
-        rewrite_v3_journal(path, journal_id, &records)
-    })();
+    let result = append_events_as_v3_locked(path, journal_id, events);
     let _ = fs2::FileExt::unlock(&lock_file);
     result
 }
 
-fn push_event_as_v3_record(
-    records: &mut Vec<crate::canonical::JournalRecordV3>,
-    journal_id: &str,
-    event: &Event,
-) -> Result<(), String> {
-    use crate::canonical::{
-        EntryHashViewV3, JournalRecordV3, StrandKeyV3, random_genesis_seed,
-    };
+#[derive(Clone)]
+struct PendingGenesis {
+    slug: Option<String>,
+    strand_type: Option<String>,
+}
 
-    // Heads for prev linkage.
+fn append_events_as_v3_locked(
+    path: &std::path::Path,
+    journal_id: &str,
+    events: &[Event],
+) -> Result<JournalBatchAppendOutcome, String> {
+    use crate::canonical::{EntryHashViewV3, JournalRecordV3, StrandKeyV3, random_genesis_seed};
+
+    let mut records = crate::journal_v3::read_records_strict(path, journal_id)?;
     let mut heads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for record in records.iter() {
+    let mut known_entries = std::collections::HashSet::new();
+    for record in &records {
         if let JournalRecordV3::Entry(entry) = record {
             heads.insert(entry.strand_id.clone(), entry.entry_id.clone());
+            known_entries.insert(entry.entry_id.clone());
         }
     }
+    let mut pending = std::collections::HashMap::<String, PendingGenesis>::new();
+    let mut outcome = JournalBatchAppendOutcome::default();
+    let mut appended = Vec::new();
 
-    match event {
-        Event::StrandCreated { .. } => Ok(()), // absorbed into following first entry / genesis
-        Event::LogAppended {
+    for event in events {
+        if let Event::StrandCreated {
+            id,
+            slug,
+            strand_type,
+            ..
+        } = event
+        {
+            pending.insert(
+                id.clone(),
+                PendingGenesis {
+                    slug: slug.clone(),
+                    strand_type: strand_type.clone(),
+                },
+            );
+            continue;
+        }
+
+        let owned_event;
+        let event = match event {
+            Event::EdgeLinked {
+                id,
+                ts,
+                to,
+                edge_type,
+                provenance,
+            } => {
+                owned_event = Event::LogAppended {
+                    id: id.clone(),
+                    ts: ts.clone(),
+                    content: format!(
+                        "[effect] link {} {}",
+                        edge_type.as_deref().unwrap_or("depends-on"),
+                        to
+                    ),
+                    effect: Some(EntryEffect::Link {
+                        target: to.clone(),
+                        edge_type: edge_type
+                            .clone()
+                            .unwrap_or_else(|| "depends-on".to_string()),
+                    }),
+                    prev_entry_id: None,
+                    entry_id: None,
+                    refs: Vec::new(),
+                    ref_: None,
+                    append_id: None,
+                    git: None,
+                    provenance: provenance.clone(),
+                };
+                &owned_event
+            }
+            other => other,
+        };
+
+        let Event::LogAppended {
             id,
             ts,
             content,
             effect,
             refs,
             provenance,
+            entry_id: old_entry_id,
             ..
-        } => {
-            let created_at = crate::canonical::canonicalize_timestamp("created_at", ts)
-                .unwrap_or_else(|_| {
-                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
-                });
-            let is_genesis = !heads.contains_key(id);
-            let strand_key = if is_genesis {
-                StrandKeyV3::Genesis {
-                    seed: random_genesis_seed()?,
-                    slug: None,
-                    strand_type: None,
-                }
-            } else {
-                StrandKeyV3::Existing { id: id.clone() }
-            };
-            let prev = heads.get(id).cloned();
-            let (kind, payload) = match effect {
-                Some(eff) => (
-                    "effect".to_string(),
-                    v2_effect_to_payload(eff)?.into_value(),
-                ),
-                None => (
-                    crate::canonical::kind_from_body(content),
-                    serde_json::Value::Null,
-                ),
-            };
-            let typed_refs: Vec<crate::canonical::RefV3> = refs
-                .iter()
-                .map(|r| {
-                    if r.len() == 64 {
-                        crate::canonical::RefV3::Entry {
-                            journal_id: journal_id.to_string(),
-                            entry_id: r.clone(),
-                        }
-                    } else {
-                        crate::canonical::RefV3::External {
-                            scheme: "mnema-legacy".to_string(),
-                            locator: r.clone(),
-                        }
-                    }
-                })
-                .collect();
-            let provenance_value = provenance.clone().unwrap_or(serde_json::Value::Null);
-            let author = crate::canonical::author_from_provenance(&provenance_value);
-            let view = EntryHashViewV3::new(
-                strand_key,
-                prev,
-                kind,
-                content.clone(),
-                typed_refs,
-                author,
-                created_at,
-                payload,
-                provenance_value,
-            );
-            let record = view.into_record()?;
-            if let JournalRecordV3::Entry(entry) = &record {
-                // For genesis, public strand_id is entry_id — factory still
-                // used the precomputed v2 id. Accept and continue; callers that
-                // need stable ids should go through cutover mapping.
-                let _ = entry;
+        } = event
+        else {
+            return Err(format!(
+                "v3 active journal cannot append event variant via legacy adapter: {event:?}"
+            ));
+        };
+
+        let resolved_id = outcome
+            .strand_ids
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.clone());
+        let is_genesis = !heads.contains_key(&resolved_id);
+        let strand_key = if is_genesis {
+            let metadata = pending.remove(id).ok_or_else(|| {
+                format!("cannot append implicit v3 genesis for unknown strand {id}")
+            })?;
+            StrandKeyV3::Genesis {
+                seed: random_genesis_seed()?,
+                slug: metadata.slug,
+                strand_type: metadata.strand_type,
             }
-            records.push(record);
-            Ok(())
+        } else {
+            StrandKeyV3::Existing {
+                id: resolved_id.clone(),
+            }
+        };
+        let prev = heads.get(&resolved_id).cloned();
+        let (kind, payload) = match effect {
+            Some(eff) => (
+                "effect".to_string(),
+                v2_effect_to_payload(eff, &outcome)?.into_value(),
+            ),
+            None => (
+                crate::canonical::kind_from_body(content),
+                serde_json::Value::Null,
+            ),
+        };
+        let typed_refs = refs
+            .iter()
+            .map(|raw| {
+                if let Some(entry_id) = outcome.entry_ids.get(raw) {
+                    crate::canonical::RefV3::Entry {
+                        journal_id: journal_id.to_string(),
+                        entry_id: entry_id.clone(),
+                    }
+                } else if known_entries.contains(raw) {
+                    crate::canonical::RefV3::Entry {
+                        journal_id: journal_id.to_string(),
+                        entry_id: raw.clone(),
+                    }
+                } else if let Some(strand_id) = outcome.strand_ids.get(raw) {
+                    crate::canonical::RefV3::Strand {
+                        journal_id: journal_id.to_string(),
+                        strand_id: strand_id.clone(),
+                    }
+                } else if heads.contains_key(raw) {
+                    crate::canonical::RefV3::Strand {
+                        journal_id: journal_id.to_string(),
+                        strand_id: raw.clone(),
+                    }
+                } else {
+                    crate::canonical::RefV3::External {
+                        scheme: "mnema-legacy".to_string(),
+                        locator: raw.clone(),
+                    }
+                }
+            })
+            .collect();
+        let provenance_value = provenance.clone().unwrap_or(serde_json::Value::Null);
+        let view = EntryHashViewV3::new(
+            strand_key,
+            prev,
+            kind,
+            content.clone(),
+            typed_refs,
+            crate::canonical::author_from_provenance(&provenance_value),
+            crate::canonical::canonicalize_timestamp("created_at", ts)?,
+            payload,
+            provenance_value,
+        );
+        let record = view.into_record()?;
+        let JournalRecordV3::Entry(entry) = &record else {
+            unreachable!()
+        };
+        if is_genesis {
+            outcome
+                .strand_ids
+                .insert(id.clone(), entry.strand_id.clone());
         }
-        other => Err(format!(
-            "v3 active journal cannot append event variant via legacy adapter: {other:?}"
-        )),
+        if let Some(old_entry_id) = old_entry_id {
+            outcome
+                .entry_ids
+                .insert(old_entry_id.clone(), entry.entry_id.clone());
+        }
+        heads.insert(entry.strand_id.clone(), entry.entry_id.clone());
+        known_entries.insert(entry.entry_id.clone());
+        records.push(record.clone());
+        appended.push(record);
     }
+
+    if !pending.is_empty() {
+        return Err("v3 strand creation batch is missing its genesis entry".to_string());
+    }
+    let anchor = crate::journal_v3::make_anchor(
+        journal_id,
+        &records,
+        crate::canonical::canonicalize_timestamp(
+            "anchor created_at",
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        )?,
+    )?;
+    records.push(anchor.clone());
+    crate::journal_v3::validate_records(journal_id, &records)?;
+    appended.push(anchor);
+    append_v3_records(path, &appended)?;
+    Ok(outcome)
 }
 
-fn v2_effect_to_payload(effect: &EntryEffect) -> Result<crate::canonical::EffectPayloadV3, String> {
+fn v2_effect_to_payload(
+    effect: &EntryEffect,
+    outcome: &JournalBatchAppendOutcome,
+) -> Result<crate::canonical::EffectPayloadV3, String> {
     use crate::canonical::{CloseDispositionV3, EdgeTypeV3, EffectPayloadV3};
     match effect {
         EntryEffect::Close { disposition } => Ok(EffectPayloadV3::Close {
@@ -641,7 +751,11 @@ fn v2_effect_to_payload(effect: &EntryEffect) -> Result<crate::canonical::Effect
                 "depends-on" => EdgeTypeV3::DependsOn,
                 other => return Err(format!("unsupported edge type: {other}")),
             },
-            target_strand_id: target.clone(),
+            target_strand_id: outcome
+                .strand_ids
+                .get(target)
+                .cloned()
+                .unwrap_or_else(|| target.clone()),
         }),
         EntryEffect::Unlink {
             target,
@@ -653,50 +767,43 @@ fn v2_effect_to_payload(effect: &EntryEffect) -> Result<crate::canonical::Effect
                 "depends-on" => EdgeTypeV3::DependsOn,
                 other => return Err(format!("unsupported edge type: {other}")),
             },
-            target_strand_id: target.clone(),
+            target_strand_id: outcome
+                .strand_ids
+                .get(target)
+                .cloned()
+                .unwrap_or_else(|| target.clone()),
             link_entry_id: link_entry_id
-                .clone()
-                .unwrap_or_else(|| "00".repeat(32)),
+                .as_ref()
+                .and_then(|id| {
+                    outcome
+                        .entry_ids
+                        .get(id)
+                        .cloned()
+                        .or_else(|| Some(id.clone()))
+                })
+                .ok_or_else(|| "v3 unlink requires the concrete link entry id".to_string())?,
         }),
     }
 }
 
-fn rewrite_v3_journal(
+fn append_v3_records(
     path: &std::path::Path,
-    journal_id: &str,
     records: &[crate::canonical::JournalRecordV3],
 ) -> Result<(), String> {
-    let tmp = path.with_extension("jsonl.tmp");
-    let _ = std::fs::remove_file(&tmp);
-    let sha = crate::journal_v3::write_records_prepared(&tmp, journal_id, records)?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| format!("install rewritten v3 journal {}: {e}", path.display()))?;
-    // Keep active manifest hash in sync when present.
-    if let Ok(Some(mut manifest)) =
-        crate::activation::load_active_manifest(&resolve_journal_dir()?)
-    {
-        if manifest.active.sha256 != sha {
-            manifest.active.sha256 = sha;
-            // Best-effort update: rewrite manifest via temp + activate path is
-            // first-activation only. For ongoing writes we update in place under lock.
-            let bytes = manifest.canonical_bytes()?;
-            let journal_dir = resolve_journal_dir()?;
-            let final_path = journal_dir.join(crate::activation::ACTIVE_MANIFEST_FILE);
-            let origin_id = manifest.origin.id();
-            let tmp_path = journal_dir.join(format!(
-                ".active-journal.rewrite.{}.tmp",
-                &origin_id[..16.min(origin_id.len())]
-            ));
-            std::fs::write(&tmp_path, &bytes)
-                .map_err(|e| format!("write updated manifest: {e}"))?;
-            #[cfg(windows)]
-            {
-                let _ = std::fs::remove_file(&final_path);
-            }
-            std::fs::rename(&tmp_path, &final_path)
-                .map_err(|e| format!("install updated manifest: {e}"))?;
-        }
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("open active v3 journal {}: {e}", path.display()))?;
+    for record in records {
+        let bytes =
+            serde_jcs::to_vec(record).map_err(|e| format!("canonicalize v3 append record: {e}"))?;
+        file.write_all(&bytes)
+            .and_then(|_| file.write_all(b"\n"))
+            .map_err(|e| format!("append active v3 journal {}: {e}", path.display()))?;
     }
+    file.flush()
+        .and_then(|_| file.sync_all())
+        .map_err(|e| format!("sync active v3 journal {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -755,42 +862,74 @@ pub(crate) fn append_entry_to_strand_gated(
     req: JournalEntryAppendRequest,
     gate: impl FnOnce(&[(usize, Event)]) -> Result<AppendGate, String>,
 ) -> Result<Option<JournalAppendOutcome>, String> {
-    // Read under lock semantics: for v3, project records to events first.
-    let read = read_journal_lossy_locked();
-    if let Some(error) = read.read_error {
-        return Err(error);
-    }
-    if !read.diagnostics.is_empty() {
-        return Err(format!(
-            "cannot append: journal has {} parse error(s); run doctor first",
-            read.diagnostics.len()
-        ));
-    }
-    match gate(&read.events)? {
-        AppendGate::Skip => Ok(None),
-        AppendGate::Proceed => {
-            if let ActiveJournal::V3 {
-                journal_id, path, ..
-            } = resolve_active_journal()?
-            {
-                let prev = current_entry_head(&read.events, &req.strand_id);
-                let event = crate::event::make_log_appended_entry_with_effect(
-                    &req.strand_id,
-                    prev.as_deref(),
-                    &req.content,
-                    req.refs,
-                    req.legacy_ref.as_deref(),
-                    req.effect,
-                    req.provenance,
-                );
-                append_events_as_v3(&path, &journal_id, &[event.clone()])?;
-                return Ok(Some(JournalAppendOutcome::from_event(event)));
+    if let ActiveJournal::V3 {
+        journal_id, path, ..
+    } = resolve_active_journal()?
+    {
+        let lock_path = journal_lock_path()?;
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| format!("cannot open journal.lock: {e}"))?;
+        fs2::FileExt::lock_exclusive(&lock_file)
+            .map_err(|e| format!("cannot acquire journal lock: {e}"))?;
+        let result = (|| {
+            let records = crate::journal_v3::read_records_strict(&path, &journal_id)?;
+            let events: Vec<(usize, Event)> = crate::cutover_v3::records_to_v2_events(&records)
+                .into_iter()
+                .enumerate()
+                .map(|(index, event)| (index + 1, event))
+                .collect();
+            if matches!(gate(&events)?, AppendGate::Skip) {
+                return Ok(None);
             }
-            with_journal_write_lock(|journal| {
-                append_entry_to_strand_unlocked(journal, &read.events, req).map(Some)
-            })
-        }
+            let prev = current_entry_head(&events, &req.strand_id);
+            let mut event = crate::event::make_log_appended_entry_with_effect(
+                &req.strand_id,
+                prev.as_deref(),
+                &req.content,
+                req.refs,
+                req.legacy_ref.as_deref(),
+                req.effect,
+                req.provenance,
+            );
+            let provisional_entry_id = match &event {
+                Event::LogAppended { entry_id, .. } => entry_id.clone(),
+                _ => None,
+            };
+            let appended = append_events_as_v3_locked(&path, &journal_id, &[event.clone()])?;
+            if let (Some(provisional), Event::LogAppended { entry_id, .. }) =
+                (provisional_entry_id, &mut event)
+            {
+                *entry_id = appended.entry_ids.get(&provisional).cloned();
+            }
+            Ok(Some(JournalAppendOutcome::from_event(event)))
+        })();
+        let _ = fs2::FileExt::unlock(&lock_file);
+        return result;
     }
+
+    with_journal_write_lock(|journal| {
+        let path = ensure_journal()?;
+        let read = read_journal_lossy(&path);
+        if let Some(error) = read.read_error {
+            return Err(error);
+        }
+        if !read.diagnostics.is_empty() {
+            return Err(format!(
+                "cannot append: journal has {} parse error(s); run doctor first",
+                read.diagnostics.len()
+            ));
+        }
+        match gate(&read.events)? {
+            AppendGate::Skip => Ok(None),
+            AppendGate::Proceed => {
+                append_entry_to_strand_unlocked(journal, &read.events, req).map(Some)
+            }
+        }
+    })
 }
 
 pub(crate) fn append_entry_to_strand(

@@ -273,11 +273,8 @@ pub(crate) fn cmd_doctor_edges(
         (None, None) => None,
     };
 
-    let report = projection::edges_discipline_report_since(
-        &strands,
-        since_offset,
-        candidate_ids.as_ref(),
-    );
+    let report =
+        projection::edges_discipline_report_since(&strands, since_offset, candidate_ids.as_ref());
     let out = output::EdgesOutput {
         open_friction_count: report.open_frictions.len(),
         open_friction_active_count: report.open_friction_active_count,

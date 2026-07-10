@@ -310,25 +310,30 @@ pub(crate) fn cmd_add_with_parent_and_slug(
         provenance.clone(),
         slug.as_deref(),
     );
-    let id = created
+    let provisional_id = created
         .strand_id()
         .expect("strand-scoped event")
         .to_string();
-    let first_entry_id = match &appended {
+    let provisional_entry_id = match &appended {
         Event::LogAppended { entry_id, .. } => entry_id.clone(),
         _ => None,
     };
     let mut events_to_append = vec![created, appended];
     if let Some(parent_id) = &parent_id {
         events_to_append.push(event::make_edge_linked(
-            &id,
-            first_entry_id.as_deref(),
+            &provisional_id,
+            provisional_entry_id.as_deref(),
             parent_id,
             Some("belongs-to"),
             provenance.clone(),
         ));
     }
-    append_events(&events_to_append)?;
+    let appended = append_events(&events_to_append)?;
+    let id = appended
+        .strand_ids
+        .get(&provisional_id)
+        .cloned()
+        .unwrap_or(provisional_id);
     if format_json {
         let output = output::AddOutput {
             id: id.clone(),
@@ -546,15 +551,22 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
             Some("session"),
             provenance.clone(),
         );
-        let new_id = created
+        let provisional_id = created
             .strand_id()
             .expect("strand-scoped event")
             .to_string();
-        let entry_id = match &appended {
+        let provisional_entry_id = match &appended {
             Event::LogAppended { entry_id, .. } => entry_id.clone(),
             _ => None,
         };
-        append_events(&[created, appended])?;
+        let appended = append_events(&[created, appended])?;
+        let new_id = appended
+            .strand_ids
+            .get(&provisional_id)
+            .cloned()
+            .unwrap_or(provisional_id);
+        let entry_id =
+            provisional_entry_id.and_then(|id| appended.entry_ids.get(&id).cloned().or(Some(id)));
         return Ok(AppendOutcome {
             kind: AppendOutcomeKind::CreatedNew,
             strand_id: new_id.clone(),
@@ -1073,7 +1085,11 @@ pub(crate) fn plan_checkpoint(
                 false,
             )
         })?;
-        (strand, "explicit --id", count_active_strands(&visible_strands))
+        (
+            strand,
+            "explicit --id",
+            count_active_strands(&visible_strands),
+        )
     } else {
         let active_count = count_active_strands(&visible_strands);
         let strand = resolve_most_recent_strand(&visible_strands).ok_or_else(|| {

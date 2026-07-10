@@ -108,8 +108,7 @@ pub(crate) fn cmd_link(
     )?;
     if src_id == tgt_id {
         return Err(
-            "cannot link a strand to itself (source and target resolve to the same id)"
-                .to_string(),
+            "cannot link a strand to itself (source and target resolve to the same id)".to_string(),
         );
     }
     let provenance = parse_provenance_arg(provenance_raw)?;
@@ -418,7 +417,10 @@ pub(crate) fn cmd_cutover_v3(apply: bool, format_json: bool) -> Result<(), Strin
                 )
                 .display()
                 .to_string(),
-            target_journal: journal_dir.join(&manifest.active.path).display().to_string(),
+            target_journal: journal_dir
+                .join(&manifest.active.path)
+                .display()
+                .to_string(),
             map_path: if map_rel.is_empty() {
                 String::new()
             } else {

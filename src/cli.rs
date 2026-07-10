@@ -66,7 +66,7 @@ pub(crate) struct Cli {
     chdir: Option<String>,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Box<Commands>,
 }
 
 /// Single-strand target: positional <ID> and --id <ID> are equivalent.
@@ -891,12 +891,13 @@ fn cmd_init() -> Result<(), String> {
     // Legacy v2 source present without manifest: keep transitional v2 layout.
     let legacy = dir.join("journal.jsonl");
     if legacy.exists() {
-        let meta = std::fs::metadata(&legacy)
-            .map_err(|e| format!("stat legacy journal: {e}"))?;
+        let meta = std::fs::metadata(&legacy).map_err(|e| format!("stat legacy journal: {e}"))?;
         if meta.len() > 0 {
             println!("Initialized empty mnema in .mnema/");
             println!("  journal-id: {}", journal_id);
-            println!("  note: legacy journal.jsonl present; run mnema cutover-v3 --apply to activate v3");
+            println!(
+                "  note: legacy journal.jsonl present; run mnema cutover-v3 --apply to activate v3"
+            );
             return Ok(());
         }
     }
@@ -909,7 +910,10 @@ fn cmd_init() -> Result<(), String> {
     let records = vec![make_anchor(
         &journal_id,
         &[],
-        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+        crate::canonical::canonicalize_timestamp(
+            "anchor created_at",
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        )?,
     )?];
     let target_sha = if target.exists() {
         let bytes = std::fs::read(&target).map_err(|e| format!("read existing v3: {e}"))?;
