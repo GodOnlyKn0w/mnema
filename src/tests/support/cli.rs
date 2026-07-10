@@ -45,7 +45,7 @@ fn substitute(tok: &str) -> String {
     } else if upper.contains("PATH") || upper.contains("FILE") {
         "x.md".to_string()
     } else if upper.contains("CODE") {
-        "W062".to_string()
+        "W068".to_string()
     } else if upper.contains("RFC3339") {
         "2026-01-01T00:00:00Z".to_string()
     } else {

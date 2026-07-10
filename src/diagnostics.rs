@@ -42,7 +42,7 @@ static TOPICS: &[TopicInfo] = &[
   把手行   <id> [type] | <n> entries | <state>
   首条     <summary>（第一条日志，概述这条线的主题）
   last:    <last_entry>（最近一条日志；entries>1 时出现）
-  疤痕行   仅当命令产生 W 码时追加（如 W070、W071、W076）
+  疤痕行   仅当命令产生 W 码时追加（如 W071、W076）
            （W 码=写时瞬态诊断：骑写回显，不入账/不成疤/show 不复显，须当场捕证。ADR-0003）
 
 把手行中的 <state> 显示生命周期（lifecycle），格式：
@@ -127,7 +127,7 @@ Marker 语义（一行一条）：
         body: r#"show（StrandDetailOutput）：
   id / slug / hidden / summary / entry_count / status / state_marker / state_offset / last_entry_offset /
   edges / belongs_to_edges / depends_on_edges / strand_branch / events
-  ※ events[].entry=日志行；last_entry_offset=下次 --seen-offset；belongs_to_edges=父 / depends_on_edges=阻塞者(F3)
+  ※ events[].entry=日志行；last_entry_offset=下次 --seen-offset；belongs_to_edges=父 / depends_on_edges=上游(F3)
 list（StrandListOutput.strands[]，StrandListItem）：
   id / slug / entry_count / first_summary / last_summary / hidden / strand_type /
   edges / belongs_to_edges / depends_on_edges / status / state_marker /
@@ -151,6 +151,8 @@ add: id / status / provenance / slug / parent_id / edge_type / result；find: id
 hide / unhide: strand_id / status / noop / active_count / closed_count / hidden_count / result（卡片）
 link: source_id / target_id / edge_type / status / result.source / result.target（卡片）
 cutover-v2: applied / source_journal / archive_journal / map_path / certificate_path / source_event_count / imported_event_count / strand_count / entry_count / anchor_count / unresolved_ref_count
+depends（DependsOutput）：id / summary / upstream_count / registered_upstream_count / upstreams[]
+  ※ upstreams[]：id / lifecycle / summary / last_entry / show_command
 卡片/result 形态见 mnema explain card；jq 整型见 mnema explain jq"#,
     },
     TopicInfo {
@@ -224,7 +226,7 @@ entry 形状模板：
   每路工作一条 strand；派生工作用 mnema add --parent <母线>，建 belongs-to 子线。
   子线 entry 首行自报身份：谁派的哪一路；不要把外层启动细节写成工具规范。
   belongs-to 方向是子指父：CHILD belongs-to PARENT，tree 把 CHILD 缩进到 PARENT 下。
-  depends-on 方向是任务指阻塞者：TASK depends-on BLOCKER，BLOCKER 需要先推进。
+  depends-on 方向是任务指上游：TASK depends-on UPSTREAM，供追溯 review context。
 
 纪律：
   交付物落在自己的 strand；外层 stdout 只留一个可追的 strand 指针。
@@ -368,36 +370,6 @@ static CATALOG: &[DiagnosticInfo] = &[
         producer: "lifecycle",
     },
     DiagnosticInfo {
-        code: "W069",
-        severity: Severity::Warning,
-        category: "lifecycle",
-        title: "concurrent marker write",
-        finding: "The same marker type was written by two or more different agents on the same task.",
-        impact: "Concurrent state transitions may conflict — the task's true state is ambiguous.",
-        recovery: RecoveryInfo {
-            kind: RecoveryKind::Manual,
-            command_str: "review agents' actions and decide which one should continue",
-            executable: false,
-            requires_human: true,
-        },
-        producer: "lifecycle",
-    },
-    DiagnosticInfo {
-        code: "W070",
-        severity: Severity::Warning,
-        category: "lifecycle",
-        title: "strand moved under you",
-        finding: "The checkpoint's provenance.producer differs from the producer of the last LogAppended entry on the target strand. Both producers must be present and non-empty for this check to fire; if either is absent the check is silently skipped.",
-        impact: "You may be checkpointing a strand that was last touched by a different agent — your view of the strand's state may be stale.",
-        recovery: RecoveryInfo {
-            kind: RecoveryKind::Manual,
-            command_str: "mnema timeline --since-offset <OFFSET> --links <STRAND_ID>",
-            executable: false,
-            requires_human: true,
-        },
-        producer: "lifecycle",
-    },
-    DiagnosticInfo {
         code: "W071",
         severity: Severity::Warning,
         category: "lifecycle",
@@ -426,22 +398,6 @@ static CATALOG: &[DiagnosticInfo] = &[
             requires_human: true,
         },
         producer: "append",
-    },
-    // ── Health (W062) ───────────────────────────────────
-    DiagnosticInfo {
-        code: "W062",
-        severity: Severity::Warning,
-        category: "health",
-        title: "contradictory decision/constraint",
-        finding: "A [decision] and [constraint] with the same keyword were written within 10 minutes from different strands.",
-        impact: "The decision and constraint may conflict — the governance signal is ambiguous.",
-        recovery: RecoveryInfo {
-            kind: RecoveryKind::Manual,
-            command_str: "re-read both entries to judge the contradiction: mnema show --id <STRAND_ID>",
-            executable: false,
-            requires_human: true,
-        },
-        producer: "health",
     },
     DiagnosticInfo {
         code: "W073",
@@ -722,10 +678,10 @@ mod tests {
 
     #[test]
     fn test_explain_json_known() {
-        let output = cmd_explain("W069", true);
+        let output = cmd_explain("W068", true);
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         assert_eq!(v["ok"], true);
-        assert_eq!(v["code"], "W069");
+        assert_eq!(v["code"], "W068");
         assert!(v["recovery"]["kind"].as_str().is_some());
         assert!(v["recovery"]["command"].as_str().is_some());
     }
@@ -746,9 +702,9 @@ mod tests {
 
     #[test]
     fn test_explain_text_known() {
-        let output = cmd_explain("W062", false);
-        assert!(output.contains("W062"));
-        assert!(output.contains("contradictory"));
+        let output = cmd_explain("W068", false);
+        assert!(output.contains("W068"));
+        assert!(output.contains("deadline"));
     }
 
     #[test]
@@ -822,16 +778,16 @@ mod tests {
 
     #[test]
     fn explain_code_lookup_unchanged() {
-        // W062/w062 still route to diagnostic catalog (not topic lookup).
-        let upper = cmd_explain("W062", true);
+        // W068/w068 still route to diagnostic catalog (not topic lookup).
+        let upper = cmd_explain("W068", true);
         let v: serde_json::Value = serde_json::from_str(&upper).expect("valid JSON");
         assert_eq!(v["ok"], true);
-        assert_eq!(v["code"], "W062");
+        assert_eq!(v["code"], "W068");
 
-        let lower = cmd_explain("w062", true);
+        let lower = cmd_explain("w068", true);
         let v2: serde_json::Value = serde_json::from_str(&lower).expect("valid JSON");
         assert_eq!(v2["ok"], true);
-        assert_eq!(v2["code"], "W062");
+        assert_eq!(v2["code"], "W068");
     }
 
     #[test]
@@ -878,8 +834,8 @@ mod tests {
     #[test]
     fn json_topic_fields_match_serialization() {
         use crate::output::{
-            EdgesOutput, OrientOutput, SearchOutput, StrandDetailOutput, StrandListItem,
-            TimelineOutput,
+            DependsOutput, EdgesOutput, OrientOutput, SearchOutput, StrandDetailOutput,
+            StrandListItem, TimelineOutput,
         };
         let topic = topic_lookup("json").expect("json topic must exist");
 
@@ -989,6 +945,23 @@ mod tests {
             );
         }
 
+        // depends → DependsOutput
+        let depends_sample = DependsOutput {
+            id: "task".to_string(),
+            summary: "task".to_string(),
+            upstream_count: 1,
+            registered_upstream_count: 1,
+            upstreams: vec![],
+        };
+        let v = serde_json::to_value(&depends_sample).expect("serialize DependsOutput");
+        for key in v.as_object().unwrap().keys() {
+            assert!(
+                topic.body.contains(key.as_str()),
+                "json topic missing depends field: {}",
+                key
+            );
+        }
+
         // doctor edges → EdgesOutput
         let edges_sample = EdgesOutput {
             open_frictions: vec![],
@@ -1011,10 +984,7 @@ mod tests {
     fn test_all_codes_present() {
         let codes = all_codes();
         assert!(codes.contains(&"W059"));
-        assert!(codes.contains(&"W062"));
         assert!(codes.contains(&"W068"));
-        assert!(codes.contains(&"W069"));
-        assert!(codes.contains(&"W070"));
         assert!(codes.contains(&"W071"));
         assert!(codes.contains(&"W073"));
         assert!(codes.contains(&"W074"));
@@ -1022,7 +992,7 @@ mod tests {
         assert!(codes.contains(&"W076"));
         assert_eq!(
             codes.len(),
-            10,
+            7,
             "catalog size changed — update this test deliberately"
         );
     }
@@ -1036,13 +1006,13 @@ mod tests {
         //   W066 (v0 migration finished — journal scan found no residue).
         // E053/E056 are NOT in this list: reserved (commented out in the
         // catalog) for completion-pair semantics once markers stabilise.
-        // W070/W071 were previously in this list as removed external-workflow
-        // codes; they have been revived with new lifecycle semantics for the
-        // checkpoint command (strand-moved and closed-strand guards) — see
-        // git history for the old meanings.
+        // W062/W069/W070 were removed 2026-07 as semantic-subtraction codes
+        // (health/concurrency/producer guards — judgment left to agents).
+        // W071 was previously in this list as a removed external-workflow code;
+        // it has been revived for checkpoint closed-strand guard — see git history.
         for code in [
-            "E047", "W058", "W065", "W067", "W072", "E081", "W081", "E082", "W082", "E083", "W083",
-            "E084", "W085", "E055", "E057", "E058", "W066",
+            "E047", "W058", "W062", "W065", "W067", "W069", "W070", "W072", "E081", "W081",
+            "E082", "W082", "E083", "W083", "E084", "W085", "E055", "E057", "E058", "W066",
         ] {
             assert!(lookup(code).is_none(), "removed code {} reappeared", code);
         }
@@ -1059,7 +1029,7 @@ mod tests {
 
     #[test]
     fn test_explain_json_recovery_fields() {
-        let output = cmd_explain("W062", true);
+        let output = cmd_explain("W071", true);
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let recovery = &v["recovery"];
         assert_eq!(recovery["executable"], false);
@@ -1068,7 +1038,7 @@ mod tests {
             recovery["command"]
                 .as_str()
                 .unwrap()
-                .contains("contradiction")
+                .contains("mnema list")
         );
     }
 
@@ -1131,21 +1101,6 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         assert_eq!(v["ok"], true);
         assert_eq!(v["code"], "W059");
-        assert_eq!(v["recovery"]["executable"], false);
-        assert_eq!(v["recovery"]["requires_human"], true);
-    }
-
-    #[test]
-    fn test_w070_can_explain() {
-        let info = lookup("W070").expect("W070 should be in catalog");
-        assert_eq!(info.code, "W070");
-        assert_eq!(info.title, "strand moved under you");
-        assert!(matches!(info.severity, Severity::Warning));
-        assert_eq!(info.category, "lifecycle");
-        let output = cmd_explain("W070", true);
-        let v: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
-        assert_eq!(v["ok"], true);
-        assert_eq!(v["code"], "W070");
         assert_eq!(v["recovery"]["executable"], false);
         assert_eq!(v["recovery"]["requires_human"], true);
     }

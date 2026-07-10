@@ -206,7 +206,7 @@ pub struct ProjectedStrand {
     pub belongs_to_edges: Vec<String>,
     /// Target IDs of edges whose edge_type is "depends-on" (F3). Subset of
     /// `edges`. Makes depends-on a typed, queryable view instead of write-only:
-    /// the targets are this strand's blockers (SOURCE depends-on TARGET).
+    /// the targets are this strand's review upstreams (SOURCE depends-on TARGET).
     pub depends_on_edges: Vec<String>,
     pub hidden: bool,
     pub strand_type: Option<String>,
@@ -1016,7 +1016,7 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
                 .filter(|i| i.edge_type.as_deref() == Some("belongs-to"))
                 .map(|i| i.target.clone()),
         );
-        // depends-on subset (F3): typed view of blockers.
+        // depends-on subset (F3): typed view of review upstreams.
         let depends_on_edges: Vec<String> = dedup_preserve_order(
             live.iter()
                 .filter(|i| i.edge_type.as_deref() == Some("depends-on"))

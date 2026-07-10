@@ -1106,11 +1106,6 @@ pub(crate) fn plan_checkpoint(
             false,
         )
     })?;
-    let checkpoint_producer = provenance_val
-        .as_ref()
-        .and_then(|p| p.get("producer"))
-        .and_then(|v| v.as_str());
-    let w070 = diagnostics::check_w070_strand_moved(events, &strand.id, checkpoint_producer);
     let w071 = diagnostics::check_w071_closed_strand(strand);
     let w076 = diagnostics::check_w076_seen_offset(&strand.id, req.seen_offset, strand_last_offset);
 
@@ -1141,17 +1136,6 @@ pub(crate) fn plan_checkpoint(
 
     let mut warnings = Vec::new();
     let mut warning_lines = Vec::new();
-    if let Some((code, detail)) = w070 {
-        warnings.push(output::CheckpointWarningOutput {
-            code: code.to_string(),
-            detail: detail.clone(),
-            seen_offset: None,
-            strand_last_offset: None,
-            seen_gap: None,
-            catch_up: None,
-        });
-        warning_lines.push((code, detail));
-    }
     if let Some((code, detail)) = w071 {
         warnings.push(output::CheckpointWarningOutput {
             code: code.to_string(),

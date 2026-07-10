@@ -6,6 +6,7 @@ struct StrandInfo {
     id: String,
     slug: Option<String>,
     summary: String,
+    last_entry: String,
     status: String,
     state_marker: Option<String>,
     state_offset: usize,
@@ -49,28 +50,27 @@ pub struct OrientForestNode {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct DependsBlocker {
+pub(crate) struct DependsUpstream {
     pub id: String,
-    pub status: String,
-    pub closed: bool,
+    pub lifecycle: String,
     pub summary: String,
+    pub last_entry: String,
+    pub show_command: String,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct DependsAnalysis {
+pub(crate) struct DependsReview {
     pub id: String,
     pub summary: String,
-    pub ready: bool,
-    pub open_blocker_count: usize,
-    pub blockers: Vec<DependsBlocker>,
-    pub critical_path: Vec<String>,
+    pub upstream_count: usize,
+    pub registered_upstream_count: usize,
+    pub upstreams: Vec<DependsUpstream>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EdgeFindingKind {
     MultipleBelongsToParents,
     ClosedBelongsToParent,
-    DependsOnCycle,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +94,7 @@ impl StrandGraph {
                 id: s.id.clone(),
                 slug: s.slug.clone(),
                 summary: s.first_summary().to_string(),
+                last_entry: s.last_summary().to_string(),
                 status: s.state().to_string(),
                 state_marker: s.state_marker.clone(),
                 state_offset: s.state_offset,
@@ -195,61 +196,36 @@ impl StrandGraph {
         })
     }
 
-    pub(crate) fn depends_analysis(&self, id: &str) -> Option<DependsAnalysis> {
+    pub(crate) fn depends_review(&self, id: &str) -> Option<DependsReview> {
         let full_id = self.resolve_id(id)?;
         let node = self.nodes.get(&full_id)?;
-        let blockers: Vec<DependsBlocker> = self
+        let upstreams: Vec<DependsUpstream> = self
             .depends
             .get(&full_id)
             .map(|v| {
                 v.iter()
-                    .filter_map(|b| self.nodes.get(b))
-                    .map(|b| {
-                        let closed = b.status.starts_with("closed");
-                        DependsBlocker {
-                            id: b.id.clone(),
-                            status: b.status.clone(),
-                            closed,
-                            summary: b.summary.clone(),
-                        }
+                    .filter_map(|up_id| self.nodes.get(up_id))
+                    .map(|up| DependsUpstream {
+                        id: up.id.clone(),
+                        lifecycle: up.status.clone(),
+                        summary: up.summary.clone(),
+                        last_entry: up.last_entry.clone(),
+                        show_command: format!("mnema show --id {} --tail 8", up.id),
                     })
                     .collect()
             })
             .unwrap_or_default();
-        let open_blocker_count = blockers.iter().filter(|b| !b.closed).count();
-        let mut seen = HashSet::new();
-        seen.insert(full_id.clone());
-        let critical_path = self.longest_open_chain(&full_id, &mut seen);
-        Some(DependsAnalysis {
+        let registered_upstream_count = upstreams
+            .iter()
+            .filter(|u| u.lifecycle == "registered")
+            .count();
+        Some(DependsReview {
             id: full_id,
             summary: node.summary.clone(),
-            ready: open_blocker_count == 0,
-            open_blocker_count,
-            blockers,
-            critical_path,
+            upstream_count: upstreams.len(),
+            registered_upstream_count,
+            upstreams,
         })
-    }
-
-    fn longest_open_chain(&self, node: &str, seen: &mut HashSet<String>) -> Vec<String> {
-        let mut best = Vec::new();
-        if let Some(ups) = self.depends.get(node) {
-            for up in ups {
-                let Some(info) = self.nodes.get(up) else {
-                    continue;
-                };
-                if info.status.starts_with("closed") || seen.contains(up) {
-                    continue;
-                }
-                seen.insert(up.clone());
-                let mut chain = self.longest_open_chain(up, seen);
-                seen.remove(up);
-                chain.insert(0, up.clone());
-                if chain.len() > best.len() {
-                    best = chain;
-                }
-            }
-        }
-        best
     }
 
     pub(crate) fn edge_findings(&self) -> Vec<EdgeFinding> {
@@ -282,38 +258,6 @@ impl StrandGraph {
                             info.id, parent
                         ),
                     });
-                }
-            }
-        }
-
-        let mut color: HashMap<String, u8> = HashMap::new();
-        for start in self.depends.keys().cloned().collect::<Vec<_>>() {
-            if color.get(&start).copied().unwrap_or(0) != 0 {
-                continue;
-            }
-            let mut stack: Vec<(String, usize)> = vec![(start.clone(), 0)];
-            color.insert(start, 1);
-            while let Some((node, idx)) = stack.last().cloned() {
-                let children = self.depends.get(&node).cloned().unwrap_or_default();
-                if idx < children.len() {
-                    stack.last_mut().unwrap().1 += 1;
-                    let nx = children[idx].clone();
-                    match color.get(&nx).copied().unwrap_or(0) {
-                        1 => findings.push(EdgeFinding {
-                            kind: EdgeFindingKind::DependsOnCycle,
-                            source_id: node.clone(),
-                            target_id: Some(nx.clone()),
-                            detail: format!("depends-on cycle edge {} -> {} - deadlock", node, nx),
-                        }),
-                        0 => {
-                            color.insert(nx.clone(), 1);
-                            stack.push((nx, 0));
-                        }
-                        _ => {}
-                    }
-                } else {
-                    color.insert(node, 2);
-                    stack.pop();
                 }
             }
         }
@@ -450,39 +394,50 @@ mod tests {
     }
 
     #[test]
-    fn depends_analysis_ignores_closed_upstream_in_critical_path() {
+    fn depends_review_lists_upstream_lifecycle_facts() {
         let strands = vec![
             strand("task", vec![], vec!["open", "closed"], "registered", 1),
             strand("open", vec![], vec![], "registered", 2),
             strand("closed", vec![], vec![], "closed:done", 3),
         ];
         let graph = StrandGraph::from_strands(&strands);
-        let analysis = graph.depends_analysis("task").unwrap();
-        assert!(!analysis.ready);
-        assert_eq!(analysis.open_blocker_count, 1);
-        assert_eq!(analysis.critical_path, vec!["open".to_string()]);
+        let review = graph.depends_review("task").unwrap();
+        assert_eq!(review.upstream_count, 2);
+        assert_eq!(review.registered_upstream_count, 1);
+        assert_eq!(review.upstreams.len(), 2);
+        assert!(review
+            .upstreams
+            .iter()
+            .any(|u| u.id == "open" && u.lifecycle == "registered"));
+        assert!(review
+            .upstreams
+            .iter()
+            .any(|u| u.id == "closed" && u.lifecycle == "closed:done"));
+        assert!(review.upstreams[0].show_command.contains("show --id"));
     }
 
     #[test]
-    fn edge_findings_do_not_warn_on_closed_depends_upstream() {
+    fn edge_findings_do_not_warn_on_closed_depends_upstream_or_cycle() {
         let strands = vec![
             strand("task", vec![], vec!["closed"], "registered", 1),
             strand("closed", vec![], vec![], "closed:done", 2),
+            strand("a", vec![], vec!["b"], "registered", 3),
+            strand("b", vec![], vec!["a"], "registered", 4),
         ];
         let graph = StrandGraph::from_strands(&strands);
         let findings = graph.edge_findings();
         assert!(
             findings.is_empty(),
-            "closed depends-on upstream is review context, not lint"
+            "depends-on upstreams and cycles are review context, not lint"
         );
     }
+
     #[test]
-    fn edge_findings_reports_cycle_and_multi_parent() {
+    fn edge_findings_reports_multi_parent_belongs_to() {
         let strands = vec![
-            strand("a", vec!["p1", "p2"], vec!["b"], "registered", 1),
-            strand("b", vec![], vec!["a"], "registered", 2),
-            strand("p1", vec![], vec![], "registered", 3),
-            strand("p2", vec![], vec![], "registered", 4),
+            strand("a", vec!["p1", "p2"], vec![], "registered", 1),
+            strand("p1", vec![], vec![], "registered", 2),
+            strand("p2", vec![], vec![], "registered", 3),
         ];
         let graph = StrandGraph::from_strands(&strands);
         let findings = graph.edge_findings();
@@ -490,11 +445,6 @@ mod tests {
             findings
                 .iter()
                 .any(|f| f.kind == EdgeFindingKind::MultipleBelongsToParents)
-        );
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.kind == EdgeFindingKind::DependsOnCycle)
         );
     }
 }

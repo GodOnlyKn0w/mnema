@@ -82,8 +82,6 @@ fn humanize_duration_days() {
     assert_eq!(humanize_duration(86400 * 25), "25d");
 }
 
-// ── W070: strand moved under you ───────────────────────────────────────
-
 #[test]
 fn show_search_unchanged() {
     // Smoke test that existing cmd_show, cmd_search still work.
@@ -495,14 +493,12 @@ fn handles_list_search_ids_intact() {
 
 // ── Test 4 ────────────────────────────────────────────────────────────
 
-// run_journal_diagnostics: detail strings for W068/W069/W062 use shorten(id)
+// run_journal_diagnostics: detail strings for W068 use shorten(id)
 // (12-char prefix), which is a legal parameter. No '…' in detail strings.
-// W070/W071 details contain no commands, so try_parse_example is N/A for them.
 
 #[test]
 fn handles_diag_details_parse() {
     let _env = setup();
-    // Build a strand that fires W068 (overdue deadline).
     let id_a = create_strand("deadline strand for diag test");
     cmd_append(
         Some("[deadline] finish by=2000-01-01"),
@@ -516,40 +512,12 @@ fn handles_diag_details_parse() {
     )
     .unwrap();
 
-    // Build cross-strand W062 (decision vs constraint with shared keyword).
-    let id_b = create_strand("decision strand");
-    let id_c = create_strand("constraint strand");
-    cmd_append(
-        Some("[decision] adopt postgres for persistence"),
-        None,
-        false,
-        false,
-        None,
-        Some(&id_b),
-        None,
-        None,
-    )
-    .unwrap();
-    cmd_append(
-        Some("[constraint] postgres writes forbidden in staging"),
-        None,
-        false,
-        false,
-        None,
-        Some(&id_c),
-        None,
-        None,
-    )
-    .unwrap();
-
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
     let diags = diagnostics::run_journal_diagnostics(&raw, chrono::Utc::now());
 
     for (code, detail) in &diags {
-        // No truncation marker in detail strings (id handles inside details
-        // use shorten, which is a valid prefix, not a truncated string).
         assert!(
             !detail.contains('\u{2026}') && !detail.contains("..."),
             "diag {} detail must not contain truncation marker: '{}'",
@@ -557,14 +525,10 @@ fn handles_diag_details_parse() {
             detail
         );
 
-        // For W062: detail contains strand id handles (shorten = 12-char prefix).
-        // Verify any embedded id-like hex strings (12 chars) are prefix of a known strand.
-        if *code == "W062" || *code == "W068" || *code == "W069" {
-            // Extract 12-char hex tokens from detail.
+        if *code == "W068" {
             for tok in detail.split_whitespace() {
                 let tok = tok.trim_matches(|c: char| !c.is_ascii_hexdigit());
                 if tok.len() == 12 && tok.chars().all(|c| c.is_ascii_hexdigit()) {
-                    // Must be a prefix of some known strand id.
                     let all_strands = projection::project_strands(&events, true);
                     let is_valid_prefix = all_strands.iter().any(|s| s.id.starts_with(tok));
                     assert!(
@@ -574,17 +538,6 @@ fn handles_diag_details_parse() {
                     );
                 }
             }
-        }
-
-        // W070/W071: details contain no mnema commands (catalog confirms
-        // their recovery.executable is false). We verify no false-positive parse attempt.
-        // (No try_parse_example call here — the detail strings are prose, not commands.)
-        if *code == "W070" || *code == "W071" {
-            assert!(
-                !detail.contains("mnema "),
-                "W070/W071 detail must not embed a mnema command: '{}'",
-                detail
-            );
         }
     }
 }

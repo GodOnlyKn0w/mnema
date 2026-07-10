@@ -1904,9 +1904,8 @@ fn print_tree_text(node: &tree::TreeNode, depth: usize) {
     }
 }
 
-/// depends-on DAG analysis for one strand (F6 / W2): direct blockers and their
-/// state, readiness (all direct blockers closed), and the critical path — the
-/// longest chain of still-open upstreams. Built on the F3 typed projection.
+/// depends-on review for one strand: upstream lifecycle facts and trace handles.
+/// Built on the F3 typed projection; lifecycle is evidence, not a gate verdict.
 pub(crate) fn cmd_depends(id: &str, format_json: Option<&str>) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
@@ -1919,47 +1918,39 @@ pub(crate) fn cmd_depends(id: &str, format_json: Option<&str>) -> Result<(), Str
         current_max_offset,
     )?;
     let graph = graph::StrandGraph::from_strands(&strands);
-    let analysis = graph
-        .depends_analysis(&full_id)
+    let review = graph
+        .depends_review(&full_id)
         .ok_or_else(|| format!("strand {} not found", id))?;
 
     if format_json == Some("json") {
-        let output = output::DependsOutput::from(&analysis);
+        let output = output::DependsOutput::from(&review);
         println!("{}", serde_json::to_string(&output).expect("serialize"));
     } else {
         println!(
-            "depends-on analysis: {}  {}",
-            shorten(&analysis.id),
-            analysis.summary.chars().take(50).collect::<String>()
+            "depends-on review: {}  {}",
+            shorten(&review.id),
+            review.summary.chars().take(50).collect::<String>()
         );
         println!(
-            "  ready: {}  ({} open blocker(s))",
-            if analysis.ready { "yes" } else { "no" },
-            analysis.open_blocker_count
+            "  upstreams: {} ({} registered)",
+            review.upstream_count, review.registered_upstream_count
         );
-        if analysis.blockers.is_empty() {
-            println!("  direct blockers: (none)");
+        if review.upstreams.is_empty() {
+            println!("  (none)");
         } else {
-            println!("  direct blockers:");
-            for b in &analysis.blockers {
-                let mark = if b.closed { "closed" } else { "OPEN  " };
+            for up in &review.upstreams {
                 println!(
                     "    [{}] {}  {}",
-                    mark,
-                    shorten(&b.id),
-                    b.summary.chars().take(45).collect::<String>()
+                    up.lifecycle,
+                    shorten(&up.id),
+                    up.summary.chars().take(45).collect::<String>()
                 );
+                println!(
+                    "      last: {}",
+                    up.last_entry.chars().take(60).collect::<String>()
+                );
+                println!("      show: {}", up.show_command);
             }
-        }
-        if analysis.critical_path.is_empty() {
-            println!("  critical path: (none - no open upstreams)");
-        } else {
-            let chain: Vec<String> = analysis.critical_path.iter().map(|c| shorten(c)).collect();
-            println!(
-                "  critical path (longest open chain, len {}): {}",
-                analysis.critical_path.len(),
-                chain.join(" -> ")
-            );
         }
     }
     Ok(())

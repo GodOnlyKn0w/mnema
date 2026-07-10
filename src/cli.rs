@@ -37,7 +37,7 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   find          Resolve a strand id
   pick          Pick a strand from an arrow-key menu; append reads body from stdin
   tree          Strand forest (belongs-to nesting)
-  depends       depends-on analysis: blockers / readiness / critical path
+  depends       depends-on upstream review context
 
 做 / change:
   add           Create a new strand
@@ -240,8 +240,8 @@ Output:
                      since that entry. Catch-up command shown when delta > 0.
   catch-up           mnema timeline --since-offset <N> --links <STRAND_ID>
                      (emitted verbatim when journal delta > 0)
-  warnings           W070 (strand moved under you), W071 (closed strand), and
-                     W076 (--seen-offset behind target last_offset) fire as scar
+  warnings           W071 (closed strand) and W076 (--seen-offset behind target
+                     last_offset) fire as scar
                      lines in text output; in json output, a \"warnings\" array
                      is always present.
                      These warnings are informational — exit is still 0.
@@ -458,7 +458,7 @@ Direction (read SOURCE first): the edge always points from SOURCE to TARGET.
 
   belongs-to   SOURCE belongs to TARGET — source is the child, target is the
                parent. tree and orient --tree nest SOURCE under TARGET.
-  depends-on   SOURCE depends on TARGET (TARGET must advance first). [default]
+  depends-on   SOURCE depends on TARGET (review upstream). [default]
 
   (why is no longer a link (D2): a reason is an entry rationale, not a
    strand edge. Record the reason in the entry text itself.)
@@ -466,8 +466,8 @@ Direction (read SOURCE first): the edge always points from SOURCE to TARGET.
 Examples:
   mnema link <CHILD> <PARENT> --edge-type belongs-to
                (CHILD nests under PARENT in tree / orient --tree)
-  mnema link <TASK> <BLOCKER> --edge-type depends-on
-               (TASK waits on BLOCKER)
+  mnema link <TASK> <UPSTREAM> --edge-type depends-on
+               (TASK cites UPSTREAM for review context)
 
 Forest projection (how belongs-to nests): mnema explain card
 JSON shape: mnema explain json")]
@@ -495,7 +495,7 @@ Append-only: the original link stays in the journal; the read projection drops
 the edge. edge_type must match the link being removed (belongs-to / depends-on).
 
 Example:
-  mnema unlink <TASK> <BLOCKER> --edge-type depends-on")]
+  mnema unlink <TASK> <UPSTREAM> --edge-type depends-on")]
     Unlink {
         /// Source strand ID (prefix match) — same SOURCE as the link being removed.
         source: String,
@@ -595,11 +595,11 @@ Examples:
     /// Explain a diagnostic code or encyclopaedia topic
     ///
     /// Namespace rule: diagnostic codes begin with an uppercase letter
-    /// (W062, E053); topics are all-lowercase (card, markers, retry, json, jq, grammar, writing, collaboration).
+    /// (W068, E053); topics are all-lowercase (card, markers, retry, json, jq, grammar, writing, collaboration).
     /// The two namespaces are mechanically disjoint.
     #[command(after_help = "\
 Namespaces:
-  Diagnostic codes   uppercase-initial: W062, E053, w062 (case-insensitive)
+  Diagnostic codes   uppercase-initial: W068, E053, w068 (case-insensitive)
   Topics             all-lowercase:     card, markers, retry, json, jq, grammar, writing, collaboration
 
 Topics:
@@ -613,7 +613,7 @@ Topics:
   collaboration  协作 forest：多路工作在 journal 里的形状
 
 Examples:
-  mnema explain W062
+  mnema explain W068
   mnema explain card
   mnema explain json
   mnema explain markers
@@ -621,7 +621,7 @@ Examples:
   mnema explain grammar
   mnema explain writing
   mnema explain collaboration
-  mnema explain W062 --format json
+  mnema explain W068 --format json
   mnema explain card --json")]
     Explain {
         /// Diagnostic code (e.g. W068) or topic name (e.g. card)
@@ -772,9 +772,8 @@ JSON shape: mnema explain json")]
     /// Inspect depends-on upstreams as review context
     #[command(after_help = "\
 depends-on is an attention edge for review and handoff context, not an
-execution gate. The legacy ready/open-blocker fields remain for compatibility;
-prefer upstream lifecycle facts when making decisions. Built on the typed
-depends-on projection (F3).
+execution gate. Output lists upstream lifecycle facts and show handles;
+lifecycle is evidence, not a verdict. Built on the typed depends-on projection (F3).
 
 Examples:
   mnema depends <TASK>

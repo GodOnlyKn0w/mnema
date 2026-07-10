@@ -117,7 +117,7 @@ impl<'a> ExplainUnknownOutput<'a> {
             input,
             error: format!("unknown code or topic: {}", input),
             available_topics,
-            hint: "diagnostic codes: mnema explain W062 etc",
+            hint: "diagnostic codes: mnema explain W068 etc",
         }
     }
 }
@@ -305,18 +305,22 @@ impl From<&crate::tree::TreeNode> for TreeNodeOutput {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct DependsBlockerOutput {
+pub(crate) struct DependsUpstreamOutput {
     pub(crate) id: String,
-    pub(crate) status: String,
-    pub(crate) closed: bool,
+    pub(crate) lifecycle: String,
+    pub(crate) summary: String,
+    pub(crate) last_entry: String,
+    pub(crate) show_command: String,
 }
 
-impl From<&crate::graph::DependsBlocker> for DependsBlockerOutput {
-    fn from(blocker: &crate::graph::DependsBlocker) -> Self {
-        DependsBlockerOutput {
-            id: blocker.id.clone(),
-            status: blocker.status.clone(),
-            closed: blocker.closed,
+impl From<&crate::graph::DependsUpstream> for DependsUpstreamOutput {
+    fn from(upstream: &crate::graph::DependsUpstream) -> Self {
+        DependsUpstreamOutput {
+            id: upstream.id.clone(),
+            lifecycle: upstream.lifecycle.clone(),
+            summary: upstream.summary.clone(),
+            last_entry: upstream.last_entry.clone(),
+            show_command: upstream.show_command.clone(),
         }
     }
 }
@@ -325,27 +329,23 @@ impl From<&crate::graph::DependsBlocker> for DependsBlockerOutput {
 pub(crate) struct DependsOutput {
     pub(crate) id: String,
     pub(crate) summary: String,
-    pub(crate) ready: bool,
-    pub(crate) open_blocker_count: usize,
-    pub(crate) blockers: Vec<DependsBlockerOutput>,
-    pub(crate) critical_path: Vec<String>,
-    pub(crate) critical_path_len: usize,
+    pub(crate) upstream_count: usize,
+    pub(crate) registered_upstream_count: usize,
+    pub(crate) upstreams: Vec<DependsUpstreamOutput>,
 }
 
-impl From<&crate::graph::DependsAnalysis> for DependsOutput {
-    fn from(analysis: &crate::graph::DependsAnalysis) -> Self {
+impl From<&crate::graph::DependsReview> for DependsOutput {
+    fn from(review: &crate::graph::DependsReview) -> Self {
         DependsOutput {
-            id: analysis.id.clone(),
-            summary: analysis.summary.clone(),
-            ready: analysis.ready,
-            open_blocker_count: analysis.open_blocker_count,
-            blockers: analysis
-                .blockers
+            id: review.id.clone(),
+            summary: review.summary.clone(),
+            upstream_count: review.upstream_count,
+            registered_upstream_count: review.registered_upstream_count,
+            upstreams: review
+                .upstreams
                 .iter()
-                .map(DependsBlockerOutput::from)
+                .map(DependsUpstreamOutput::from)
                 .collect(),
-            critical_path: analysis.critical_path.clone(),
-            critical_path_len: analysis.critical_path.len(),
         }
     }
 }
@@ -543,8 +543,7 @@ pub struct StrandListItem {
     pub strand_type: Option<String>,
     pub edges: Vec<String>,
     /// Typed subsets of `edges` (additive; schema only grows). `belongs_to_edges`
-    /// are this strand's parents; `depends_on_edges` are its blockers (F3 — makes
-    /// depends-on a queryable typed view instead of write-only).
+    /// are this strand's parents; `depends_on_edges` are its review upstreams (F3).
     pub belongs_to_edges: Vec<String>,
     pub depends_on_edges: Vec<String>,
     pub status: String,

@@ -18,7 +18,7 @@ fn collaboration_exemplar_line() -> Option<String> {
 }
 
 /// Routing order:
-///   1. Diagnostic code lookup (case-insensitive; W062, w062, etc.)
+///   1. Diagnostic code lookup (case-insensitive; W068, w068, etc.)
 ///   2. Topic lookup (input lowercased; card, markers, retry, json, jq, grammar, collaboration)
 ///   3. Error with available-topics list and diagnostic-code hint
 pub fn cmd_explain(input: &str, format_json: bool) -> String {
@@ -88,7 +88,7 @@ pub fn cmd_explain(input: &str, format_json: bool) -> String {
         })
     } else {
         format!(
-            "unknown code or topic: {}\n  topics: {}\n  diagnostic codes: mnema explain W062 etc",
+            "unknown code or topic: {}\n  topics: {}\n  diagnostic codes: mnema explain W068 etc",
             input,
             available_topics.join(", "),
         )

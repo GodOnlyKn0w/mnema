@@ -501,17 +501,7 @@ fn catalog_referenced_markers_are_writable() {
         ];
 
     // Markers the emitter code parses (from run_journal_diagnostics).
-    let emitter_markers: &[&str] = &[
-        "[deadline]",
-        "[decision]",
-        "[constraint]",
-        "[verified]",
-        "[done]",
-        "[cancelled]",
-        "[failed]",
-        "[merged]",
-        "[ended]",
-    ];
+    let emitter_markers: &[&str] = &["[deadline]"];
 
     let mut all_markers: std::collections::HashSet<String> = std::collections::HashSet::new();
 
