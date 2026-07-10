@@ -133,7 +133,7 @@ list（StrandListOutput.strands[]，StrandListItem）：
   edges / belongs_to_edges / depends_on_edges / status / state_marker /
   state_offset / last_entry_ts / last_entry_offset
 orient（OrientOutput）：
-  max_offset / active / closed_count / hidden_count / integrity / notices / remind / pause / stale_count
+  max_offset / active / closed_count / hidden_count / integrity / notices / since_command / delegation_command / remind / pause / stale_count
   ※ active[] 卡片见 card；stale_count=活跃且末条 silent≥2h（指针 list --stale 2h）
 search（SearchOutput）：
   matches / count / query / marker
@@ -243,6 +243,24 @@ entry 形状模板：
   mnema depends --id <任务线>
   mnema depends --under <母线>
   mnema doctor edges --under <母线>"#,
+    },
+    TopicInfo {
+        name: "delegation",
+        title: "递归委派——strand 是异步交接面",
+        body: r#"委派在任意深度使用同一套 strand 语义，不存在特殊的顶层/二阶 worker 类型。
+
+1. 每一路先创建一个 child：echo "<task-specific instruction>" | mnema add --parent <PARENT>。
+2. body 只写任务专属指令；背景通过 0..N refs 连接，refs 默认不展开。
+3. worker 从自己的 strand 读取任务，把进展、证据与结论 append 回该线，收工用 close。
+4. 委派是异步的：协调者启动 worker 后继续其他工作，不轮询；到综合/验收点再读 close、entries、diff 与 tests。
+5. 任意深度继续委派时仍是 add --parent + refs；是否允许下派由任务/harness 授权。
+6. 并发写显式使用完整 strand id，不把 --last 当多 agent 默认。
+7. 进程退出和 stdout 自报不等于工单成败；journal 中的事实才是交接依据。
+8. 进程、模型、worktree、超时与重试由 harness 管理，Core help 不绑定厂商启动命令。
+
+入口：mnema orient --id <CHILD>
+增量读取：mnema timeline --since-offset <N>
+查看子树：mnema tree --id <PARENT>；mnema depends --under <PARENT>"#,
     },
     TopicInfo {
         name: "grammar",
@@ -780,6 +798,20 @@ mod tests {
     }
 
     #[test]
+    fn delegation_topic_teaches_async_core_boundary_without_vendor_commands() {
+        let topic = topic_lookup("delegation").expect("delegation topic");
+        assert!(topic.body.contains("不轮询"));
+        assert!(topic.body.contains("0..N refs"));
+        assert!(topic.body.contains("harness"));
+        for vendor in ["grok --", "codex exec", "claude -p"] {
+            assert!(
+                !topic.body.contains(vendor),
+                "vendor command leaked: {vendor}"
+            );
+        }
+    }
+
+    #[test]
     fn explain_code_lookup_unchanged() {
         // W068/w068 still route to diagnostic catalog (not topic lookup).
         let upper = cmd_explain("W068", true);
@@ -903,6 +935,8 @@ mod tests {
             hidden_count: 0,
             integrity: "".to_string(),
             notices: vec![],
+            since_command: "mnema timeline --since-offset 0".to_string(),
+            delegation_command: "mnema explain delegation".to_string(),
             remind: "".to_string(),
             pause: "".to_string(),
             stale_count: 0,
@@ -1029,8 +1063,8 @@ mod tests {
         // W071 was previously in this list as a removed external-workflow code;
         // it has been revived for checkpoint closed-strand guard — see git history.
         for code in [
-            "E047", "W058", "W062", "W065", "W067", "W069", "W070", "W072", "E081", "W081",
-            "E082", "W082", "E083", "W083", "E084", "W085", "E055", "E057", "E058", "W066",
+            "E047", "W058", "W062", "W065", "W067", "W069", "W070", "W072", "E081", "W081", "E082",
+            "W082", "E083", "W083", "E084", "W085", "E055", "E057", "E058", "W066",
         ] {
             assert!(lookup(code).is_none(), "removed code {} reappeared", code);
         }
@@ -1052,12 +1086,7 @@ mod tests {
         let recovery = &v["recovery"];
         assert_eq!(recovery["executable"], false);
         assert_eq!(recovery["requires_human"], true);
-        assert!(
-            recovery["command"]
-                .as_str()
-                .unwrap()
-                .contains("mnema list")
-        );
+        assert!(recovery["command"].as_str().unwrap().contains("mnema list"));
     }
 
     #[test]

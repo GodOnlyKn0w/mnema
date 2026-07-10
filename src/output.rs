@@ -211,6 +211,10 @@ pub struct OrientOutput {
     /// Needs-judgment notices (question ③): active strands that look done
     /// (closing-annotation marker on the last entry) but aren't closed.
     pub notices: Vec<String>,
+    /// Cursor command for reading entries appended after this orient snapshot.
+    pub since_command: String,
+    /// Stable discovery pointer for recursive asynchronous delegation semantics.
+    pub delegation_command: String,
     pub remind: String,
     /// Pause full text (question ④) — see ORIENT_PAUSE.
     pub pause: String,
@@ -234,6 +238,8 @@ impl From<(&OrientView, &[ProjectedStrand])> for OrientOutput {
             // Set by orient_plan, which has the event stream / full strand set.
             integrity: String::new(),
             notices: Vec::new(),
+            since_command: format!("mnema timeline --since-offset {}", view.max_offset),
+            delegation_command: "mnema explain delegation".to_string(),
             remind: ORIENT_REMIND.to_string(),
             pause: ORIENT_PAUSE.to_string(),
             stale_count: 0,
@@ -254,6 +260,8 @@ pub struct OrientTreeOutput {
     pub hidden_count: usize,
     pub integrity: String,
     pub notices: Vec<String>,
+    pub since_command: String,
+    pub delegation_command: String,
     pub remind: String,
     pub pause: String,
     /// Same meaning as `OrientOutput.stale_count`.

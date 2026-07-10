@@ -327,6 +327,8 @@ fn orient_tree_json_shape_is_nested() {
         hidden_count: out.hidden_count,
         integrity: out.integrity.clone(),
         notices: out.notices.clone(),
+        since_command: out.since_command.clone(),
+        delegation_command: out.delegation_command.clone(),
         remind: out.remind.clone(),
         pause: out.pause.clone(),
         stale_count: out.stale_count,
@@ -603,6 +605,30 @@ fn orient_is_pure_read() {
     cmd_orient(Some("json"), true, Some(3), false, None).unwrap();
     let after = std::fs::read(&path).unwrap();
     assert_eq!(before, after, "orient must never write to the journal");
+}
+
+#[test]
+fn orient_exposes_incremental_and_delegation_discovery_commands() {
+    let _env = setup();
+    create_strand("orient discovery pointers");
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+    let plan = orient_plan(
+        &events,
+        &OrientRequest {
+            include_hidden: false,
+            limit: None,
+            under: None,
+            allow_selection: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        plan.output.since_command,
+        format!("mnema timeline --since-offset {max_offset}")
+    );
+    assert_eq!(plan.output.delegation_command, "mnema explain delegation");
 }
 
 #[test]
@@ -2080,7 +2106,14 @@ fn under_flag_parses_on_collection_commands() {
         vec!["mnema", "orient", "--id", "0000019dd34b"],
         vec!["mnema", "orient", "--id", "0000019dd34b", "--tree"],
         vec!["mnema", "depends", "--under", "0000019dd34b"],
-        vec!["mnema", "depends", "--under", "0000019dd34b", "--format", "json"],
+        vec![
+            "mnema",
+            "depends",
+            "--under",
+            "0000019dd34b",
+            "--format",
+            "json",
+        ],
         vec!["mnema", "doctor", "edges", "--under", "0000019dd34b"],
         vec!["mnema", "doctor", "edges", "--id", "0000019dd34b"],
         vec![
@@ -2123,7 +2156,10 @@ fn doctor_edges_under_and_id_conflict() {
         "--id",
         "0000019dd34c",
     ]);
-    assert!(result.is_err(), "doctor edges --under and --id must conflict");
+    assert!(
+        result.is_err(),
+        "doctor edges --under and --id must conflict"
+    );
 }
 
 #[test]
@@ -2287,8 +2323,7 @@ fn edges_discipline_candidate_set_shrinks_findings_not_fix_knowledge() {
     let strands = projection::project_strands(&events, true);
     let scope = scope_from_under(Some(&parent), &strands, false, 0).unwrap();
     let ids = scope.resolve_ids(&strands).unwrap();
-    let after_fix =
-        projection::edges_discipline_report_since(&strands, None, Some(&ids));
+    let after_fix = projection::edges_discipline_report_since(&strands, None, Some(&ids));
     assert!(
         !after_fix
             .open_frictions

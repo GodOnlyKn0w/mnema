@@ -933,6 +933,8 @@ pub(crate) fn cmd_orient(
             hidden_count: out.hidden_count,
             integrity: out.integrity.clone(),
             notices: out.notices.clone(),
+            since_command: out.since_command.clone(),
+            delegation_command: out.delegation_command.clone(),
             remind: out.remind.clone(),
             pause: out.pause.clone(),
             stale_count: out.stale_count,
@@ -952,6 +954,8 @@ pub(crate) fn cmd_orient(
                 println!("scope: under {} (SubtreeScope)", root);
             }
             println!("integrity: {}", out.integrity);
+            println!("since: {}", out.since_command);
+            println!("delegation: {}", out.delegation_command);
             print_orient_stale(out.stale_count);
             print_orient_forest(&tree_out.roots, 0);
             if out.active.is_empty() {
@@ -976,6 +980,8 @@ pub(crate) fn cmd_orient(
             println!("scope: under {} (SubtreeScope)", root);
         }
         println!("integrity: {}", out.integrity);
+        println!("since: {}", out.since_command);
+        println!("delegation: {}", out.delegation_command);
         print_orient_stale(out.stale_count);
         for s in &out.active {
             let type_info = s
