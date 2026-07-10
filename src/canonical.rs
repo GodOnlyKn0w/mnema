@@ -554,6 +554,15 @@ pub(crate) fn random_genesis_seed() -> Result<String, String> {
     Ok(hex::encode(bytes))
 }
 
+pub(crate) fn author_from_provenance(provenance: &Value) -> Option<String> {
+    provenance
+        .as_object()
+        .and_then(|object| object.get("producer"))
+        .and_then(Value::as_str)
+        .filter(|producer| !producer.trim().is_empty())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,5 +904,16 @@ mod tests {
                 .unwrap();
         anchor.created_at = "2026-07-11T00:00:01Z".to_string();
         assert!(anchor.validate().unwrap_err().contains("digest mismatch"));
+    }
+
+    #[test]
+    fn author_is_mechanically_projected_from_provenance_producer() {
+        assert_eq!(
+            author_from_provenance(&json!({"producer": "grok-4.5", "attempt": 2})),
+            Some("grok-4.5".to_string())
+        );
+        assert_eq!(author_from_provenance(&json!({"producer": 7})), None);
+        assert_eq!(author_from_provenance(&json!({"producer": "  "})), None);
+        assert_eq!(author_from_provenance(&Value::Null), None);
     }
 }
