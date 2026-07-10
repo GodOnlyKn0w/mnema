@@ -446,7 +446,8 @@ v3 journal 使用一个小型 manifest 作为唯一激活点：
 - `active-journal.json` 声明活动 schema、活动文件、journal identity 和 migration identity；
 - manifest 中 active artifact 必须位于 `journals/`，v2 history、map 与 certificate 必须位于 `history/`；路径统一使用 `/`、彼此唯一且不能逃逸目录；
 - 普通读写只跟随 manifest 指向的 v3 文件；
-- v2 source 在验证后进入 `history/`，只提供显式历史读取和迁移证明；
+- prepare 阶段把 v2 source 的同字节副本（或同文件系统硬链接）持久化到 `history/` 并校验 hash；不得在 manifest commit 前移动或删除旧活动路径，否则旧 resolver 会提前失去完整活动状态；
+- manifest commit 后 `history/` 中的 v2 artifact 只提供显式历史读取和迁移证明；旧活动路径若仍存在只是 legacy shadow，默认读写忽略并由 Doctor 报告；
 - 激活 manifest 前，v2 仍是完整活动状态；原子替换 manifest 后，v3 是完整活动状态；
 - manifest 创建成功就是 commit point；若随后目录持久化同步失败，结果必须表达“已激活但耐久性未确认”，不能倒报为未激活；
 - prepared artifacts、mapping、certificate 和 target 全部验证并持久化后才能替换 manifest；
