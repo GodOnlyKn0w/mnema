@@ -900,6 +900,8 @@ fn cmd_init() -> Result<(), String> {
             );
             return Ok(());
         }
+        std::fs::remove_file(&legacy)
+            .map_err(|e| format!("remove empty legacy journal before fresh v3 init: {e}"))?;
     }
 
     // Fresh directory: create pure v3 journal (final anchor over 0 records) +

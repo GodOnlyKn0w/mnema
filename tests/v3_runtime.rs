@@ -143,3 +143,36 @@ fn fresh_v3_child_link_uses_actual_genesis_ids() {
     );
     success(run(dir.path(), &["tree", "--id", parent_id], None));
 }
+
+#[test]
+fn v3_doctor_follows_manifest_and_detects_active_tampering() {
+    let dir = tempfile::tempdir().unwrap();
+    success(run(dir.path(), &["init"], None));
+    success(run(dir.path(), &["add"], Some("root\n")));
+
+    let healthy = success(run(dir.path(), &["doctor", "journal"], None));
+    assert!(healthy.contains("schema: v3"), "{healthy}");
+    assert!(healthy.contains("integrity errors: 0"), "{healthy}");
+
+    let journal = dir.path().join(".mnema/journals/journal.v3.jsonl");
+    let mut bytes = std::fs::read(&journal).unwrap();
+    bytes.extend_from_slice(b"{\"record\":\"entry\"}\n");
+    std::fs::write(&journal, bytes).unwrap();
+    let broken = run(dir.path(), &["doctor", "journal"], None);
+    assert!(!broken.status.success());
+    let stdout = String::from_utf8_lossy(&broken.stdout);
+    let stderr = String::from_utf8_lossy(&broken.stderr);
+    assert!(stdout.contains("integrity errors: 1"), "{stdout}\n{stderr}");
+    assert!(stderr.contains("[integrity]"), "{stdout}\n{stderr}");
+}
+
+#[test]
+fn fresh_init_removes_an_empty_legacy_placeholder() {
+    let dir = tempfile::tempdir().unwrap();
+    let mnema = dir.path().join(".mnema");
+    std::fs::create_dir_all(&mnema).unwrap();
+    std::fs::write(mnema.join("journal.jsonl"), "").unwrap();
+    success(run(dir.path(), &["init"], None));
+    assert!(!mnema.join("journal.jsonl").exists());
+    success(run(dir.path(), &["doctor", "journal"], None));
+}

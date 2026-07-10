@@ -11,6 +11,9 @@ use std::time::Instant;
 
 pub(crate) fn cmd_doctor_journal() -> Result<bool, String> {
     let journal_dir = resolve_journal_dir()?;
+    if let Some(manifest) = crate::activation::load_active_manifest(&journal_dir)? {
+        return cmd_doctor_journal_v3(&journal_dir, &manifest);
+    }
     let path = journal_dir.join("journal.jsonl");
 
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("cannot read journal: {}", e))?;
@@ -49,6 +52,210 @@ pub(crate) fn cmd_doctor_journal() -> Result<bool, String> {
     // CORPUS §9: only integrity/parse failures make doctor fail. Advisories
     // are surfaced, never blocking — the reader decides.
     Ok(report.has_errors())
+}
+
+fn cmd_doctor_journal_v3(
+    journal_dir: &std::path::Path,
+    manifest: &crate::activation::ActiveJournalManifestV3,
+) -> Result<bool, String> {
+    use crate::activation::ActivationOriginV3;
+    use crate::cutover_v3::{CERTIFICATE_SCHEMA, CutoverV3Certificate, CutoverV3Map, MAP_SCHEMA};
+
+    let started = Instant::now();
+    let active_path = manifest.active_path(journal_dir)?;
+    let active_bytes = std::fs::read(&active_path).map_err(|e| {
+        format!(
+            "cannot read active v3 journal {}: {e}",
+            active_path.display()
+        )
+    })?;
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let records = match crate::journal_v3::read_records_strict(&active_path, &manifest.journal_id) {
+        Ok(records) => records,
+        Err(error) => {
+            errors.push(error);
+            Vec::new()
+        }
+    };
+
+    let activation_record_count = match &manifest.origin {
+        ActivationOriginV3::Fresh { .. } => Some(1usize),
+        ActivationOriginV3::Migration {
+            id,
+            map_path,
+            map_sha256,
+            certificate_path,
+            certificate_sha256,
+        } => {
+            let map_bytes = verify_artifact_hash(
+                journal_dir,
+                map_path,
+                map_sha256,
+                "migration map",
+                &mut errors,
+            );
+            let certificate_bytes = verify_artifact_hash(
+                journal_dir,
+                certificate_path,
+                certificate_sha256,
+                "migration certificate",
+                &mut errors,
+            );
+            for history in &manifest.history {
+                verify_artifact_hash(
+                    journal_dir,
+                    &history.path,
+                    &history.sha256,
+                    "v2 history",
+                    &mut errors,
+                );
+            }
+            if let Some(bytes) = map_bytes {
+                match parse_canonical_artifact::<CutoverV3Map>(&bytes, "migration map") {
+                    Ok(map) => {
+                        if map.schema != MAP_SCHEMA || map.migration_id != *id {
+                            errors.push(
+                                "migration map schema/id does not match active origin".to_string(),
+                            );
+                        }
+                    }
+                    Err(error) => errors.push(error),
+                }
+            }
+            match certificate_bytes {
+                Some(bytes) => {
+                    match parse_canonical_artifact::<CutoverV3Certificate>(
+                        &bytes,
+                        "migration certificate",
+                    ) {
+                        Ok(certificate) => {
+                            if certificate.schema != CERTIFICATE_SCHEMA
+                                || certificate.migration_id != *id
+                                || certificate.target_sha256 != manifest.active.sha256
+                            {
+                                errors.push(
+                                    "migration certificate schema/id/target hash does not match active manifest"
+                                        .to_string(),
+                                );
+                            }
+                            Some(certificate.target_record_count)
+                        }
+                        Err(error) => {
+                            errors.push(error);
+                            None
+                        }
+                    }
+                }
+                None => None,
+            }
+        }
+    };
+
+    if let Some(record_count) = activation_record_count {
+        match first_jsonl_lines_bytes(&active_bytes, record_count) {
+            Some(prefix) if sha256_bytes(&prefix) == manifest.active.sha256 => {}
+            Some(_) => errors.push(format!(
+                "activation prefix hash mismatch: expected {}",
+                manifest.active.sha256
+            )),
+            None => errors.push(format!(
+                "active journal has fewer than {record_count} activation records"
+            )),
+        }
+    }
+
+    let legacy_shadow = journal_dir.join("journal.jsonl");
+    if legacy_shadow.exists() {
+        warnings.push(format!(
+            "legacy shadow present and ignored by default resolution: {}",
+            legacy_shadow.display()
+        ));
+    }
+
+    println!("Doctor Journal Report");
+    println!("  journal: {}", active_path.display());
+    println!("  journal-id: {}", manifest.journal_id);
+    println!("  schema: v3");
+    println!(
+        "  origin: {}",
+        match &manifest.origin {
+            ActivationOriginV3::Fresh { .. } => "fresh",
+            ActivationOriginV3::Migration { .. } => "migration",
+        }
+    );
+    println!("  records: {}", records.len());
+    println!(
+        "  anchors: {}",
+        records
+            .iter()
+            .filter(|record| matches!(record, crate::canonical::JournalRecordV3::Anchor(_)))
+            .count()
+    );
+    println!("  integrity errors: {}", errors.len());
+    for error in &errors {
+        eprintln!("[integrity] {error}");
+    }
+    for warning in &warnings {
+        eprintln!("[integrity-warning] {warning}");
+    }
+
+    let projection_start = Instant::now();
+    let projected = crate::cutover_v3::records_to_v2_events(&records);
+    let numbered: Vec<_> = projected
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| (index + 1, event))
+        .collect();
+    let _strands = projection::project_strands(&numbered, true);
+    println!(
+        "  projection_ms: {}",
+        projection_start.elapsed().as_millis()
+    );
+    eprintln!("[mnema] doctor journal v3: {:.0?}", started.elapsed());
+    Ok(!errors.is_empty())
+}
+
+fn verify_artifact_hash(
+    journal_dir: &std::path::Path,
+    relative_path: &str,
+    expected_sha256: &str,
+    label: &str,
+    errors: &mut Vec<String>,
+) -> Option<Vec<u8>> {
+    let path = journal_dir.join(relative_path);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let actual = sha256_bytes(&bytes);
+            if actual != expected_sha256 {
+                errors.push(format!(
+                    "{label} hash mismatch at {}: expected {expected_sha256}, found {actual}",
+                    path.display()
+                ));
+            }
+            Some(bytes)
+        }
+        Err(error) => {
+            errors.push(format!("cannot read {label} {}: {error}", path.display()));
+            None
+        }
+    }
+}
+
+fn parse_canonical_artifact<T: serde::de::DeserializeOwned + serde::Serialize>(
+    bytes: &[u8],
+    label: &str,
+) -> Result<T, String> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|error| format!("{label} is not UTF-8: {error}"))?;
+    let parsed: T = crate::strict_json::from_str(text)
+        .map_err(|error| format!("cannot parse strict {label}: {error}"))?;
+    let canonical = serde_jcs::to_vec(&parsed)
+        .map_err(|error| format!("cannot canonicalize {label}: {error}"))?;
+    if canonical != bytes {
+        return Err(format!("{label} is not canonical JCS"));
+    }
+    Ok(parsed)
 }
 
 fn parse_journal_lines(lines: &[&str]) -> (Vec<Event>, usize) {
