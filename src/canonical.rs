@@ -484,9 +484,19 @@ pub(crate) fn validate_full_hex(field: &str, value: &str) -> Result<(), String> 
 pub(crate) fn canonicalize_timestamp(field: &str, value: &str) -> Result<String, String> {
     let parsed = chrono::DateTime::parse_from_rfc3339(value)
         .map_err(|error| format!("{field} must be RFC3339: {error}"))?;
-    Ok(parsed
+    let mut canonical = parsed
         .with_timezone(&chrono::Utc)
-        .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    if let Some(dot) = canonical.rfind('.') {
+        let z = canonical.len() - 1;
+        let trimmed = canonical[dot + 1..z].trim_end_matches('0').len();
+        if trimmed == 0 {
+            canonical.replace_range(dot..z, "");
+        } else {
+            canonical.replace_range(dot + 1 + trimmed..z, "");
+        }
+    }
+    Ok(canonical)
 }
 
 fn validate_canonical_timestamp(field: &str, value: &str) -> Result<(), String> {
@@ -876,6 +886,10 @@ mod tests {
         assert_eq!(
             canonicalize_timestamp("created_at", &offset_time.created_at).unwrap(),
             "2026-07-11T00:00:00Z"
+        );
+        assert_eq!(
+            canonicalize_timestamp("created_at", "2026-07-11T00:00:00.100000+00:00").unwrap(),
+            "2026-07-11T00:00:00.1Z"
         );
 
         let uppercase = genesis(&"CC".repeat(32), Vec::new());
