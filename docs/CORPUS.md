@@ -104,7 +104,7 @@ SubtreeScope(X)   = X 加上 belongs-to 下的整棵后代子树
 entry_id = H(canonical(entry_without_id))
 ```
 
-Canonical bytes 使用 RFC 8785/JCS，并把 I-JSON 边界作为写入前不变量：整数只能落在 IEEE-754 安全整数域，不能把超界整数静默舍入。时间统一为 UTC `Z`、最短 RFC3339 小数形式；hash、journal 与 ref 中的 256-bit id 统一为 64 位小写 hex。字段顺序、null/empty、时间和数值表示由协议固定，不依赖某个 serde 版本的偶然输出。规范化输入覆盖正文、kind、前驱、strand key、时间、作者、结构化 payload、provenance 和全部 refs。v3 envelope 与所有 typed payload 都拒绝未知字段；扩展必须先升级 schema，不能由旧 reader 静默吞掉。
+Canonical bytes 使用 RFC 8785/JCS，并把 I-JSON 边界作为写入前不变量：对象成员名在每一层都必须唯一；整数只能落在 IEEE-754 安全整数域，不能吞掉重复键或把超界整数静默舍入。时间统一为 UTC `Z`、最短 RFC3339 小数形式；hash、journal 与 ref 中的 256-bit id 统一为 64 位小写 hex。字段顺序、null/empty、时间和数值表示由协议固定，不依赖某个 serde 版本的偶然输出。规范化输入覆盖正文、kind、前驱、strand key、时间、作者、结构化 payload、provenance 和全部 refs。v3 envelope 与所有 typed payload 都拒绝未知字段；扩展必须先升级 schema，不能由旧 reader 静默吞掉。
 
 Genesis 不能把尚未算出的 `strand_id` 放回自己的 hash。它使用带标签的 seed：
 

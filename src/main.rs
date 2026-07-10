@@ -26,6 +26,7 @@ mod canonical;
 // Removed when journal resolution dispatches v3 files to this codec.
 #[allow(dead_code)]
 mod journal_v3;
+mod strict_json;
 
 fn main() {
     cli::main();

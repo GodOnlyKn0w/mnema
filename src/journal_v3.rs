@@ -21,7 +21,7 @@ pub(crate) fn read_records_strict(
         if line.is_empty() {
             return Err(format!("v3 journal line {line_number} is empty"));
         }
-        let record: JournalRecordV3 = serde_json::from_str(&line)
+        let record: JournalRecordV3 = crate::strict_json::from_str(&line)
             .map_err(|error| format!("parse v3 journal line {line_number}: {error}"))?;
         record
             .validate()
@@ -414,5 +414,19 @@ mod tests {
         std::fs::write(&path, format!("{}\n", value)).unwrap();
         let error = read_records_strict(&path, &"aa".repeat(32)).unwrap_err();
         assert!(error.contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn strict_reader_rejects_duplicate_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.v3.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"record":"entry","entry_id":"first","entry_id":"second"}
+"#,
+        )
+        .unwrap();
+        let error = read_records_strict(&path, &"aa".repeat(32)).unwrap_err();
+        assert!(error.contains("duplicate JSON object member"), "{error}");
     }
 }
