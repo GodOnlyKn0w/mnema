@@ -546,6 +546,24 @@ pub(crate) struct CutoverV2ReportOutput {
     pub(crate) unresolved_ref_count: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct CutoverV3ReportOutput {
+    pub(crate) applied: bool,
+    pub(crate) outcome: String,
+    pub(crate) source_journal: String,
+    pub(crate) history_journal: String,
+    pub(crate) target_journal: String,
+    pub(crate) map_path: String,
+    pub(crate) certificate_path: String,
+    pub(crate) migration_id: String,
+    pub(crate) source_event_count: usize,
+    pub(crate) target_record_count: usize,
+    pub(crate) strand_count: usize,
+    pub(crate) entry_count: usize,
+    pub(crate) unresolved_ref_count: usize,
+    pub(crate) projection_ok: bool,
+}
+
 // ── list --format json ─────────────────────────────────────
 
 /// External contract for `list --format json`. One element in the `strands` array.

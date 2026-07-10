@@ -17,14 +17,9 @@ pub(crate) use journal_view::*;
 pub(crate) use render::*;
 
 mod cli;
-// Removed when journal resolution follows active-journal.json.
-#[allow(dead_code)]
 mod activation;
-// Removed when the v3 runtime starts constructing canonical entries.
-#[allow(dead_code)]
 mod canonical;
-// Removed when journal resolution dispatches v3 files to this codec.
-#[allow(dead_code)]
+mod cutover_v3;
 mod journal_v3;
 mod strict_json;
 

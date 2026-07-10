@@ -150,7 +150,7 @@ append: seen_offset / seen_gap / warnings / closed_target / result / resolved_by
 add: id / status / provenance / slug / parent_id / edge_type / result；find: id
 hide / unhide: strand_id / status / noop / active_count / closed_count / hidden_count / result（卡片）
 link: source_id / target_id / edge_type / status / result.source / result.target（卡片）
-cutover-v2: applied / source_journal / archive_journal / map_path / certificate_path / source_event_count / imported_event_count / strand_count / entry_count / anchor_count / unresolved_ref_count
+cutover-v2: applied / source_journal / archive_journal / map+certificate / source_event_count / imported_event_count / strand_count / entry_count / anchor_count / unresolved_ref_count；cutover-v3: applied / outcome / migration_id / source|history|target / map+certificate / counts / projection_ok
 depends（DependsOutput）：id / summary / upstream_count / registered_upstream_count / upstreams[]
   ※ upstreams[]：id / lifecycle / summary / last_entry / show_command；under-scope（DependsScopeOutput）：root_id / count / strands[]
 卡片/result 形态见 mnema explain card；jq 整型见 mnema explain jq"#,

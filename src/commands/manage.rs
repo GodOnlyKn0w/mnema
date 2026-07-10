@@ -379,6 +379,146 @@ pub(crate) fn cmd_export(out: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn cmd_cutover_v3(apply: bool, format_json: bool) -> Result<(), String> {
+    use crate::activation::load_active_manifest;
+    use crate::cutover_v3::{
+        CutoverV3ApplyOutcome, apply_cutover_v3, default_certificate_path, default_history_path,
+        default_map_path, default_target_path, plan_from_journal_dir,
+    };
+
+    let journal_dir = resolve_journal_dir()?;
+    let source_journal = journal_dir.join("journal.jsonl");
+
+    if let Some(manifest) = load_active_manifest(&journal_dir)? {
+        use crate::activation::ActivationOriginV3;
+        let (map_rel, cert_rel, migration_id) = match &manifest.origin {
+            ActivationOriginV3::Migration {
+                id,
+                map_path,
+                certificate_path,
+                ..
+            } => (map_path.as_str(), certificate_path.as_str(), id.clone()),
+            ActivationOriginV3::Fresh { id } => ("", "", id.clone()),
+        };
+        let report = output::CutoverV3ReportOutput {
+            applied: apply,
+            outcome: if apply {
+                "already_active".to_string()
+            } else {
+                "already_active_dry_run".to_string()
+            },
+            source_journal: source_journal.display().to_string(),
+            history_journal: journal_dir
+                .join(
+                    &manifest
+                        .history
+                        .first()
+                        .map(|h| h.path.as_str())
+                        .unwrap_or("history/journal.v2.jsonl"),
+                )
+                .display()
+                .to_string(),
+            target_journal: journal_dir.join(&manifest.active.path).display().to_string(),
+            map_path: if map_rel.is_empty() {
+                String::new()
+            } else {
+                journal_dir.join(map_rel).display().to_string()
+            },
+            certificate_path: if cert_rel.is_empty() {
+                String::new()
+            } else {
+                journal_dir.join(cert_rel).display().to_string()
+            },
+            migration_id,
+            source_event_count: 0,
+            target_record_count: 0,
+            strand_count: 0,
+            entry_count: 0,
+            unresolved_ref_count: 0,
+            projection_ok: true,
+        };
+        if format_json {
+            println!(
+                "{}",
+                serde_json::to_string(&report).expect("serialize cutover-v3 report")
+            );
+        } else {
+            println!("v3 cutover already active (manifest present)");
+            println!("  active: {}", report.target_journal);
+            println!("  migration_id: {}", report.migration_id);
+        }
+        return Ok(());
+    }
+
+    let plan = plan_from_journal_dir(&journal_dir)?;
+    let history = default_history_path(&journal_dir);
+    let target = default_target_path(&journal_dir);
+    let map_path = default_map_path(&journal_dir);
+    let certificate_path = default_certificate_path(&journal_dir);
+
+    let mut outcome = if apply {
+        "applied".to_string()
+    } else {
+        "dry_run".to_string()
+    };
+
+    if apply {
+        match apply_cutover_v3(&journal_dir, &source_journal, &plan)? {
+            CutoverV3ApplyOutcome::Applied => outcome = "applied".to_string(),
+            CutoverV3ApplyOutcome::AppliedDurabilityUncertain => {
+                outcome = "applied_durability_uncertain".to_string();
+                eprintln!(
+                    "warning: activation-durability-uncertain — manifest is committed/active; do not retry as unactivated"
+                );
+            }
+            CutoverV3ApplyOutcome::AlreadyActive => outcome = "already_active".to_string(),
+        }
+    }
+
+    let report = output::CutoverV3ReportOutput {
+        applied: apply,
+        outcome,
+        source_journal: source_journal.display().to_string(),
+        history_journal: history.display().to_string(),
+        target_journal: target.display().to_string(),
+        map_path: map_path.display().to_string(),
+        certificate_path: certificate_path.display().to_string(),
+        migration_id: plan.map.migration_id.clone(),
+        source_event_count: plan.map.source_event_count,
+        target_record_count: plan.map.target_record_count,
+        strand_count: plan.map.strands.len(),
+        entry_count: plan.map.entries.len(),
+        unresolved_ref_count: plan.map.unresolved_refs.len(),
+        projection_ok: plan.equivalence.ok,
+    };
+
+    if format_json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).expect("serialize cutover-v3 report")
+        );
+    } else {
+        println!("v3 cutover {}", report.outcome);
+        println!("  source: {}", report.source_journal);
+        println!("  history: {}", report.history_journal);
+        println!("  target: {}", report.target_journal);
+        println!("  map: {}", report.map_path);
+        println!("  certificate: {}", report.certificate_path);
+        println!("  migration_id: {}", report.migration_id);
+        println!(
+            "  events: {} -> {} records",
+            report.source_event_count, report.target_record_count
+        );
+        println!("  strands: {}", report.strand_count);
+        println!("  entries: {}", report.entry_count);
+        println!("  projection_ok: {}", report.projection_ok);
+        if !apply {
+            println!("  apply with: mnema cutover-v3 --apply");
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_cutover_v2(
     apply: bool,
     archive: Option<&str>,

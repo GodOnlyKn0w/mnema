@@ -369,6 +369,7 @@ fn is_mnema_subcommand(word: &str) -> bool {
             | "tree"
             | "unhide"
             | "cutover-v2"
+            | "cutover-v3"
             | "explain"
     )
 }

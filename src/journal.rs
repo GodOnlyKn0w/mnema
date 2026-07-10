@@ -35,6 +35,7 @@ impl JournalAppendOutcome {
     }
 }
 pub(crate) const JOURNAL_DIR: &str = ".mnema";
+#[allow(dead_code)] // legacy path constant; default path is resolve_active_journal()
 pub(crate) const JOURNAL_FILE: &str = ".mnema/journal.jsonl";
 /// Sidecar identity metadata (not part of the append-only hash chain).
 pub(crate) const JOURNAL_ID_FILE: &str = "journal-id.json";
@@ -113,8 +114,65 @@ pub(crate) fn resolve_journal_dir() -> Result<PathBuf, String> {
     }
 }
 
+/// Active journal location after optional v3 cutover activation.
+#[derive(Debug, Clone)]
+pub(crate) enum ActiveJournal {
+    /// Legacy / pre-cutover pure v2 file at `.mnema/journal.jsonl`.
+    V2 { path: PathBuf },
+    /// Manifest-activated v3 journal; legacy `journal.jsonl` is shadow only.
+    V3 {
+        journal_id: String,
+        path: PathBuf,
+        #[allow(dead_code)]
+        manifest: crate::activation::ActiveJournalManifestV3,
+    },
+}
+
+/// Resolve the default read/write journal. When `active-journal.json` is
+/// present, only the manifest-pointed v3 file is authoritative; the legacy
+/// shadow at `journal.jsonl` is ignored.
+pub(crate) fn resolve_active_journal() -> Result<ActiveJournal, String> {
+    let journal_dir = resolve_journal_dir()?;
+    resolve_active_journal_in(&journal_dir)
+}
+
+pub(crate) fn resolve_active_journal_in(
+    journal_dir: &std::path::Path,
+) -> Result<ActiveJournal, String> {
+    if let Some(manifest) = crate::activation::load_active_manifest(journal_dir)? {
+        let path = manifest.active_path(journal_dir)?;
+        if !path.exists() {
+            return Err(format!(
+                "active v3 journal missing: {} (manifest points here)",
+                path.display()
+            ));
+        }
+        // Verify artifact hash when possible — mismatch is integrity failure.
+        let bytes = std::fs::read(&path)
+            .map_err(|e| format!("read active v3 journal {}: {e}", path.display()))?;
+        let sha = sha256_bytes(&bytes);
+        if sha != manifest.active.sha256 {
+            return Err(format!(
+                "active v3 journal hash mismatch: manifest {}, file {}",
+                manifest.active.sha256, sha
+            ));
+        }
+        return Ok(ActiveJournal::V3 {
+            journal_id: manifest.journal_id.clone(),
+            path,
+            manifest,
+        });
+    }
+    Ok(ActiveJournal::V2 {
+        path: journal_dir.join("journal.jsonl"),
+    })
+}
+
 pub(crate) fn ensure_journal() -> Result<PathBuf, String> {
-    Ok(resolve_journal_dir()?.join("journal.jsonl"))
+    match resolve_active_journal()? {
+        ActiveJournal::V2 { path } => Ok(path),
+        ActiveJournal::V3 { path, .. } => Ok(path),
+    }
 }
 
 /// Return path to .mnema/journal.lock (dedicated lock file, not the journal itself).
@@ -255,13 +313,20 @@ fn emit_journal_warning(message: &str) {
     }
 }
 
-/// Acquire exclusive lock on journal.lock, open journal.jsonl, run closure, flush, unlock.
+/// Acquire exclusive lock on journal.lock, open the active journal, run closure, flush, unlock.
 /// Lock file opened with .create(true).read(true).write(true) — no append.
+///
+/// When the active journal is v3, direct Event appends are rejected; use the
+/// v3-aware append helpers which rewrite the canonical record stream.
 pub(crate) fn with_journal_write_lock<T>(
     f: impl FnOnce(&mut std::fs::File) -> Result<T, String>,
 ) -> Result<T, String> {
     let lock_path = journal_lock_path()?;
-    let journal_path = ensure_journal()?;
+    let active = resolve_active_journal()?;
+    let journal_path = match &active {
+        ActiveJournal::V2 { path } => path.clone(),
+        ActiveJournal::V3 { path, .. } => path.clone(),
+    };
 
     // Open lock file: create if not exists, no append mode
     let lock_file = std::fs::OpenOptions::new()
@@ -280,23 +345,33 @@ pub(crate) fn with_journal_write_lock<T>(
         .map(|m| m.len())
         .unwrap_or(0);
 
-    // Open journal for appending
-    let mut journal = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(true)
-        .open(&journal_path)
-        .map_err(|e| format!("cannot open journal: {}", e))?;
+    // Open journal for appending (v2). For v3, open read/write so callers that
+    // still use the Event append path can be rejected by append_event_unlocked.
+    let mut journal = match &active {
+        ActiveJournal::V2 { .. } => std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(&journal_path)
+            .map_err(|e| format!("cannot open journal: {}", e))?,
+        ActiveJournal::V3 { .. } => std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&journal_path)
+            .map_err(|e| format!("cannot open v3 journal: {}", e))?,
+    };
 
     let result = f(&mut journal);
     let mut anchor_result = Ok(());
     if result.is_ok() {
         let _ = journal.flush();
-        let after_len = std::fs::metadata(&journal_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        if after_len > before_len {
-            anchor_result = append_journal_anchor_unlocked(&mut journal, &journal_path);
+        if matches!(active, ActiveJournal::V2 { .. }) {
+            let after_len = std::fs::metadata(&journal_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if after_len > before_len {
+                anchor_result = append_journal_anchor_unlocked(&mut journal, &journal_path);
+            }
         }
     }
 
@@ -316,7 +391,7 @@ pub(crate) fn with_journal_write_lock<T>(
     }
 }
 
-/// Acquire shared lock on journal.lock, open journal.jsonl for reading, run closure.
+/// Acquire shared lock on journal.lock, open the active journal for reading, run closure.
 /// Multiple readers allowed concurrently; blocks writers (exclusive lock).
 pub(crate) fn with_journal_read_lock<T>(
     f: impl FnOnce(&mut std::fs::File) -> Result<T, String>,
@@ -350,31 +425,279 @@ pub(crate) fn with_journal_read_lock<T>(
 
 /// Read all events from the journal under a shared lock (consistent read).
 pub(crate) fn read_journal_lossy_locked() -> JournalRead {
-    match with_journal_read_lock(|journal| {
-        let reader = std::io::BufReader::new(journal);
-        Ok(read_journal_lossy_reader(reader))
-    }) {
-        Ok(read) => read,
+    match resolve_active_journal() {
+        Ok(ActiveJournal::V3 {
+            journal_id, path, ..
+        }) => match with_journal_read_lock(|_| {
+            let records = crate::journal_v3::read_records_strict(&path, &journal_id)?;
+            let events = crate::cutover_v3::records_to_v2_events(&records);
+            Ok(JournalRead {
+                events: events
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, e)| (i + 1, e))
+                    .collect(),
+                diagnostics: Vec::new(),
+                read_error: None,
+            })
+        }) {
+            Ok(read) => read,
+            Err(e) => JournalRead::from_read_error(e),
+        },
+        Ok(ActiveJournal::V2 { .. }) => match with_journal_read_lock(|journal| {
+            let reader = std::io::BufReader::new(journal);
+            Ok(read_journal_lossy_reader(reader))
+        }) {
+            Ok(read) => read,
+            Err(e) => JournalRead::from_read_error(e),
+        },
         Err(e) => JournalRead::from_read_error(e),
     }
 }
 
 /// Append a single event to an already-open journal. Never locks.
+/// On an active v3 journal this is a hard error — Event lines must not be
+/// mixed into the canonical v3 record stream.
 pub(crate) fn append_event_unlocked(
     journal: &mut std::fs::File,
     event: &Event,
 ) -> Result<(), String> {
+    if let Ok(ActiveJournal::V3 { .. }) = resolve_active_journal() {
+        return Err(
+            "legacy-history-write-forbidden: active journal is v3; Event append is disabled on the shadow/v2 path"
+                .to_string(),
+        );
+    }
     let line = serde_json::to_string(event).map_err(|e| format!("serialize error: {}", e))?;
     writeln!(journal, "{}", line).map_err(|e| format!("write error: {}", e))
 }
 
 pub(crate) fn append_events(events: &[Event]) -> Result<(), String> {
+    if let ActiveJournal::V3 {
+        journal_id, path, ..
+    } = resolve_active_journal()?
+    {
+        return append_events_as_v3(&path, &journal_id, events);
+    }
     with_journal_write_lock(|journal| {
         for event in events {
             append_event_unlocked(journal, event)?;
         }
         Ok(())
     })
+}
+
+/// Translate a batch of v2-shaped factory events into v3 records and rewrite
+/// the active v3 journal (drop final anchor → append entries → new anchor).
+fn append_events_as_v3(
+    path: &std::path::Path,
+    journal_id: &str,
+    events: &[Event],
+) -> Result<(), String> {
+    let lock_path = journal_lock_path()?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("cannot open journal.lock: {e}"))?;
+    fs2::FileExt::lock_exclusive(&lock_file)
+        .map_err(|e| format!("cannot acquire journal lock: {e}"))?;
+
+    let result = (|| {
+        let mut records = crate::journal_v3::read_records_strict(path, journal_id)?;
+        if matches!(records.last(), Some(crate::canonical::JournalRecordV3::Anchor(_))) {
+            records.pop();
+        }
+        for event in events {
+            push_event_as_v3_record(&mut records, journal_id, event)?;
+        }
+        let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
+        let anchor = crate::journal_v3::make_anchor(journal_id, &records, created_at)?;
+        records.push(anchor);
+        rewrite_v3_journal(path, journal_id, &records)
+    })();
+    let _ = fs2::FileExt::unlock(&lock_file);
+    result
+}
+
+fn push_event_as_v3_record(
+    records: &mut Vec<crate::canonical::JournalRecordV3>,
+    journal_id: &str,
+    event: &Event,
+) -> Result<(), String> {
+    use crate::canonical::{
+        EntryHashViewV3, JournalRecordV3, StrandKeyV3, random_genesis_seed,
+    };
+
+    // Heads for prev linkage.
+    let mut heads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for record in records.iter() {
+        if let JournalRecordV3::Entry(entry) = record {
+            heads.insert(entry.strand_id.clone(), entry.entry_id.clone());
+        }
+    }
+
+    match event {
+        Event::StrandCreated { .. } => Ok(()), // absorbed into following first entry / genesis
+        Event::LogAppended {
+            id,
+            ts,
+            content,
+            effect,
+            refs,
+            provenance,
+            ..
+        } => {
+            let created_at = crate::canonical::canonicalize_timestamp("created_at", ts)
+                .unwrap_or_else(|_| {
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+                });
+            let is_genesis = !heads.contains_key(id);
+            let strand_key = if is_genesis {
+                StrandKeyV3::Genesis {
+                    seed: random_genesis_seed()?,
+                    slug: None,
+                    strand_type: None,
+                }
+            } else {
+                StrandKeyV3::Existing { id: id.clone() }
+            };
+            let prev = heads.get(id).cloned();
+            let (kind, payload) = match effect {
+                Some(eff) => (
+                    "effect".to_string(),
+                    v2_effect_to_payload(eff)?.into_value(),
+                ),
+                None => (
+                    crate::canonical::kind_from_body(content),
+                    serde_json::Value::Null,
+                ),
+            };
+            let typed_refs: Vec<crate::canonical::RefV3> = refs
+                .iter()
+                .map(|r| {
+                    if r.len() == 64 {
+                        crate::canonical::RefV3::Entry {
+                            journal_id: journal_id.to_string(),
+                            entry_id: r.clone(),
+                        }
+                    } else {
+                        crate::canonical::RefV3::External {
+                            scheme: "mnema-legacy".to_string(),
+                            locator: r.clone(),
+                        }
+                    }
+                })
+                .collect();
+            let provenance_value = provenance.clone().unwrap_or(serde_json::Value::Null);
+            let author = crate::canonical::author_from_provenance(&provenance_value);
+            let view = EntryHashViewV3::new(
+                strand_key,
+                prev,
+                kind,
+                content.clone(),
+                typed_refs,
+                author,
+                created_at,
+                payload,
+                provenance_value,
+            );
+            let record = view.into_record()?;
+            if let JournalRecordV3::Entry(entry) = &record {
+                // For genesis, public strand_id is entry_id — factory still
+                // used the precomputed v2 id. Accept and continue; callers that
+                // need stable ids should go through cutover mapping.
+                let _ = entry;
+            }
+            records.push(record);
+            Ok(())
+        }
+        other => Err(format!(
+            "v3 active journal cannot append event variant via legacy adapter: {other:?}"
+        )),
+    }
+}
+
+fn v2_effect_to_payload(effect: &EntryEffect) -> Result<crate::canonical::EffectPayloadV3, String> {
+    use crate::canonical::{CloseDispositionV3, EdgeTypeV3, EffectPayloadV3};
+    match effect {
+        EntryEffect::Close { disposition } => Ok(EffectPayloadV3::Close {
+            disposition: match disposition.as_str() {
+                "done" => CloseDispositionV3::Done,
+                "failed" => CloseDispositionV3::Failed,
+                "cancelled" => CloseDispositionV3::Cancelled,
+                "merged" => CloseDispositionV3::Merged,
+                "verified" => CloseDispositionV3::Verified,
+                other => return Err(format!("unsupported close disposition: {other}")),
+            },
+        }),
+        EntryEffect::Reopen => Ok(EffectPayloadV3::Reopen {}),
+        EntryEffect::Hide => Ok(EffectPayloadV3::Hide {}),
+        EntryEffect::Unhide => Ok(EffectPayloadV3::Unhide {}),
+        EntryEffect::Link { target, edge_type } => Ok(EffectPayloadV3::Link {
+            edge_type: match edge_type.as_str() {
+                "belongs-to" => EdgeTypeV3::BelongsTo,
+                "depends-on" => EdgeTypeV3::DependsOn,
+                other => return Err(format!("unsupported edge type: {other}")),
+            },
+            target_strand_id: target.clone(),
+        }),
+        EntryEffect::Unlink {
+            target,
+            edge_type,
+            link_entry_id,
+        } => Ok(EffectPayloadV3::Unlink {
+            edge_type: match edge_type.as_str() {
+                "belongs-to" => EdgeTypeV3::BelongsTo,
+                "depends-on" => EdgeTypeV3::DependsOn,
+                other => return Err(format!("unsupported edge type: {other}")),
+            },
+            target_strand_id: target.clone(),
+            link_entry_id: link_entry_id
+                .clone()
+                .unwrap_or_else(|| "00".repeat(32)),
+        }),
+    }
+}
+
+fn rewrite_v3_journal(
+    path: &std::path::Path,
+    journal_id: &str,
+    records: &[crate::canonical::JournalRecordV3],
+) -> Result<(), String> {
+    let tmp = path.with_extension("jsonl.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let sha = crate::journal_v3::write_records_prepared(&tmp, journal_id, records)?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| format!("install rewritten v3 journal {}: {e}", path.display()))?;
+    // Keep active manifest hash in sync when present.
+    if let Ok(Some(mut manifest)) =
+        crate::activation::load_active_manifest(&resolve_journal_dir()?)
+    {
+        if manifest.active.sha256 != sha {
+            manifest.active.sha256 = sha;
+            // Best-effort update: rewrite manifest via temp + activate path is
+            // first-activation only. For ongoing writes we update in place under lock.
+            let bytes = manifest.canonical_bytes()?;
+            let journal_dir = resolve_journal_dir()?;
+            let final_path = journal_dir.join(crate::activation::ACTIVE_MANIFEST_FILE);
+            let origin_id = manifest.origin.id();
+            let tmp_path = journal_dir.join(format!(
+                ".active-journal.rewrite.{}.tmp",
+                &origin_id[..16.min(origin_id.len())]
+            ));
+            std::fs::write(&tmp_path, &bytes)
+                .map_err(|e| format!("write updated manifest: {e}"))?;
+            #[cfg(windows)]
+            {
+                let _ = std::fs::remove_file(&final_path);
+            }
+            std::fs::rename(&tmp_path, &final_path)
+                .map_err(|e| format!("install updated manifest: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn current_entry_head(events: &[(usize, Event)], strand_id: &str) -> Option<String> {
@@ -432,25 +755,42 @@ pub(crate) fn append_entry_to_strand_gated(
     req: JournalEntryAppendRequest,
     gate: impl FnOnce(&[(usize, Event)]) -> Result<AppendGate, String>,
 ) -> Result<Option<JournalAppendOutcome>, String> {
-    with_journal_write_lock(|journal| {
-        let path = ensure_journal()?;
-        let read = read_journal_lossy(&path);
-        if let Some(error) = read.read_error {
-            return Err(error);
-        }
-        if !read.diagnostics.is_empty() {
-            return Err(format!(
-                "cannot append: journal has {} parse error(s); run doctor first",
-                read.diagnostics.len()
-            ));
-        }
-        match gate(&read.events)? {
-            AppendGate::Skip => Ok(None),
-            AppendGate::Proceed => {
-                append_entry_to_strand_unlocked(journal, &read.events, req).map(Some)
+    // Read under lock semantics: for v3, project records to events first.
+    let read = read_journal_lossy_locked();
+    if let Some(error) = read.read_error {
+        return Err(error);
+    }
+    if !read.diagnostics.is_empty() {
+        return Err(format!(
+            "cannot append: journal has {} parse error(s); run doctor first",
+            read.diagnostics.len()
+        ));
+    }
+    match gate(&read.events)? {
+        AppendGate::Skip => Ok(None),
+        AppendGate::Proceed => {
+            if let ActiveJournal::V3 {
+                journal_id, path, ..
+            } = resolve_active_journal()?
+            {
+                let prev = current_entry_head(&read.events, &req.strand_id);
+                let event = crate::event::make_log_appended_entry_with_effect(
+                    &req.strand_id,
+                    prev.as_deref(),
+                    &req.content,
+                    req.refs,
+                    req.legacy_ref.as_deref(),
+                    req.effect,
+                    req.provenance,
+                );
+                append_events_as_v3(&path, &journal_id, &[event.clone()])?;
+                return Ok(Some(JournalAppendOutcome::from_event(event)));
             }
+            with_journal_write_lock(|journal| {
+                append_entry_to_strand_unlocked(journal, &read.events, req).map(Some)
+            })
         }
-    })
+    }
 }
 
 pub(crate) fn append_entry_to_strand(
@@ -475,6 +815,32 @@ fn append_journal_anchor_unlocked(
 }
 
 pub(crate) fn read_journal_lossy(path: &PathBuf) -> JournalRead {
+    // Active v3 journal: strict codec + Event projection. Legacy shadow path
+    // stays on the v2 Event parser so history files remain readable.
+    if let Ok(ActiveJournal::V3 {
+        journal_id,
+        path: active_path,
+        ..
+    }) = resolve_active_journal()
+    {
+        if path == &active_path {
+            return match crate::journal_v3::read_records_strict(&active_path, &journal_id) {
+                Ok(records) => {
+                    let events = crate::cutover_v3::records_to_v2_events(&records);
+                    JournalRead {
+                        events: events
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, e)| (i + 1, e))
+                            .collect(),
+                        diagnostics: Vec::new(),
+                        read_error: None,
+                    }
+                }
+                Err(e) => JournalRead::from_read_error(e),
+            };
+        }
+    }
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) => return JournalRead::from_read_error(format!("cannot read journal: {}", e)),

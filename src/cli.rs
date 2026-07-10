@@ -4,7 +4,7 @@ use crate::commands::manage::*;
 use crate::commands::query::*;
 use crate::commands::write::*;
 use crate::diagnostics;
-use crate::journal::{JOURNAL_DIR, JOURNAL_FILE};
+use crate::journal::JOURNAL_DIR;
 use clap::{Parser, Subcommand, error::ErrorKind};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -55,6 +55,7 @@ loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
   doctor        Diagnose journal integrity (journal | edges)
   export        Export journal as standalone audit artifact
   cutover-v2    Rewrite/import current journal into pure v2 form
+  cutover-v3    Migrate pure v2 journal into activated v3 (manifest commit)
   explain       Explain a diagnostic code or topic (markers, json, grammar, writing, ...)
 
 Run:  mnema <command> --help"
@@ -666,6 +667,23 @@ Default is a dry run. --apply performs the cutover in .mnema/:\n  - moves journa
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
     },
+    /// Migrate pure v2 journal into activated v3 form
+    #[command(
+        name = "cutover-v3",
+        after_help = "\
+Default is a dry run (plan + projection equivalence, no durable writes).\n\
+--apply prepares history/v3 artifacts and atomically installs active-journal.json.\n\
+Failure never activates. Repeat --apply is resume/noop when artifacts match.\n\
+\nExamples:\n  mnema cutover-v3\n  mnema cutover-v3 --format json\n  mnema cutover-v3 --apply"
+    )]
+    CutoverV3 {
+        /// Apply the cutover (prepare artifacts + activate). Without this flag, only report the plan.
+        #[arg(long)]
+        apply: bool,
+        /// Output format: text (default) or json
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+    },
     /// Show entry events in journal append order (timeline projection)
     Timeline {
         /// Return events with journal_offset > N
@@ -847,21 +865,81 @@ still uses the full journal. doctor journal integrity stays JournalScope.")]
 
 /// NOTE: Strand sort key is `max(log_appended.ts)` per strand.
 fn cmd_init() -> Result<(), String> {
+    use crate::activation::{
+        ACTIVE_MANIFEST_SCHEMA, ActivationOriginV3, ActiveJournalManifestV3, JournalArtifactV3,
+        activate_initial_v3, load_active_manifest,
+    };
+    use crate::cutover_v3::TARGET_V3_REL;
+    use crate::journal::sha256_bytes;
+    use crate::journal_v3::{make_anchor, write_records_prepared};
+
     let dir = PathBuf::from(JOURNAL_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create .mnema/: {}", e))?;
-    let path = PathBuf::from(JOURNAL_FILE);
-    if !path.exists() {
-        std::fs::write(&path, "").map_err(|e| format!("cannot create journal: {}", e))?;
-    }
-    // Create empty journal.lock file (synchronization object for concurrent writers)
     let lock_path = dir.join("journal.lock");
     if !lock_path.exists() {
         std::fs::write(&lock_path, "").map_err(|e| format!("cannot create journal.lock: {}", e))?;
     }
-    // Stable journal identity (sidecar; not on the append-only hash chain).
-    let journal_id = crate::journal::ensure_journal_id_in(&dir)?;
-    println!("Initialized empty mnema in .mnema/");
+    let journal_id = crate::journal::ensure_journal_id_in(&dir)?.to_ascii_lowercase();
+
+    // Already activated: idempotent success.
+    if load_active_manifest(&dir)?.is_some() {
+        println!("Initialized empty mnema in .mnema/ (already active)");
+        println!("  journal-id: {}", journal_id);
+        return Ok(());
+    }
+
+    // Legacy v2 source present without manifest: keep transitional v2 layout.
+    let legacy = dir.join("journal.jsonl");
+    if legacy.exists() {
+        let meta = std::fs::metadata(&legacy)
+            .map_err(|e| format!("stat legacy journal: {e}"))?;
+        if meta.len() > 0 {
+            println!("Initialized empty mnema in .mnema/");
+            println!("  journal-id: {}", journal_id);
+            println!("  note: legacy journal.jsonl present; run mnema cutover-v3 --apply to activate v3");
+            return Ok(());
+        }
+    }
+
+    // Fresh directory: create pure v3 journal (final anchor over 0 records) +
+    // ActivationOriginV3::Fresh. Never stage a v2 file then self-migrate.
+    std::fs::create_dir_all(dir.join("journals"))
+        .map_err(|e| format!("create journals dir: {e}"))?;
+    let target = dir.join(TARGET_V3_REL);
+    let records = vec![make_anchor(
+        &journal_id,
+        &[],
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+    )?];
+    let target_sha = if target.exists() {
+        let bytes = std::fs::read(&target).map_err(|e| format!("read existing v3: {e}"))?;
+        sha256_bytes(&bytes)
+    } else {
+        write_records_prepared(&target, &journal_id, &records)?
+    };
+
+    let mut hasher = sha2::Sha256::new();
+    use sha2::Digest;
+    hasher.update(b"mnema.fresh-activation.v1\0");
+    hasher.update(journal_id.as_bytes());
+    let fresh_id = hex::encode(hasher.finalize());
+
+    let manifest = ActiveJournalManifestV3 {
+        schema: ACTIVE_MANIFEST_SCHEMA.to_string(),
+        journal_id: journal_id.clone(),
+        active: JournalArtifactV3 {
+            schema: "v3".to_string(),
+            path: TARGET_V3_REL.to_string(),
+            sha256: target_sha,
+        },
+        history: Vec::new(),
+        origin: ActivationOriginV3::Fresh { id: fresh_id },
+    };
+    activate_initial_v3(&dir, &manifest)?;
+
+    println!("Initialized empty mnema in .mnema/ (v3 fresh)");
     println!("  journal-id: {}", journal_id);
+    println!("  active: {}", TARGET_V3_REL);
     Ok(())
 }
 
@@ -1114,6 +1192,7 @@ fn canonical_cli_shape(command: &str) -> Option<&'static str> {
         "unlink" => Some("mnema unlink <SOURCE> <TARGET> --edge-type depends-on"),
         "unhide" => Some("mnema unhide --id <ID>"),
         "cutover-v2" => Some("mnema cutover-v2 --out <PATH>"),
+        "cutover-v3" => Some("mnema cutover-v3 --apply"),
         "explain" => Some("mnema explain grammar"),
         _ => None,
     }
@@ -1147,6 +1226,7 @@ fn nearest_cli_command(command: &str) -> Option<&'static str> {
         "unlink",
         "unhide",
         "cutover-v2",
+        "cutover-v3",
         "explain",
     ];
     COMMANDS
@@ -1520,6 +1600,9 @@ fn run(command: &Commands) -> Result<(), String> {
             map.as_deref(),
             format.as_deref() == Some("json"),
         ),
+        Commands::CutoverV3 { apply, format } => {
+            cmd_cutover_v3(*apply, format.as_deref() == Some("json"))
+        }
         Commands::Tree {
             target,
             last: _,
