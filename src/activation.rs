@@ -26,11 +26,24 @@ pub(crate) struct HistoricalJournalV3 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct MigrationActivationV3 {
-    pub(crate) id: String,
-    pub(crate) map_path: String,
-    pub(crate) certificate_path: String,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ActivationOriginV3 {
+    Fresh {
+        id: String,
+    },
+    Migration {
+        id: String,
+        map_path: String,
+        certificate_path: String,
+    },
+}
+
+impl ActivationOriginV3 {
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            Self::Fresh { id } | Self::Migration { id, .. } => id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +53,7 @@ pub(crate) struct ActiveJournalManifestV3 {
     pub(crate) journal_id: String,
     pub(crate) active: JournalArtifactV3,
     pub(crate) history: Vec<HistoricalJournalV3>,
-    pub(crate) migration: MigrationActivationV3,
+    pub(crate) origin: ActivationOriginV3,
 }
 
 impl ActiveJournalManifestV3 {
@@ -65,24 +78,33 @@ impl ActiveJournalManifestV3 {
         }
         validate_artifact_path("active.path", &self.active.path, "journals")?;
         validate_full_hex("active.sha256", &self.active.sha256)?;
-        validate_full_hex("migration.id", &self.migration.id)?;
-        validate_artifact_path("migration.map_path", &self.migration.map_path, "history")?;
-        validate_artifact_path(
-            "migration.certificate_path",
-            &self.migration.certificate_path,
-            "history",
-        )?;
+        validate_full_hex("origin.id", self.origin.id())?;
         let mut paths = HashSet::new();
-        for (field, path) in [
-            ("active.path", self.active.path.as_str()),
-            ("migration.map_path", self.migration.map_path.as_str()),
-            (
-                "migration.certificate_path",
-                self.migration.certificate_path.as_str(),
-            ),
-        ] {
-            if !paths.insert(path) {
-                return Err(format!("{field} duplicates another manifest artifact path"));
+        paths.insert(self.active.path.as_str());
+        match &self.origin {
+            ActivationOriginV3::Fresh { .. } => {
+                if !self.history.is_empty() {
+                    return Err("fresh activation cannot declare migration history".to_string());
+                }
+            }
+            ActivationOriginV3::Migration {
+                map_path,
+                certificate_path,
+                ..
+            } => {
+                if self.history.is_empty() {
+                    return Err("migration activation requires v2 history".to_string());
+                }
+                validate_artifact_path("origin.map_path", map_path, "history")?;
+                validate_artifact_path("origin.certificate_path", certificate_path, "history")?;
+                for (field, path) in [
+                    ("origin.map_path", map_path.as_str()),
+                    ("origin.certificate_path", certificate_path.as_str()),
+                ] {
+                    if !paths.insert(path) {
+                        return Err(format!("{field} duplicates another manifest artifact path"));
+                    }
+                }
             }
         }
         for (index, history) in self.history.iter().enumerate() {
@@ -118,8 +140,8 @@ pub(crate) enum ActivationOutcome {
 
 /// Install the first v3 activation manifest.
 ///
-/// All target, history, map and certificate artifacts must already exist and
-/// be verified. The no-replace create of `active-journal.json` is the only
+/// All artifacts named by the selected origin must already exist and be
+/// verified. The no-replace create of `active-journal.json` is the only
 /// commit point: before it the legacy v2 resolver remains authoritative; after
 /// it v3 is authoritative. Concurrent first-activation races keep the winner;
 /// losers re-read the final path and surface conflict or already-active.
@@ -135,7 +157,7 @@ pub(crate) fn activate_initial_v3(
         return Ok(outcome);
     }
 
-    let tmp_path = prepared_temp_path(journal_dir, &manifest.migration.id);
+    let tmp_path = prepared_temp_path(journal_dir, manifest.origin.id());
     prepare_temp(&tmp_path, &bytes)?;
 
     match atomic_install_no_replace(&tmp_path, &final_path, journal_dir) {
@@ -466,7 +488,7 @@ mod tests {
                 path: "history/journal.v2.jsonl".to_string(),
                 sha256: "33".repeat(32),
             }],
-            migration: MigrationActivationV3 {
+            origin: ActivationOriginV3::Migration {
                 id: "44".repeat(32),
                 map_path: "history/migration-v2-to-v3.json".to_string(),
                 certificate_path: "history/migration-v2-to-v3.certificate.json".to_string(),
@@ -476,8 +498,21 @@ mod tests {
 
     fn manifest_with(migration_id: &str, active_sha: &str) -> ActiveJournalManifestV3 {
         let mut value = manifest();
-        value.migration.id = migration_id.to_string();
+        value.origin = ActivationOriginV3::Migration {
+            id: migration_id.to_string(),
+            map_path: "history/migration-v2-to-v3.json".to_string(),
+            certificate_path: "history/migration-v2-to-v3.certificate.json".to_string(),
+        };
         value.active.sha256 = active_sha.to_string();
+        value
+    }
+
+    fn fresh_manifest() -> ActiveJournalManifestV3 {
+        let mut value = manifest();
+        value.history.clear();
+        value.origin = ActivationOriginV3::Fresh {
+            id: "55".repeat(32),
+        };
         value
     }
 
@@ -500,7 +535,15 @@ mod tests {
     #[test]
     fn manifest_artifact_paths_are_distinct_and_rooted() {
         let mut duplicate = manifest();
-        duplicate.migration.certificate_path = duplicate.migration.map_path.clone();
+        let ActivationOriginV3::Migration {
+            map_path,
+            certificate_path,
+            ..
+        } = &mut duplicate.origin
+        else {
+            panic!("migration origin")
+        };
+        *certificate_path = map_path.clone();
         assert!(duplicate.validate().unwrap_err().contains("duplicates"));
 
         let mut misplaced_history = manifest();
@@ -528,8 +571,28 @@ mod tests {
         assert_eq!(load_active_manifest(dir.path()).unwrap(), Some(value));
         // Prepared temp must not linger after a successful commit.
         assert!(
-            !prepared_temp_path(dir.path(), &manifest().migration.id).exists(),
+            !prepared_temp_path(dir.path(), manifest().origin.id()).exists(),
             "temp residue must be cleaned after activation"
+        );
+    }
+
+    #[test]
+    fn fresh_origin_activates_without_fake_migration_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = fresh_manifest();
+        assert_eq!(
+            activate_initial_v3(dir.path(), &value).unwrap(),
+            ActivationOutcome::Activated
+        );
+        assert_eq!(load_active_manifest(dir.path()).unwrap(), Some(value));
+
+        let mut invalid = fresh_manifest();
+        invalid.history.push(manifest().history[0].clone());
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .contains("cannot declare migration history")
         );
     }
 
@@ -550,7 +613,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let value = manifest();
         let bytes = value.canonical_bytes().unwrap();
-        let tmp = prepared_temp_path(dir.path(), &value.migration.id);
+        let tmp = prepared_temp_path(dir.path(), value.origin.id());
         std::fs::write(&tmp, &bytes).unwrap();
 
         assert_eq!(
@@ -565,7 +628,7 @@ mod tests {
     fn corrupt_temp_residue_is_rebuilt() {
         let dir = tempfile::tempdir().unwrap();
         let value = manifest();
-        let tmp = prepared_temp_path(dir.path(), &value.migration.id);
+        let tmp = prepared_temp_path(dir.path(), value.origin.id());
         std::fs::write(&tmp, b"{not-valid-manifest").unwrap();
 
         assert_eq!(
@@ -581,7 +644,7 @@ mod tests {
         let value = manifest();
         let mut foreign = value.clone();
         foreign.active.sha256 = "66".repeat(32);
-        let tmp = prepared_temp_path(dir.path(), &value.migration.id);
+        let tmp = prepared_temp_path(dir.path(), value.origin.id());
         std::fs::write(&tmp, foreign.canonical_bytes().unwrap()).unwrap();
 
         assert_eq!(
@@ -690,9 +753,13 @@ mod tests {
         std::fs::write(&final_path, winner.canonical_bytes().unwrap()).unwrap();
 
         let mut challenger = winner.clone();
-        challenger.migration.id = "77".repeat(32);
+        challenger.origin = ActivationOriginV3::Migration {
+            id: "77".repeat(32),
+            map_path: "history/challenger-map.json".to_string(),
+            certificate_path: "history/challenger-certificate.json".to_string(),
+        };
         challenger.active.sha256 = "88".repeat(32);
-        let tmp = prepared_temp_path(dir.path(), &challenger.migration.id);
+        let tmp = prepared_temp_path(dir.path(), challenger.origin.id());
         std::fs::write(&tmp, challenger.canonical_bytes().unwrap()).unwrap();
 
         let err = atomic_install_no_replace(&tmp, &final_path, dir.path()).unwrap_err();
@@ -712,7 +779,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let value = manifest();
         let bytes = value.canonical_bytes().unwrap();
-        let tmp = prepared_temp_path(dir.path(), &value.migration.id);
+        let tmp = prepared_temp_path(dir.path(), value.origin.id());
         std::fs::write(&tmp, &bytes).unwrap();
         let final_path = dir.path().join(ACTIVE_MANIFEST_FILE);
 
@@ -734,7 +801,7 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "{{\"active\":{{\"path\":\"journals/journal.v3.jsonl\",\"schema\":\"v3\",\"sha256\":\"{}\"}},\"history\":[{{\"path\":\"history/journal.v2.jsonl\",\"schema\":\"v2\",\"sha256\":\"{}\"}}],\"journal_id\":\"{}\",\"migration\":{{\"certificate_path\":\"history/migration-v2-to-v3.certificate.json\",\"id\":\"{}\",\"map_path\":\"history/migration-v2-to-v3.json\"}},\"schema\":\"{}\"}}",
+                "{{\"active\":{{\"path\":\"journals/journal.v3.jsonl\",\"schema\":\"v3\",\"sha256\":\"{}\"}},\"history\":[{{\"path\":\"history/journal.v2.jsonl\",\"schema\":\"v2\",\"sha256\":\"{}\"}}],\"journal_id\":\"{}\",\"origin\":{{\"certificate_path\":\"history/migration-v2-to-v3.certificate.json\",\"id\":\"{}\",\"kind\":\"migration\",\"map_path\":\"history/migration-v2-to-v3.json\"}},\"schema\":\"{}\"}}",
                 "22".repeat(32),
                 "33".repeat(32),
                 "11".repeat(32),
