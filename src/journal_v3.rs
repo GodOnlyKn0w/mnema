@@ -26,6 +26,13 @@ pub(crate) fn read_records_strict(
         record
             .validate()
             .map_err(|error| format!("invalid v3 journal line {line_number}: {error}"))?;
+        let canonical = serde_jcs::to_string(&record)
+            .map_err(|error| format!("canonicalize v3 journal line {line_number}: {error}"))?;
+        if line != canonical {
+            return Err(format!(
+                "v3 journal line {line_number} is not canonical JCS"
+            ));
+        }
         records.push(record);
     }
     validate_records(journal_id, &records)?;
@@ -428,5 +435,18 @@ mod tests {
         .unwrap();
         let error = read_records_strict(&path, &"aa".repeat(32)).unwrap_err();
         assert!(error.contains("duplicate JSON object member"), "{error}");
+    }
+
+    #[test]
+    fn strict_reader_rejects_noncanonical_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.v3.jsonl");
+        let journal_id = "aa".repeat(32);
+        let mut records = vec![genesis("bb")];
+        records.push(make_anchor(&journal_id, &records, CREATED_AT).unwrap());
+        let canonical = serde_jcs::to_string(&records[0]).unwrap();
+        std::fs::write(&path, format!(" {canonical}\n")).unwrap();
+        let error = read_records_strict(&path, &journal_id).unwrap_err();
+        assert!(error.contains("not canonical JCS"), "{error}");
     }
 }
