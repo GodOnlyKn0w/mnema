@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 #[cfg(unix)]
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -62,14 +63,28 @@ impl ActiveJournalManifestV3 {
                 self.active.schema
             ));
         }
-        validate_relative_path("active.path", &self.active.path)?;
+        validate_artifact_path("active.path", &self.active.path, "journals")?;
         validate_full_hex("active.sha256", &self.active.sha256)?;
         validate_full_hex("migration.id", &self.migration.id)?;
-        validate_relative_path("migration.map_path", &self.migration.map_path)?;
-        validate_relative_path(
+        validate_artifact_path("migration.map_path", &self.migration.map_path, "history")?;
+        validate_artifact_path(
             "migration.certificate_path",
             &self.migration.certificate_path,
+            "history",
         )?;
+        let mut paths = HashSet::new();
+        for (field, path) in [
+            ("active.path", self.active.path.as_str()),
+            ("migration.map_path", self.migration.map_path.as_str()),
+            (
+                "migration.certificate_path",
+                self.migration.certificate_path.as_str(),
+            ),
+        ] {
+            if !paths.insert(path) {
+                return Err(format!("{field} duplicates another manifest artifact path"));
+            }
+        }
         for (index, history) in self.history.iter().enumerate() {
             if history.schema != "v2" {
                 return Err(format!(
@@ -77,8 +92,13 @@ impl ActiveJournalManifestV3 {
                     history.schema
                 ));
             }
-            validate_relative_path(&format!("history[{index}].path"), &history.path)?;
+            validate_artifact_path(&format!("history[{index}].path"), &history.path, "history")?;
             validate_full_hex(&format!("history[{index}].sha256"), &history.sha256)?;
+            if !paths.insert(&history.path) {
+                return Err(format!(
+                    "history[{index}].path duplicates another manifest artifact path"
+                ));
+            }
         }
         Ok(())
     }
@@ -395,12 +415,22 @@ fn sync_journal_dir(_journal_dir: &Path) -> Result<(), String> {
 fn validate_relative_path(field: &str, value: &str) -> Result<(), String> {
     let path = Path::new(value);
     if value.is_empty()
+        || value.contains('\\')
         || path.is_absolute()
         || path
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err(format!("{field} must be a normalized relative path"));
+    }
+    Ok(())
+}
+
+fn validate_artifact_path(field: &str, value: &str, root: &str) -> Result<(), String> {
+    validate_relative_path(field, value)?;
+    let expected = format!("{root}/");
+    if !value.starts_with(&expected) || value.len() == expected.len() {
+        return Err(format!("{field} must be under {root}/"));
     }
     Ok(())
 }
@@ -453,11 +483,34 @@ mod tests {
 
     #[test]
     fn manifest_paths_cannot_escape_journal_directory() {
-        for invalid in ["../outside", "/absolute", "journals/../outside", ""] {
+        for invalid in [
+            "../outside",
+            "/absolute",
+            "journals/../outside",
+            "history/not-active.jsonl",
+            "journals\\platform-dependent.jsonl",
+            "",
+        ] {
             let mut value = manifest();
             value.active.path = invalid.to_string();
             assert!(value.validate().is_err(), "accepted {invalid}");
         }
+    }
+
+    #[test]
+    fn manifest_artifact_paths_are_distinct_and_rooted() {
+        let mut duplicate = manifest();
+        duplicate.migration.certificate_path = duplicate.migration.map_path.clone();
+        assert!(duplicate.validate().unwrap_err().contains("duplicates"));
+
+        let mut misplaced_history = manifest();
+        misplaced_history.history[0].path = "journals/source.v2.jsonl".to_string();
+        assert!(
+            misplaced_history
+                .validate()
+                .unwrap_err()
+                .contains("under history/")
+        );
     }
 
     #[test]

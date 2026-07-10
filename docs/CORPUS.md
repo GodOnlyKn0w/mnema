@@ -444,6 +444,7 @@ v3 journal 使用一个小型 manifest 作为唯一激活点：
 ```
 
 - `active-journal.json` 声明活动 schema、活动文件、journal identity 和 migration identity；
+- manifest 中 active artifact 必须位于 `journals/`，v2 history、map 与 certificate 必须位于 `history/`；路径统一使用 `/`、彼此唯一且不能逃逸目录；
 - 普通读写只跟随 manifest 指向的 v3 文件；
 - v2 source 在验证后进入 `history/`，只提供显式历史读取和迁移证明；
 - 激活 manifest 前，v2 仍是完整活动状态；原子替换 manifest 后，v3 是完整活动状态；
