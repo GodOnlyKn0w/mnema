@@ -1,8 +1,12 @@
-use crate::canonical::{AnchorHeadV3, JournalRecordV3, RefV3, StrandKeyV3};
+use crate::canonical::{
+    AnchorHeadV3, AnchorRecordV3, JournalRecordV3, RefV3, StrandKeyV3, validate_full_hex,
+};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+
+const RECORD_SEQUENCE_DOMAIN: &[u8] = b"mnema.journal-sequence.v3\0";
 
 pub(crate) fn read_records_strict(
     path: &Path,
@@ -58,9 +62,51 @@ pub(crate) fn validate_records(
     journal_id: &str,
     records: &[JournalRecordV3],
 ) -> Result<(), String> {
+    replay_records(journal_id, records, true).map(|_| ())
+}
+
+pub(crate) fn make_anchor(
+    journal_id: &str,
+    records: &[JournalRecordV3],
+    created_at: impl Into<String>,
+) -> Result<JournalRecordV3, String> {
+    let state = replay_records(journal_id, records, false)?;
+    let covered_record_count = u64::try_from(records.len())
+        .map_err(|_| "v3 journal record count does not fit u64".to_string())?;
+    let heads = state
+        .heads
+        .into_iter()
+        .map(|(strand_id, entry_id)| AnchorHeadV3 {
+            strand_id,
+            entry_id,
+        })
+        .collect();
+    Ok(JournalRecordV3::Anchor(AnchorRecordV3::new(
+        created_at,
+        covered_record_count,
+        state.previous_anchor,
+        sequence_digest(&state.sequence_hasher),
+        heads,
+    )?))
+}
+
+struct ReplayState {
+    heads: BTreeMap<String, String>,
+    previous_anchor: Option<String>,
+    sequence_hasher: Sha256,
+}
+
+fn replay_records(
+    journal_id: &str,
+    records: &[JournalRecordV3],
+    require_final_anchor: bool,
+) -> Result<ReplayState, String> {
     validate_full_hex("journal_id", journal_id)?;
     let mut heads: BTreeMap<String, String> = BTreeMap::new();
     let mut entries: HashSet<String> = HashSet::new();
+    let mut previous_anchor: Option<String> = None;
+    let mut sequence_hasher = Sha256::new();
+    sequence_hasher.update(RECORD_SEQUENCE_DOMAIN);
 
     for (index, record) in records.iter().enumerate() {
         record
@@ -117,10 +163,53 @@ pub(crate) fn validate_records(
                         "record {index}: anchor heads do not match replayed strand heads"
                     ));
                 }
+                if anchor.covered_record_count != index as u64 {
+                    return Err(format!(
+                        "record {index}: anchor covers {} records, expected {index}",
+                        anchor.covered_record_count
+                    ));
+                }
+                if anchor.previous_anchor != previous_anchor {
+                    return Err(format!(
+                        "record {index}: anchor previous digest does not match prior anchor"
+                    ));
+                }
+                let expected_sequence = sequence_digest(&sequence_hasher);
+                if anchor.covered_records_digest != expected_sequence {
+                    return Err(format!(
+                        "record {index}: anchor covered-record digest mismatch"
+                    ));
+                }
+                previous_anchor = Some(anchor.digest.clone());
             }
         }
+        update_sequence_digest(&mut sequence_hasher, record)
+            .map_err(|error| format!("record {index}: {error}"))?;
     }
+    if require_final_anchor && !matches!(records.last(), Some(JournalRecordV3::Anchor(_))) {
+        return Err(
+            "v3 journal is missing its final anchor (unanchored tail or truncation)".to_string(),
+        );
+    }
+    Ok(ReplayState {
+        heads,
+        previous_anchor,
+        sequence_hasher,
+    })
+}
+
+fn update_sequence_digest(hasher: &mut Sha256, record: &JournalRecordV3) -> Result<(), String> {
+    let bytes = serde_jcs::to_vec(record)
+        .map_err(|error| format!("canonicalize record for sequence digest: {error}"))?;
+    let length = u64::try_from(bytes.len())
+        .map_err(|_| "canonical record length does not fit u64".to_string())?;
+    hasher.update(length.to_be_bytes());
+    hasher.update(bytes);
     Ok(())
+}
+
+fn sequence_digest(hasher: &Sha256) -> String {
+    hex::encode(hasher.clone().finalize())
 }
 
 fn validate_local_refs(
@@ -160,17 +249,10 @@ fn validate_local_refs(
     Ok(())
 }
 
-fn validate_full_hex(field: &str, value: &str) -> Result<(), String> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("{field} must be 64 hex characters"));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canonical::{AnchorRecordV3, EntryHashViewV3};
+    use crate::canonical::EntryHashViewV3;
     use serde_json::Value;
 
     const CREATED_AT: &str = "2026-07-11T00:00:00Z";
@@ -233,18 +315,9 @@ mod tests {
                 entry_id: first_id.to_string(),
             }],
         );
-        let (_, second_id) = ids(&second);
-        let anchor = JournalRecordV3::Anchor(
-            AnchorRecordV3::new(
-                "2026-07-11T00:00:02Z",
-                vec![AnchorHeadV3 {
-                    strand_id: strand_id.to_string(),
-                    entry_id: second_id.to_string(),
-                }],
-            )
-            .unwrap(),
-        );
-        let records = vec![first, second, anchor];
+        let mut records = vec![first, second];
+        let anchor = make_anchor(&journal_id, &records, "2026-07-11T00:00:02Z").unwrap();
+        records.push(anchor);
         let digest = write_records_prepared(&path, &journal_id, &records).unwrap();
         assert_eq!(digest.len(), 64);
         assert_eq!(read_records_strict(&path, &journal_id).unwrap(), records);
@@ -262,7 +335,7 @@ mod tests {
     #[test]
     fn anchor_must_equal_replayed_heads() {
         let first = genesis("33");
-        let anchor = JournalRecordV3::Anchor(AnchorRecordV3::new(CREATED_AT, Vec::new()).unwrap());
+        let anchor = make_anchor(&"aa".repeat(32), &[], CREATED_AT).unwrap();
         let error = validate_records(&"aa".repeat(32), &[first, anchor]).unwrap_err();
         assert!(error.contains("anchor heads"));
     }
@@ -293,8 +366,53 @@ mod tests {
 "#,
         )
         .unwrap();
-        assert!(read_records_strict(&path, &"aa".repeat(32))
-            .unwrap_err()
-            .contains("parse v3 journal line 1"));
+        assert!(
+            read_records_strict(&path, &"aa".repeat(32))
+                .unwrap_err()
+                .contains("parse v3 journal line 1")
+        );
+    }
+
+    #[test]
+    fn final_anchor_is_required() {
+        let error = validate_records(&"aa".repeat(32), &[genesis("66")]).unwrap_err();
+        assert!(error.contains("missing its final anchor"));
+    }
+
+    #[test]
+    fn anchor_commits_cross_strand_record_order() {
+        let journal_id = "aa".repeat(32);
+        let first = genesis("77");
+        let second = genesis("88");
+        let mut records = vec![first, second];
+        records.push(make_anchor(&journal_id, &records, CREATED_AT).unwrap());
+        validate_records(&journal_id, &records).unwrap();
+
+        records.swap(0, 1);
+        let error = validate_records(&journal_id, &records).unwrap_err();
+        assert!(error.contains("covered-record digest mismatch"));
+    }
+
+    #[test]
+    fn anchor_chain_detects_deleted_anchor() {
+        let journal_id = "aa".repeat(32);
+        let mut records = vec![genesis("99")];
+        records.push(make_anchor(&journal_id, &records, CREATED_AT).unwrap());
+        records.push(make_anchor(&journal_id, &records, "2026-07-11T00:00:01Z").unwrap());
+        validate_records(&journal_id, &records).unwrap();
+
+        records.remove(1);
+        assert!(validate_records(&journal_id, &records).is_err());
+    }
+
+    #[test]
+    fn strict_reader_rejects_unknown_nested_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.v3.jsonl");
+        let mut value = serde_json::to_value(genesis("aa")).unwrap();
+        value["entry"]["entry"]["future_field"] = serde_json::json!(true);
+        std::fs::write(&path, format!("{}\n", value)).unwrap();
+        let error = read_records_strict(&path, &"aa".repeat(32)).unwrap_err();
+        assert!(error.contains("unknown field"), "{error}");
     }
 }

@@ -5,16 +5,17 @@ use sha2::{Digest, Sha256};
 const ENTRY_HASH_DOMAIN: &[u8] = b"mnema.entry.v3\0";
 const ANCHOR_HASH_DOMAIN: &[u8] = b"mnema.anchor.v3\0";
 const V2_IMPORT_SEED_DOMAIN: &[u8] = b"mnema.import.v2\0";
+const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum StrandKeyV3 {
     Genesis { seed: String },
     Existing { id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum RefV3 {
     Entry {
         journal_id: String,
@@ -48,12 +49,12 @@ pub(crate) enum CloseDispositionV3 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum EffectPayloadV3 {
     Close {
         disposition: CloseDispositionV3,
     },
-    Reopen,
+    Reopen {},
     Link {
         edge_type: EdgeTypeV3,
         target_strand_id: String,
@@ -63,8 +64,8 @@ pub(crate) enum EffectPayloadV3 {
         target_strand_id: String,
         link_entry_id: String,
     },
-    Hide,
-    Unhide,
+    Hide {},
+    Unhide {},
 }
 
 impl EffectPayloadV3 {
@@ -91,6 +92,7 @@ impl EffectPayloadV3 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CheckpointPayloadV3 {
     pub(crate) observed: String,
     pub(crate) action: String,
@@ -103,6 +105,7 @@ impl CheckpointPayloadV3 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SubjectBindingPayloadV3 {
     pub(crate) subject_type: String,
     pub(crate) subject_id: String,
@@ -120,6 +123,7 @@ impl SubjectBindingPayloadV3 {
 /// as JSON null rather than omitted, so identity does not depend on serde
 /// defaults or producer-specific field elision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EntryHashViewV3 {
     schema: String,
     pub(crate) strand: StrandKeyV3,
@@ -224,8 +228,9 @@ impl EntryHashViewV3 {
             }
             _ => {}
         }
-        chrono::DateTime::parse_from_rfc3339(&self.created_at)
-            .map_err(|error| format!("created_at must be RFC3339: {error}"))?;
+        validate_canonical_timestamp("created_at", &self.created_at)?;
+        validate_ijson_value("payload", &self.payload)?;
+        validate_ijson_value("provenance", &self.provenance)?;
         for reference in &self.refs {
             match reference {
                 RefV3::Entry {
@@ -269,6 +274,7 @@ impl EntryHashViewV3 {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EntryRecordV3 {
     pub(crate) entry_id: String,
     pub(crate) strand_id: String,
@@ -299,14 +305,19 @@ impl EntryRecordV3 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AnchorHeadV3 {
     pub(crate) strand_id: String,
     pub(crate) entry_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AnchorRecordV3 {
     pub(crate) created_at: String,
+    pub(crate) covered_record_count: u64,
+    pub(crate) previous_anchor: Option<String>,
+    pub(crate) covered_records_digest: String,
     pub(crate) heads: Vec<AnchorHeadV3>,
     pub(crate) digest: String,
 }
@@ -314,28 +325,51 @@ pub(crate) struct AnchorRecordV3 {
 impl AnchorRecordV3 {
     pub(crate) fn new(
         created_at: impl Into<String>,
+        covered_record_count: u64,
+        previous_anchor: Option<String>,
+        covered_records_digest: String,
         mut heads: Vec<AnchorHeadV3>,
     ) -> Result<Self, String> {
         let created_at = created_at.into();
-        chrono::DateTime::parse_from_rfc3339(&created_at)
-            .map_err(|error| format!("anchor created_at must be RFC3339: {error}"))?;
+        validate_canonical_timestamp("anchor created_at", &created_at)?;
+        validate_safe_count(covered_record_count)?;
+        if let Some(previous) = &previous_anchor {
+            validate_full_hex("anchor previous_anchor", previous)?;
+        }
+        validate_full_hex("anchor covered_records_digest", &covered_records_digest)?;
         heads.sort_by(|left, right| {
             left.strand_id
                 .cmp(&right.strand_id)
                 .then_with(|| left.entry_id.cmp(&right.entry_id))
         });
         validate_anchor_heads(&heads)?;
-        let digest = anchor_digest(&heads)?;
+        let digest = anchor_digest(
+            &created_at,
+            covered_record_count,
+            previous_anchor.as_deref(),
+            &covered_records_digest,
+            &heads,
+        )?;
         Ok(Self {
             created_at,
+            covered_record_count,
+            previous_anchor,
+            covered_records_digest,
             heads,
             digest,
         })
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
-        chrono::DateTime::parse_from_rfc3339(&self.created_at)
-            .map_err(|error| format!("anchor created_at must be RFC3339: {error}"))?;
+        validate_canonical_timestamp("anchor created_at", &self.created_at)?;
+        validate_safe_count(self.covered_record_count)?;
+        if let Some(previous) = &self.previous_anchor {
+            validate_full_hex("anchor previous_anchor", previous)?;
+        }
+        validate_full_hex(
+            "anchor covered_records_digest",
+            &self.covered_records_digest,
+        )?;
         validate_anchor_heads(&self.heads)?;
         let mut sorted = self.heads.clone();
         sorted.sort_by(|left, right| {
@@ -346,7 +380,13 @@ impl AnchorRecordV3 {
         if sorted != self.heads {
             return Err("anchor heads must be in canonical order".to_string());
         }
-        let computed = anchor_digest(&self.heads)?;
+        let computed = anchor_digest(
+            &self.created_at,
+            self.covered_record_count,
+            self.previous_anchor.as_deref(),
+            &self.covered_records_digest,
+            &self.heads,
+        )?;
         if computed != self.digest {
             return Err(format!(
                 "anchor digest mismatch: stored {}, computed {}",
@@ -358,7 +398,7 @@ impl AnchorRecordV3 {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "record", rename_all = "snake_case")]
+#[serde(tag = "record", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum JournalRecordV3 {
     Entry(EntryRecordV3),
     Anchor(AnchorRecordV3),
@@ -373,9 +413,22 @@ impl JournalRecordV3 {
     }
 }
 
-fn anchor_digest(heads: &[AnchorHeadV3]) -> Result<String, String> {
-    let canonical =
-        serde_jcs::to_vec(heads).map_err(|error| format!("canonicalize anchor heads: {error}"))?;
+fn anchor_digest(
+    created_at: &str,
+    covered_record_count: u64,
+    previous_anchor: Option<&str>,
+    covered_records_digest: &str,
+    heads: &[AnchorHeadV3],
+) -> Result<String, String> {
+    let value = serde_json::json!({
+        "created_at": created_at,
+        "covered_record_count": covered_record_count,
+        "previous_anchor": previous_anchor,
+        "covered_records_digest": covered_records_digest,
+        "heads": heads,
+    });
+    let canonical = serde_jcs::to_vec(&value)
+        .map_err(|error| format!("canonicalize anchor commitment: {error}"))?;
     let mut hasher = Sha256::new();
     hasher.update(ANCHOR_HASH_DOMAIN);
     hasher.update(canonical);
@@ -398,9 +451,71 @@ fn validate_anchor_heads(heads: &[AnchorHeadV3]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_full_hex(field: &str, value: &str) -> Result<(), String> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("{field} must be 64 hex characters"));
+pub(crate) fn validate_full_hex(field: &str, value: &str) -> Result<(), String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!("{field} must be 64 lowercase hex characters"));
+    }
+    Ok(())
+}
+
+pub(crate) fn canonicalize_timestamp(field: &str, value: &str) -> Result<String, String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value)
+        .map_err(|error| format!("{field} must be RFC3339: {error}"))?;
+    Ok(parsed
+        .with_timezone(&chrono::Utc)
+        .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+}
+
+fn validate_canonical_timestamp(field: &str, value: &str) -> Result<(), String> {
+    let canonical = canonicalize_timestamp(field, value)?;
+    if value != canonical {
+        return Err(format!(
+            "{field} must use canonical UTC form {canonical}, found {value}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_safe_count(value: u64) -> Result<(), String> {
+    if value > MAX_SAFE_JSON_INTEGER {
+        return Err(format!(
+            "anchor covered_record_count exceeds I-JSON safe integer {MAX_SAFE_JSON_INTEGER}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ijson_value(field: &str, value: &Value) -> Result<(), String> {
+    match value {
+        Value::Number(number) => {
+            let safe = if let Some(value) = number.as_i64() {
+                value.unsigned_abs() <= MAX_SAFE_JSON_INTEGER
+            } else if let Some(value) = number.as_u64() {
+                value <= MAX_SAFE_JSON_INTEGER
+            } else {
+                number.as_f64().is_some_and(f64::is_finite)
+            };
+            if !safe {
+                return Err(format!(
+                    "{field} contains a number outside the I-JSON/IEEE-754 safe domain"
+                ));
+            }
+        }
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                validate_ijson_value(&format!("{field}[{index}]"), value)?;
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                validate_ijson_value(&format!("{field}.{key}"), value)?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -579,6 +694,9 @@ mod tests {
     fn anchor_heads_are_sorted_and_digest_is_verified() {
         let anchor = AnchorRecordV3::new(
             "2026-07-11T00:00:00Z",
+            2,
+            None,
+            "99".repeat(32),
             vec![
                 AnchorHeadV3 {
                     strand_id: "bb".repeat(32),
@@ -603,6 +721,9 @@ mod tests {
     fn duplicate_anchor_strand_is_rejected() {
         let error = AnchorRecordV3::new(
             "2026-07-11T00:00:00Z",
+            2,
+            None,
+            "99".repeat(32),
             vec![
                 AnchorHeadV3 {
                     strand_id: "aa".repeat(32),
@@ -663,5 +784,64 @@ mod tests {
                 .unwrap(),
             binding
         );
+    }
+
+    #[test]
+    fn unsafe_json_integers_are_rejected_before_hashing() {
+        let mut unsafe_entry = genesis(&"aa".repeat(32), Vec::new());
+        unsafe_entry.payload = json!({"value": 9_007_199_254_740_993_u64});
+        assert!(
+            unsafe_entry
+                .entry_id()
+                .unwrap_err()
+                .contains("I-JSON/IEEE-754 safe domain")
+        );
+
+        let mut safe_entry = genesis(&"aa".repeat(32), Vec::new());
+        safe_entry.payload = json!({"value": 9_007_199_254_740_991_u64});
+        safe_entry.entry_id().unwrap();
+    }
+
+    #[test]
+    fn timestamps_and_hex_have_one_canonical_spelling() {
+        let mut offset_time = genesis(&"bb".repeat(32), Vec::new());
+        offset_time.created_at = "2026-07-11T08:00:00+08:00".to_string();
+        assert!(
+            offset_time
+                .validate()
+                .unwrap_err()
+                .contains("canonical UTC")
+        );
+        assert_eq!(
+            canonicalize_timestamp("created_at", &offset_time.created_at).unwrap(),
+            "2026-07-11T00:00:00Z"
+        );
+
+        let uppercase = genesis(&"CC".repeat(32), Vec::new());
+        assert!(uppercase.validate().unwrap_err().contains("lowercase hex"));
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected_at_nested_schema_boundaries() {
+        let value = serde_json::to_value(genesis(&"dd".repeat(32), Vec::new())).unwrap();
+        let mut object = value.as_object().unwrap().clone();
+        object.insert("future_field".to_string(), json!(true));
+        let error = serde_json::from_value::<EntryHashViewV3>(Value::Object(object)).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+
+        let effect = json!({
+            "type": "hide",
+            "future_field": true
+        });
+        assert!(serde_json::from_value::<EffectPayloadV3>(effect).is_err());
+    }
+
+    #[test]
+    fn anchor_timestamp_is_part_of_its_digest() {
+        let mut anchor =
+            AnchorRecordV3::new("2026-07-11T00:00:00Z", 0, None, "99".repeat(32), Vec::new())
+                .unwrap();
+        anchor.created_at = "2026-07-11T00:00:01Z".to_string();
+        assert!(anchor.validate().unwrap_err().contains("digest mismatch"));
     }
 }

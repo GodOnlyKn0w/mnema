@@ -104,7 +104,7 @@ SubtreeScope(X)   = X 加上 belongs-to 下的整棵后代子树
 entry_id = H(canonical(entry_without_id))
 ```
 
-Canonical bytes 使用稳定、版本化的 JSON 规范；字段顺序、null/empty、时间和数值表示由协议固定，不依赖某个 serde 版本的偶然输出。规范化输入覆盖正文、kind、前驱、strand key、时间、作者、结构化 payload、provenance 和全部 refs。
+Canonical bytes 使用 RFC 8785/JCS，并把 I-JSON 边界作为写入前不变量：整数只能落在 IEEE-754 安全整数域，不能把超界整数静默舍入。时间统一为 UTC `Z`、最短 RFC3339 小数形式；hash、journal 与 ref 中的 256-bit id 统一为 64 位小写 hex。字段顺序、null/empty、时间和数值表示由协议固定，不依赖某个 serde 版本的偶然输出。规范化输入覆盖正文、kind、前驱、strand key、时间、作者、结构化 payload、provenance 和全部 refs。v3 envelope 与所有 typed payload 都拒绝未知字段；扩展必须先升级 schema，不能由旧 reader 静默吞掉。
 
 Genesis 不能把尚未算出的 `strand_id` 放回自己的 hash。它使用带标签的 seed：
 
@@ -136,6 +136,8 @@ mnema 同时保护：
 
 1. **strand 链完整性**：`prev`、hash 与 strand identity 能发现链内篡改；
 2. **journal 完整性**：anchor 覆盖 journal 的粗粒度顺序与行集合，发现整行删除、重排或截断。
+
+每个 anchor 明确记录 `covered_record_count`、`previous_anchor`、`covered_records_digest` 与当时的 sorted strand heads；anchor 自身 digest 还覆盖 canonical `created_at` 和上述全部字段。`covered_records_digest` 对 anchor 之前的 canonical record 序列逐条带长度承诺，因此不同 strand 的 entry 互换位置也会改变承诺。非空 journal 的最后一条必须是 anchor；写事务把领域 entry 与其后 anchor 作为同一持锁事务追加，strict replay 把缺最终 anchor 视为未锚定尾部或截断，而不是健康 journal。
 
 Git commit、外部归档或签名可以作为 journal 之外的锚。Core 可以记录相关事实，但不把某一种版本控制工具写进领域语义。
 
