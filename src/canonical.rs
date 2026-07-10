@@ -10,8 +10,14 @@ const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum StrandKeyV3 {
-    Genesis { seed: String },
-    Existing { id: String },
+    Genesis {
+        seed: String,
+        slug: Option<String>,
+        strand_type: Option<String>,
+    },
+    Existing {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,10 +188,23 @@ impl EntryHashViewV3 {
             return Err(format!("unsupported entry schema {}", self.schema));
         }
         match &self.strand {
-            StrandKeyV3::Genesis { seed } => {
+            StrandKeyV3::Genesis {
+                seed,
+                slug,
+                strand_type,
+            } => {
                 validate_full_hex("genesis seed", seed)?;
                 if self.prev.is_some() {
                     return Err("genesis entry must have prev=null".to_string());
+                }
+                if slug.as_ref().is_some_and(|value| value.trim().is_empty()) {
+                    return Err("genesis slug cannot be empty".to_string());
+                }
+                if strand_type
+                    .as_ref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    return Err("genesis strand_type cannot be empty".to_string());
                 }
             }
             StrandKeyV3::Existing { id } => {
@@ -544,6 +563,8 @@ mod tests {
         EntryHashViewV3::new(
             StrandKeyV3::Genesis {
                 seed: seed.to_string(),
+                slug: None,
+                strand_type: None,
             },
             None,
             "note",
@@ -561,6 +582,8 @@ mod tests {
         let first = EntryHashViewV3::new(
             StrandKeyV3::Genesis {
                 seed: "11".repeat(32),
+                slug: None,
+                strand_type: None,
             },
             None,
             "note",
@@ -574,6 +597,8 @@ mod tests {
         let second = EntryHashViewV3::new(
             StrandKeyV3::Genesis {
                 seed: "11".repeat(32),
+                slug: None,
+                strand_type: None,
             },
             None,
             "note",
@@ -662,11 +687,36 @@ mod tests {
         let entry = genesis(&"55".repeat(32), Vec::new());
         assert_eq!(
             String::from_utf8(entry.canonical_bytes().unwrap()).unwrap(),
-            r#"{"author":null,"body":"hello","created_at":"2026-07-11T00:00:00Z","kind":"note","payload":null,"prev":null,"provenance":null,"refs":[],"schema":"mnema.entry.v3","strand":{"kind":"genesis","seed":"5555555555555555555555555555555555555555555555555555555555555555"}}"#
+            r#"{"author":null,"body":"hello","created_at":"2026-07-11T00:00:00Z","kind":"note","payload":null,"prev":null,"provenance":null,"refs":[],"schema":"mnema.entry.v3","strand":{"kind":"genesis","seed":"5555555555555555555555555555555555555555555555555555555555555555","slug":null,"strand_type":null}}"#
         );
         assert_eq!(
             entry.entry_id().unwrap(),
-            "460534434a692630e97e4fbd2935b43843bed07b32ced25d62bda498b354f22b"
+            "25520922cec2d45c8619b9ef4f0166c37834fed9eac6152079bcbe8d3263daaf"
+        );
+    }
+
+    #[test]
+    fn genesis_metadata_is_typed_and_participates_in_identity() {
+        let plain = genesis(&"56".repeat(32), Vec::new());
+        let mut named = plain.clone();
+        named.strand = StrandKeyV3::Genesis {
+            seed: "56".repeat(32),
+            slug: Some("migration-worker".to_string()),
+            strand_type: Some("task".to_string()),
+        };
+        assert_ne!(plain.entry_id().unwrap(), named.entry_id().unwrap());
+
+        let mut invalid = named;
+        invalid.strand = StrandKeyV3::Genesis {
+            seed: "56".repeat(32),
+            slug: Some(" ".to_string()),
+            strand_type: Some("task".to_string()),
+        };
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .contains("slug cannot be empty")
         );
     }
 
@@ -744,6 +794,8 @@ mod tests {
         let effect = EntryHashViewV3::new(
             StrandKeyV3::Genesis {
                 seed: "99".repeat(32),
+                slug: None,
+                strand_type: None,
             },
             None,
             "effect",

@@ -268,6 +268,8 @@ mod tests {
         EntryHashViewV3::new(
             StrandKeyV3::Genesis {
                 seed: seed_byte.repeat(32),
+                slug: None,
+                strand_type: None,
             },
             None,
             "note",
