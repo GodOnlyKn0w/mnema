@@ -106,6 +106,12 @@ pub(crate) fn cmd_link(
         !format_json,
         current_max_offset,
     )?;
+    if src_id == tgt_id {
+        return Err(
+            "cannot link a strand to itself (source and target resolve to the same id)"
+                .to_string(),
+        );
+    }
     let provenance = parse_provenance_arg(provenance_raw)?;
     let (content, effect) = event::link_entry_parts(&tgt_id, etype);
     append_entry_to_strand(JournalEntryAppendRequest {

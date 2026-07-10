@@ -101,6 +101,19 @@ fn link_json_returns_source_target_edge_type() {
 }
 
 #[test]
+fn link_rejects_self_loop() {
+    let _env = setup();
+    let id = create_strand("self link candidate");
+    let err = cmd_link(&id, &id, Some("depends-on"), false, None)
+        .expect_err("self-link must be rejected");
+    assert!(err.contains("itself") || err.contains("same id"));
+
+    let prefix = &id[..12];
+    cmd_link(prefix, prefix, Some("belongs-to"), false, None)
+        .expect_err("self-link via prefix must be rejected");
+}
+
+#[test]
 fn link_json_default_edge_type_is_depends_on() {
     // Verify the link effect carries the default edge_type when none given.
     let _env = setup();
