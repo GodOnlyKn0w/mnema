@@ -9,6 +9,7 @@ pub(crate) const ACTIVE_MANIFEST_SCHEMA: &str = "mnema.active-journal.v1";
 pub(crate) const ACTIVE_MANIFEST_FILE: &str = "active-journal.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct JournalArtifactV3 {
     pub(crate) schema: String,
     pub(crate) path: String,
@@ -16,6 +17,7 @@ pub(crate) struct JournalArtifactV3 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct HistoricalJournalV3 {
     pub(crate) schema: String,
     pub(crate) path: String,
@@ -23,6 +25,7 @@ pub(crate) struct HistoricalJournalV3 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct MigrationActivationV3 {
     pub(crate) id: String,
     pub(crate) map_path: String,
@@ -30,6 +33,7 @@ pub(crate) struct MigrationActivationV3 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ActiveJournalManifestV3 {
     pub(crate) schema: String,
     pub(crate) journal_id: String,
@@ -85,9 +89,10 @@ impl ActiveJournalManifestV3 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ActivationOutcome {
     Activated,
+    ActivatedDurabilityUncertain { detail: String },
     AlreadyActive,
 }
 
@@ -114,18 +119,21 @@ pub(crate) fn activate_initial_v3(
     prepare_temp(&tmp_path, &bytes)?;
 
     match atomic_install_no_replace(&tmp_path, &final_path, journal_dir) {
-        Ok(()) => {
+        Ok(durability_warning) => {
             // Commit succeeded. Directory durability is best-effort after the
             // no-replace create; re-read final so a post-commit fsync failure
             // never reports "not activated" against a live winner.
             match observe_final(&final_path, manifest)? {
                 Some(ActivationOutcome::AlreadyActive) => {
                     cleanup_temp(&tmp_path);
-                    Ok(ActivationOutcome::Activated)
+                    Ok(committed_outcome(durability_warning))
                 }
                 Some(ActivationOutcome::Activated) => {
                     cleanup_temp(&tmp_path);
-                    Ok(ActivationOutcome::Activated)
+                    Ok(committed_outcome(durability_warning))
+                }
+                Some(ActivationOutcome::ActivatedDurabilityUncertain { .. }) => {
+                    unreachable!("observe_final only reports already-active")
                 }
                 None => Err(format!(
                     "atomic activation committed but {} is missing",
@@ -168,9 +176,7 @@ pub(crate) fn load_active_manifest(
     }
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("read active manifest {}: {error}", path.display()))?;
-    let manifest: ActiveJournalManifestV3 = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("parse active manifest {}: {error}", path.display()))?;
-    manifest.validate()?;
+    let manifest = parse_manifest_bytes(&path, &bytes)?;
     Ok(Some(manifest))
 }
 
@@ -191,9 +197,7 @@ fn observe_final(
     }
     let existing = std::fs::read(final_path)
         .map_err(|error| format!("read active manifest {}: {error}", final_path.display()))?;
-    let parsed: ActiveJournalManifestV3 = serde_json::from_slice(&existing)
-        .map_err(|error| format!("parse active manifest {}: {error}", final_path.display()))?;
-    parsed.validate()?;
+    let parsed = parse_manifest_bytes(final_path, &existing)?;
     if parsed == *expected {
         Ok(Some(ActivationOutcome::AlreadyActive))
     } else {
@@ -205,7 +209,9 @@ fn observe_final(
 fn prepare_temp(tmp_path: &Path, bytes: &[u8]) -> Result<(), String> {
     match write_temp_new(tmp_path, bytes) {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => resume_or_rebuild_temp(tmp_path, bytes),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            resume_or_rebuild_temp(tmp_path, bytes)
+        }
         Err(error) => Err(format!(
             "create prepared manifest {}: {error}",
             tmp_path.display()
@@ -275,6 +281,29 @@ fn cleanup_temp(tmp_path: &Path) {
     let _ = std::fs::remove_file(tmp_path);
 }
 
+fn committed_outcome(durability_warning: Option<String>) -> ActivationOutcome {
+    match durability_warning {
+        Some(detail) => ActivationOutcome::ActivatedDurabilityUncertain { detail },
+        None => ActivationOutcome::Activated,
+    }
+}
+
+fn parse_manifest_bytes(path: &Path, bytes: &[u8]) -> Result<ActiveJournalManifestV3, String> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| format!("parse active manifest {}: {error}", path.display()))?;
+    let manifest: ActiveJournalManifestV3 = crate::strict_json::from_str(text)
+        .map_err(|error| format!("parse active manifest {}: {error}", path.display()))?;
+    manifest.validate()?;
+    let canonical = manifest.canonical_bytes()?;
+    if canonical != bytes {
+        return Err(format!(
+            "active manifest {} is not canonical JCS",
+            path.display()
+        ));
+    }
+    Ok(manifest)
+}
+
 #[derive(Debug)]
 enum InstallError {
     DestinationExists,
@@ -288,13 +317,12 @@ fn atomic_install_no_replace(
     tmp_path: &Path,
     final_path: &Path,
     journal_dir: &Path,
-) -> Result<(), InstallError> {
+) -> Result<Option<String>, InstallError> {
     match platform_no_replace_install(tmp_path, final_path) {
         Ok(()) => {
             // Commit point has passed. Directory fsync is durability only; a
             // failure must not invert the activation outcome.
-            let _ = sync_journal_dir(journal_dir);
-            Ok(())
+            Ok(sync_journal_dir(journal_dir).err())
         }
         Err(error) if is_already_exists(&error) => Err(InstallError::DestinationExists),
         Err(error) => Err(InstallError::Io(format!(
@@ -317,7 +345,7 @@ fn platform_no_replace_install(tmp_path: &Path, final_path: &Path) -> std::io::R
 fn platform_no_replace_install(tmp_path: &Path, final_path: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
-    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
 
     // MoveFileEx without MOVEFILE_REPLACE_EXISTING is no-replace: the call fails
     // if the destination already exists, preserving the first winner.
@@ -378,8 +406,12 @@ fn validate_relative_path(field: &str, value: &str) -> Result<(), String> {
 }
 
 fn validate_full_hex(field: &str, value: &str) -> Result<(), String> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("{field} must be 64 hex characters"));
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!("{field} must be 64 lowercase hex characters"));
     }
     Ok(())
 }
@@ -583,10 +615,14 @@ mod tests {
 
         assert!(
             matches!(
-                (left_result, right_result),
-                (ActivationOutcome::Activated, ActivationOutcome::AlreadyActive)
-                    | (ActivationOutcome::AlreadyActive, ActivationOutcome::Activated)
-                    | (ActivationOutcome::Activated, ActivationOutcome::Activated)
+                (&left_result, &right_result),
+                (
+                    ActivationOutcome::Activated,
+                    ActivationOutcome::AlreadyActive
+                ) | (
+                    ActivationOutcome::AlreadyActive,
+                    ActivationOutcome::Activated
+                ) | (ActivationOutcome::Activated, ActivationOutcome::Activated)
             ),
             "identical racers must only report activated/already-active, got {left_result:?}/{right_result:?}"
         );
@@ -652,6 +688,54 @@ mod tests {
                 "44".repeat(32),
                 ACTIVE_MANIFEST_SCHEMA
             )
+        );
+    }
+
+    #[test]
+    fn manifest_schema_rejects_unknown_fields_and_uppercase_hex() {
+        let mut value = serde_json::to_value(manifest()).unwrap();
+        value["active"]["future_field"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ActiveJournalManifestV3>(value).is_err());
+
+        let mut uppercase = manifest();
+        uppercase.journal_id = "AA".repeat(32);
+        assert!(uppercase.validate().unwrap_err().contains("lowercase hex"));
+    }
+
+    #[test]
+    fn manifest_reader_requires_unique_canonical_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ACTIVE_MANIFEST_FILE);
+        let canonical = String::from_utf8(manifest().canonical_bytes().unwrap()).unwrap();
+
+        std::fs::write(&path, format!(" {canonical}")).unwrap();
+        assert!(
+            load_active_manifest(dir.path())
+                .unwrap_err()
+                .contains("not canonical JCS")
+        );
+
+        let duplicate = format!(
+            "{{\"schema\":\"{}\",{}",
+            ACTIVE_MANIFEST_SCHEMA,
+            &canonical[1..]
+        );
+        std::fs::write(&path, duplicate).unwrap();
+        assert!(
+            load_active_manifest(dir.path())
+                .unwrap_err()
+                .contains("duplicate JSON object member")
+        );
+    }
+
+    #[test]
+    fn committed_sync_failure_has_an_explicit_outcome() {
+        let outcome = committed_outcome(Some("directory fsync failed".to_string()));
+        assert_eq!(
+            outcome,
+            ActivationOutcome::ActivatedDurabilityUncertain {
+                detail: "directory fsync failed".to_string()
+            }
         );
     }
 }

@@ -163,6 +163,7 @@ Hard error 只覆盖不可执行条件和硬不变量：
 | `active-schema-unsupported` | integrity | manifest 指向 Core 不支持的活动 schema | 拒绝读写；使用支持该 schema 的版本 |
 | `legacy-history-write-forbidden` | resolution | mutation 目标解析到冻结的历史 identity | 未写入；通过 migration map 取得 v3 identity |
 | `atomic-activation-failed` | concurrency | prepared v3 已验证，但原子替换 active manifest 失败 | 未激活；保留 artifacts，允许 resume |
+| `activation-durability-uncertain` | io | active manifest 已原子提交并可重读，但提交后的目录持久化同步失败 | 已激活；退出 0 并明确 warning，调用者可 sync/备份后复查 |
 
 `depends-on` 环不得产生 `belongs-cycle`；两种关系具有不同不变量。
 
