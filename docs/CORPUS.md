@@ -443,7 +443,7 @@ v3 journal 使用一个小型 manifest 作为唯一激活点：
     └── <v2-source>.jsonl
 ```
 
-- `active-journal.json` 声明活动 schema、活动文件、journal identity 和 tagged `origin`：新建 journal 使用 `{kind:fresh,id}`，v2 cutover 使用 `{kind:migration,id,map_path,certificate_path}`；
+- `active-journal.json` 声明活动 schema、活动文件、journal identity 和 tagged `origin`：新建 journal 使用 `{kind:fresh,id}`，v2 cutover 使用 `{kind:migration,id,map_path,map_sha256,certificate_path,certificate_sha256}`；
 - manifest 中 active artifact 必须位于 `journals/`，v2 history、map 与 certificate 必须位于 `history/`；路径统一使用 `/`、彼此唯一且不能逃逸目录；
 - fresh origin 的 `history` 必须为空；migration origin 必须声明至少一个 v2 history artifact，不能为 fresh init 伪造 migration 证明；
 - 普通读写只跟随 manifest 指向的 v3 文件；

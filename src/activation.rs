@@ -34,7 +34,9 @@ pub(crate) enum ActivationOriginV3 {
     Migration {
         id: String,
         map_path: String,
+        map_sha256: String,
         certificate_path: String,
+        certificate_sha256: String,
     },
 }
 
@@ -89,7 +91,9 @@ impl ActiveJournalManifestV3 {
             }
             ActivationOriginV3::Migration {
                 map_path,
+                map_sha256,
                 certificate_path,
+                certificate_sha256,
                 ..
             } => {
                 if self.history.is_empty() {
@@ -97,6 +101,8 @@ impl ActiveJournalManifestV3 {
                 }
                 validate_artifact_path("origin.map_path", map_path, "history")?;
                 validate_artifact_path("origin.certificate_path", certificate_path, "history")?;
+                validate_full_hex("origin.map_sha256", map_sha256)?;
+                validate_full_hex("origin.certificate_sha256", certificate_sha256)?;
                 for (field, path) in [
                     ("origin.map_path", map_path.as_str()),
                     ("origin.certificate_path", certificate_path.as_str()),
@@ -491,7 +497,9 @@ mod tests {
             origin: ActivationOriginV3::Migration {
                 id: "44".repeat(32),
                 map_path: "history/migration-v2-to-v3.json".to_string(),
+                map_sha256: "66".repeat(32),
                 certificate_path: "history/migration-v2-to-v3.certificate.json".to_string(),
+                certificate_sha256: "77".repeat(32),
             },
         }
     }
@@ -501,7 +509,9 @@ mod tests {
         value.origin = ActivationOriginV3::Migration {
             id: migration_id.to_string(),
             map_path: "history/migration-v2-to-v3.json".to_string(),
+            map_sha256: "66".repeat(32),
             certificate_path: "history/migration-v2-to-v3.certificate.json".to_string(),
+            certificate_sha256: "77".repeat(32),
         };
         value.active.sha256 = active_sha.to_string();
         value
@@ -756,7 +766,9 @@ mod tests {
         challenger.origin = ActivationOriginV3::Migration {
             id: "77".repeat(32),
             map_path: "history/challenger-map.json".to_string(),
+            map_sha256: "99".repeat(32),
             certificate_path: "history/challenger-certificate.json".to_string(),
+            certificate_sha256: "aa".repeat(32),
         };
         challenger.active.sha256 = "88".repeat(32);
         let tmp = prepared_temp_path(dir.path(), challenger.origin.id());
@@ -801,11 +813,13 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "{{\"active\":{{\"path\":\"journals/journal.v3.jsonl\",\"schema\":\"v3\",\"sha256\":\"{}\"}},\"history\":[{{\"path\":\"history/journal.v2.jsonl\",\"schema\":\"v2\",\"sha256\":\"{}\"}}],\"journal_id\":\"{}\",\"origin\":{{\"certificate_path\":\"history/migration-v2-to-v3.certificate.json\",\"id\":\"{}\",\"kind\":\"migration\",\"map_path\":\"history/migration-v2-to-v3.json\"}},\"schema\":\"{}\"}}",
+                "{{\"active\":{{\"path\":\"journals/journal.v3.jsonl\",\"schema\":\"v3\",\"sha256\":\"{}\"}},\"history\":[{{\"path\":\"history/journal.v2.jsonl\",\"schema\":\"v2\",\"sha256\":\"{}\"}}],\"journal_id\":\"{}\",\"origin\":{{\"certificate_path\":\"history/migration-v2-to-v3.certificate.json\",\"certificate_sha256\":\"{}\",\"id\":\"{}\",\"kind\":\"migration\",\"map_path\":\"history/migration-v2-to-v3.json\",\"map_sha256\":\"{}\"}},\"schema\":\"{}\"}}",
                 "22".repeat(32),
                 "33".repeat(32),
                 "11".repeat(32),
+                "77".repeat(32),
                 "44".repeat(32),
+                "66".repeat(32),
                 ACTIVE_MANIFEST_SCHEMA
             )
         );
@@ -820,6 +834,19 @@ mod tests {
         let mut uppercase = manifest();
         uppercase.journal_id = "AA".repeat(32);
         assert!(uppercase.validate().unwrap_err().contains("lowercase hex"));
+
+        let mut uppercase_artifact = manifest();
+        let ActivationOriginV3::Migration { map_sha256, .. } = &mut uppercase_artifact.origin
+        else {
+            panic!("migration origin")
+        };
+        *map_sha256 = "BB".repeat(32);
+        assert!(
+            uppercase_artifact
+                .validate()
+                .unwrap_err()
+                .contains("origin.map_sha256")
+        );
     }
 
     #[test]
