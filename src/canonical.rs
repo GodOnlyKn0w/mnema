@@ -573,6 +573,12 @@ pub(crate) fn author_from_provenance(provenance: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+pub(crate) fn kind_from_body(body: &str) -> String {
+    crate::markers::leading_marker(body)
+        .unwrap_or("note")
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -929,5 +935,12 @@ mod tests {
         assert_eq!(author_from_provenance(&json!({"producer": 7})), None);
         assert_eq!(author_from_provenance(&json!({"producer": "  "})), None);
         assert_eq!(author_from_provenance(&Value::Null), None);
+    }
+
+    #[test]
+    fn ordinary_kind_is_mechanically_projected_from_body() {
+        assert_eq!(kind_from_body("[decision] choose A"), "decision");
+        assert_eq!(kind_from_body("  [friction] blocked"), "friction");
+        assert_eq!(kind_from_body("plain note"), "note");
     }
 }
