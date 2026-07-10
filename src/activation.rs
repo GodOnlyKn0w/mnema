@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 
 pub(crate) const ACTIVE_MANIFEST_SCHEMA: &str = "mnema.active-journal.v1";
@@ -91,6 +91,74 @@ pub(crate) enum ActivationOutcome {
     AlreadyActive,
 }
 
+/// Install the first v3 activation manifest.
+///
+/// All target, history, map and certificate artifacts must already exist and
+/// be verified. The no-replace create of `active-journal.json` is the only
+/// commit point: before it the legacy v2 resolver remains authoritative; after
+/// it v3 is authoritative. Concurrent first-activation races keep the winner;
+/// losers re-read the final path and surface conflict or already-active.
+/// Crash residue of the prepared temp is verified and resumed, or rebuilt.
+pub(crate) fn activate_initial_v3(
+    journal_dir: &Path,
+    manifest: &ActiveJournalManifestV3,
+) -> Result<ActivationOutcome, String> {
+    let bytes = manifest.canonical_bytes()?;
+    let final_path = journal_dir.join(ACTIVE_MANIFEST_FILE);
+
+    if let Some(outcome) = observe_final(&final_path, manifest)? {
+        return Ok(outcome);
+    }
+
+    let tmp_path = prepared_temp_path(journal_dir, &manifest.migration.id);
+    prepare_temp(&tmp_path, &bytes)?;
+
+    match atomic_install_no_replace(&tmp_path, &final_path, journal_dir) {
+        Ok(()) => {
+            // Commit succeeded. Directory durability is best-effort after the
+            // no-replace create; re-read final so a post-commit fsync failure
+            // never reports "not activated" against a live winner.
+            match observe_final(&final_path, manifest)? {
+                Some(ActivationOutcome::AlreadyActive) => {
+                    cleanup_temp(&tmp_path);
+                    Ok(ActivationOutcome::Activated)
+                }
+                Some(ActivationOutcome::Activated) => {
+                    cleanup_temp(&tmp_path);
+                    Ok(ActivationOutcome::Activated)
+                }
+                None => Err(format!(
+                    "atomic activation committed but {} is missing",
+                    final_path.display()
+                )),
+            }
+        }
+        Err(error) => {
+            // Install did not complete in this process. The true authority is
+            // final: a peer may have won the no-replace race, or (Windows) moved
+            // a shared same-migration temp out from under us after committing.
+            match observe_final(&final_path, manifest) {
+                Ok(Some(outcome)) => {
+                    cleanup_temp(&tmp_path);
+                    Ok(outcome)
+                }
+                Ok(None) => match error {
+                    InstallError::DestinationExists => Err(format!(
+                        "atomic activation failed: {} already exists but is unreadable",
+                        final_path.display()
+                    )),
+                    InstallError::Io(message) => {
+                        // Leave prepared temp when still present so a same-migration
+                        // retry can resume after a transient pre-commit failure.
+                        Err(message)
+                    }
+                },
+                Err(observe_error) => Err(observe_error),
+            }
+        }
+    }
+}
+
 pub(crate) fn load_active_manifest(
     journal_dir: &Path,
 ) -> Result<Option<ActiveJournalManifestV3>, String> {
@@ -106,46 +174,194 @@ pub(crate) fn load_active_manifest(
     Ok(Some(manifest))
 }
 
-/// Install the first v3 activation manifest.
-///
-/// All target, history, map and certificate artifacts must already exist and
-/// be verified. The manifest rename is the only commit point: before it the
-/// legacy v2 resolver remains authoritative; after it v3 is authoritative.
-pub(crate) fn activate_initial_v3(
-    journal_dir: &Path,
-    manifest: &ActiveJournalManifestV3,
-) -> Result<ActivationOutcome, String> {
-    let bytes = manifest.canonical_bytes()?;
-    let final_path = journal_dir.join(ACTIVE_MANIFEST_FILE);
-    if final_path.exists() {
-        let existing = std::fs::read(&final_path)
-            .map_err(|error| format!("read active manifest {}: {error}", final_path.display()))?;
-        let parsed: ActiveJournalManifestV3 = serde_json::from_slice(&existing)
-            .map_err(|error| format!("parse active manifest {}: {error}", final_path.display()))?;
-        parsed.validate()?;
-        if parsed == *manifest {
-            return Ok(ActivationOutcome::AlreadyActive);
-        }
-        return Err("migration artifact conflict: active manifest already differs".to_string());
-    }
+fn prepared_temp_path(journal_dir: &Path, migration_id: &str) -> PathBuf {
+    journal_dir.join(format!(".active-journal.{migration_id}.tmp"))
+}
 
-    let tmp_path = journal_dir.join(format!(".active-journal.{}.tmp", manifest.migration.id));
+/// Compare an existing final manifest with the candidate.
+///
+/// Returns `None` when final is absent. Same content is already-active;
+/// different valid content is an artifact conflict.
+fn observe_final(
+    final_path: &Path,
+    expected: &ActiveJournalManifestV3,
+) -> Result<Option<ActivationOutcome>, String> {
+    if !final_path.exists() {
+        return Ok(None);
+    }
+    let existing = std::fs::read(final_path)
+        .map_err(|error| format!("read active manifest {}: {error}", final_path.display()))?;
+    let parsed: ActiveJournalManifestV3 = serde_json::from_slice(&existing)
+        .map_err(|error| format!("parse active manifest {}: {error}", final_path.display()))?;
+    parsed.validate()?;
+    if parsed == *expected {
+        Ok(Some(ActivationOutcome::AlreadyActive))
+    } else {
+        Err("migration artifact conflict: active manifest already differs".to_string())
+    }
+}
+
+/// Create the prepared temp with `create_new`, or resume/rebuild crash residue.
+fn prepare_temp(tmp_path: &Path, bytes: &[u8]) -> Result<(), String> {
+    match write_temp_new(tmp_path, bytes) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => resume_or_rebuild_temp(tmp_path, bytes),
+        Err(error) => Err(format!(
+            "create prepared manifest {}: {error}",
+            tmp_path.display()
+        )),
+    }
+}
+
+fn resume_or_rebuild_temp(tmp_path: &Path, bytes: &[u8]) -> Result<(), String> {
+    match std::fs::read(tmp_path) {
+        Ok(existing) if existing == bytes => {
+            // Crash residue matches this migration — resume install.
+            Ok(())
+        }
+        Ok(_) => {
+            // Temp is not the commit point. Corrupt or foreign residue for this
+            // migration id may be rebuilt safely.
+            std::fs::remove_file(tmp_path).map_err(|remove_error| {
+                format!(
+                    "remove prepared manifest residue {}: {remove_error}",
+                    tmp_path.display()
+                )
+            })?;
+            match write_temp_new(tmp_path, bytes) {
+                Ok(()) => Ok(()),
+                Err(rewrite_error) if rewrite_error.kind() == ErrorKind::AlreadyExists => {
+                    // Lost a race recreating the temp; resume only if peer wrote
+                    // identical prepared bytes.
+                    let again = std::fs::read(tmp_path).map_err(|read_error| {
+                        format!(
+                            "read prepared manifest {}: {read_error}",
+                            tmp_path.display()
+                        )
+                    })?;
+                    if again == bytes {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "migration artifact conflict: prepared temp differs at {}",
+                            tmp_path.display()
+                        ))
+                    }
+                }
+                Err(rewrite_error) => Err(format!(
+                    "create prepared manifest {}: {rewrite_error}",
+                    tmp_path.display()
+                )),
+            }
+        }
+        Err(read_error) => Err(format!(
+            "read prepared manifest residue {}: {read_error}",
+            tmp_path.display()
+        )),
+    }
+}
+
+fn write_temp_new(tmp_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(&tmp_path)
-        .map_err(|error| format!("create prepared manifest {}: {error}", tmp_path.display()))?;
-    file.write_all(&bytes)
-        .map_err(|error| format!("write prepared manifest {}: {error}", tmp_path.display()))?;
-    file.sync_all()
-        .map_err(|error| format!("sync prepared manifest {}: {error}", tmp_path.display()))?;
-    drop(file);
+        .open(tmp_path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
 
-    if let Err(error) = atomic_install(&tmp_path, &final_path, journal_dir) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(error);
+fn cleanup_temp(tmp_path: &Path) {
+    let _ = std::fs::remove_file(tmp_path);
+}
+
+#[derive(Debug)]
+enum InstallError {
+    DestinationExists,
+    Io(String),
+}
+
+/// Atomically create `final_path` from a fully synced temp file without replacing
+/// an existing final. On success the activation is committed even if a later
+/// directory durability sync fails.
+fn atomic_install_no_replace(
+    tmp_path: &Path,
+    final_path: &Path,
+    journal_dir: &Path,
+) -> Result<(), InstallError> {
+    match platform_no_replace_install(tmp_path, final_path) {
+        Ok(()) => {
+            // Commit point has passed. Directory fsync is durability only; a
+            // failure must not invert the activation outcome.
+            let _ = sync_journal_dir(journal_dir);
+            Ok(())
+        }
+        Err(error) if is_already_exists(&error) => Err(InstallError::DestinationExists),
+        Err(error) => Err(InstallError::Io(format!(
+            "atomic activation failed installing {} to {}: {error}",
+            tmp_path.display(),
+            final_path.display()
+        ))),
     }
-    Ok(ActivationOutcome::Activated)
+}
+
+#[cfg(unix)]
+fn platform_no_replace_install(tmp_path: &Path, final_path: &Path) -> std::io::Result<()> {
+    // hard_link is an atomic no-replace create: it fails with EEXIST when the
+    // destination already exists, so a racing second activation cannot overwrite
+    // the winner (unlike POSIX rename, which replaces).
+    std::fs::hard_link(tmp_path, final_path)
+}
+
+#[cfg(windows)]
+fn platform_no_replace_install(tmp_path: &Path, final_path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    // MoveFileEx without MOVEFILE_REPLACE_EXISTING is no-replace: the call fails
+    // if the destination already exists, preserving the first winner.
+    let tmp: Vec<u16> = tmp_path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let final_name: Vec<u16> = final_path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let moved = unsafe { MoveFileExW(tmp.as_ptr(), final_name.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if moved != 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    let raw = error.raw_os_error().unwrap_or(0) as u32;
+    if raw == ERROR_ALREADY_EXISTS || raw == ERROR_FILE_EXISTS {
+        return Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            "destination exists",
+        ));
+    }
+    Err(error)
+}
+
+fn is_already_exists(error: &std::io::Error) -> bool {
+    error.kind() == ErrorKind::AlreadyExists
+}
+
+#[cfg(unix)]
+fn sync_journal_dir(journal_dir: &Path) -> Result<(), String> {
+    File::open(journal_dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!(
+                "sync journal directory {} after activation: {error}",
+                journal_dir.display()
+            )
+        })
+}
+
+#[cfg(windows)]
+fn sync_journal_dir(_journal_dir: &Path) -> Result<(), String> {
+    // MOVEFILE_WRITE_THROUGH already requested durable move semantics.
+    Ok(())
 }
 
 fn validate_relative_path(field: &str, value: &str) -> Result<(), String> {
@@ -168,51 +384,11 @@ fn validate_full_hex(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn atomic_install(tmp_path: &Path, final_path: &Path, journal_dir: &Path) -> Result<(), String> {
-    std::fs::rename(tmp_path, final_path).map_err(|error| {
-        format!(
-            "atomic activation failed renaming {} to {}: {error}",
-            tmp_path.display(),
-            final_path.display()
-        )
-    })?;
-    File::open(journal_dir)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            format!(
-                "sync journal directory {} after activation: {error}",
-                journal_dir.display()
-            )
-        })
-}
-
-#[cfg(windows)]
-fn atomic_install(tmp_path: &Path, final_path: &Path, _journal_dir: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
-
-    let tmp: Vec<u16> = tmp_path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let final_name: Vec<u16> = final_path
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let moved = unsafe { MoveFileExW(tmp.as_ptr(), final_name.as_ptr(), MOVEFILE_WRITE_THROUGH) };
-    if moved == 0 {
-        return Err(format!(
-            "atomic activation failed moving {} to {} with write-through: {}",
-            tmp_path.display(),
-            final_path.display(),
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn manifest() -> ActiveJournalManifestV3 {
         ActiveJournalManifestV3 {
@@ -234,6 +410,13 @@ mod tests {
                 certificate_path: "history/migration-v2-to-v3.certificate.json".to_string(),
             },
         }
+    }
+
+    fn manifest_with(migration_id: &str, active_sha: &str) -> ActiveJournalManifestV3 {
+        let mut value = manifest();
+        value.migration.id = migration_id.to_string();
+        value.active.sha256 = active_sha.to_string();
+        value
     }
 
     #[test]
@@ -258,6 +441,11 @@ mod tests {
             ActivationOutcome::AlreadyActive
         );
         assert_eq!(load_active_manifest(dir.path()).unwrap(), Some(value));
+        // Prepared temp must not linger after a successful commit.
+        assert!(
+            !prepared_temp_path(dir.path(), &manifest().migration.id).exists(),
+            "temp residue must be cleaned after activation"
+        );
     }
 
     #[test]
@@ -270,6 +458,184 @@ mod tests {
         let error = activate_initial_v3(dir.path(), &conflicting).unwrap_err();
         assert!(error.contains("artifact conflict"));
         assert_eq!(load_active_manifest(dir.path()).unwrap(), Some(first));
+    }
+
+    #[test]
+    fn matching_temp_residue_is_resumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = manifest();
+        let bytes = value.canonical_bytes().unwrap();
+        let tmp = prepared_temp_path(dir.path(), &value.migration.id);
+        std::fs::write(&tmp, &bytes).unwrap();
+
+        assert_eq!(
+            activate_initial_v3(dir.path(), &value).unwrap(),
+            ActivationOutcome::Activated
+        );
+        assert_eq!(load_active_manifest(dir.path()).unwrap(), Some(value));
+        assert!(!tmp.exists(), "resumed temp should be cleaned after commit");
+    }
+
+    #[test]
+    fn corrupt_temp_residue_is_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = manifest();
+        let tmp = prepared_temp_path(dir.path(), &value.migration.id);
+        std::fs::write(&tmp, b"{not-valid-manifest").unwrap();
+
+        assert_eq!(
+            activate_initial_v3(dir.path(), &value).unwrap(),
+            ActivationOutcome::Activated
+        );
+        assert_eq!(load_active_manifest(dir.path()).unwrap(), Some(value));
+    }
+
+    #[test]
+    fn foreign_temp_residue_same_migration_id_is_rebuilt_when_bytes_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = manifest();
+        let mut foreign = value.clone();
+        foreign.active.sha256 = "66".repeat(32);
+        let tmp = prepared_temp_path(dir.path(), &value.migration.id);
+        std::fs::write(&tmp, foreign.canonical_bytes().unwrap()).unwrap();
+
+        assert_eq!(
+            activate_initial_v3(dir.path(), &value).unwrap(),
+            ActivationOutcome::Activated
+        );
+        assert_eq!(load_active_manifest(dir.path()).unwrap(), Some(value));
+    }
+
+    #[test]
+    fn concurrent_conflicting_activations_keep_single_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let first = manifest_with(&"aa".repeat(32), &"22".repeat(32));
+        let second = manifest_with(&"bb".repeat(32), &"55".repeat(32));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let left_dir = dir_path.clone();
+        let left_barrier = Arc::clone(&barrier);
+        let left_manifest = first.clone();
+        let left = thread::spawn(move || {
+            left_barrier.wait();
+            activate_initial_v3(&left_dir, &left_manifest)
+        });
+
+        let right_dir = dir_path.clone();
+        let right_barrier = Arc::clone(&barrier);
+        let right_manifest = second.clone();
+        let right = thread::spawn(move || {
+            right_barrier.wait();
+            activate_initial_v3(&right_dir, &right_manifest)
+        });
+
+        let left_result = left.join().unwrap();
+        let right_result = right.join().unwrap();
+
+        let outcomes = [left_result.is_ok(), right_result.is_ok()];
+        assert_eq!(
+            outcomes.iter().filter(|ok| **ok).count(),
+            1,
+            "exactly one racer must commit; left={left_result:?} right={right_result:?}"
+        );
+        assert!(
+            left_result.is_err() || right_result.is_err(),
+            "loser must surface conflict or install failure"
+        );
+
+        let loaded = load_active_manifest(dir.path()).unwrap().expect("winner");
+        assert!(
+            loaded == first || loaded == second,
+            "final must be exactly one of the two candidates"
+        );
+        let loser = if left_result.is_ok() {
+            assert_eq!(loaded, first);
+            right_result.err().expect("loser")
+        } else {
+            assert_eq!(loaded, second);
+            left_result.err().expect("loser")
+        };
+        assert!(
+            loser.contains("artifact conflict"),
+            "loser should report artifact conflict, got {loser}"
+        );
+    }
+
+    #[test]
+    fn concurrent_identical_activations_converge_to_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let value = manifest();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let make = |dir_path: PathBuf, barrier: Arc<Barrier>, value: ActiveJournalManifestV3| {
+            thread::spawn(move || {
+                barrier.wait();
+                activate_initial_v3(&dir_path, &value)
+            })
+        };
+
+        let left = make(dir_path.clone(), Arc::clone(&barrier), value.clone());
+        let right = make(dir_path, barrier, value.clone());
+        let left_result = left.join().unwrap().unwrap();
+        let right_result = right.join().unwrap().unwrap();
+
+        assert!(
+            matches!(
+                (left_result, right_result),
+                (ActivationOutcome::Activated, ActivationOutcome::AlreadyActive)
+                    | (ActivationOutcome::AlreadyActive, ActivationOutcome::Activated)
+                    | (ActivationOutcome::Activated, ActivationOutcome::Activated)
+            ),
+            "identical racers must only report activated/already-active, got {left_result:?}/{right_result:?}"
+        );
+        assert_eq!(load_active_manifest(dir.path()).unwrap(), Some(value));
+    }
+
+    #[test]
+    fn no_replace_install_refuses_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join(ACTIVE_MANIFEST_FILE);
+        let winner = manifest();
+        std::fs::write(&final_path, winner.canonical_bytes().unwrap()).unwrap();
+
+        let mut challenger = winner.clone();
+        challenger.migration.id = "77".repeat(32);
+        challenger.active.sha256 = "88".repeat(32);
+        let tmp = prepared_temp_path(dir.path(), &challenger.migration.id);
+        std::fs::write(&tmp, challenger.canonical_bytes().unwrap()).unwrap();
+
+        let err = atomic_install_no_replace(&tmp, &final_path, dir.path()).unwrap_err();
+        assert!(matches!(err, InstallError::DestinationExists));
+        assert_eq!(
+            load_active_manifest(dir.path()).unwrap(),
+            Some(winner),
+            "existing final must be preserved"
+        );
+    }
+
+    #[test]
+    fn post_commit_dir_sync_failure_still_reports_activated() {
+        // Commit is the no-replace create. Even when directory durability sync
+        // is a no-op failure path, observe_final must still report the true
+        // activated state rather than "not activated".
+        let dir = tempfile::tempdir().unwrap();
+        let value = manifest();
+        let bytes = value.canonical_bytes().unwrap();
+        let tmp = prepared_temp_path(dir.path(), &value.migration.id);
+        std::fs::write(&tmp, &bytes).unwrap();
+        let final_path = dir.path().join(ACTIVE_MANIFEST_FILE);
+
+        platform_no_replace_install(&tmp, &final_path).unwrap();
+        // Simulate durability-sync failure: ignore sync error, re-read final.
+        let _ = sync_journal_dir(dir.path());
+        let outcome = observe_final(&final_path, &value).unwrap();
+        assert_eq!(outcome, Some(ActivationOutcome::AlreadyActive));
+        assert_eq!(
+            activate_initial_v3(dir.path(), &value).unwrap(),
+            ActivationOutcome::AlreadyActive
+        );
     }
 
     #[test]
