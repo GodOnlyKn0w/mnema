@@ -1906,6 +1906,7 @@ fn print_tree_text(node: &tree::TreeNode, depth: usize) {
 
 /// depends-on review for one strand: upstream lifecycle facts and trace handles.
 /// Built on the F3 typed projection; lifecycle is evidence, not a gate verdict.
+/// Does not compute ready / blocker / critical-path.
 pub(crate) fn cmd_depends(id: &str, format_json: Option<&str>) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
@@ -1926,32 +1927,92 @@ pub(crate) fn cmd_depends(id: &str, format_json: Option<&str>) -> Result<(), Str
         let output = output::DependsOutput::from(&review);
         println!("{}", serde_json::to_string(&output).expect("serialize"));
     } else {
+        print_depends_review_text(&review);
+    }
+    Ok(())
+}
+
+/// `depends --under X`: same per-strand review facts for every strand in
+/// SubtreeScope(X). Schema per strand matches single-strand depends; no
+/// ready/blocker/critical-path aggregation.
+pub(crate) fn cmd_depends_under(under: &str, format_json: Option<&str>) -> Result<(), String> {
+    let path = ensure_journal()?;
+    let (events, _skipped) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+    let allow_selection = format_json != Some("json");
+    let scope = scope_from_under(Some(under), &strands, allow_selection, current_max_offset)?;
+    let root_id = scope
+        .root_id()
+        .ok_or_else(|| "depends --under requires a subtree root".to_string())?
+        .to_string();
+    let ids = scope.resolve_ids(&strands)?;
+    let graph = graph::StrandGraph::from_strands(&strands);
+
+    // Stable order: reverse-chrono by last activity among in-scope strands,
+    // matching collection-query presentation.
+    let mut ordered: Vec<&projection::ProjectedStrand> =
+        strands.iter().filter(|s| ids.contains(&s.id)).collect();
+    ordered.sort_by(|a, b| b.last_ts().cmp(a.last_ts()));
+
+    let mut reviews = Vec::with_capacity(ordered.len());
+    for strand in &ordered {
+        let review = graph
+            .depends_review(&strand.id)
+            .ok_or_else(|| format!("strand {} not found", strand.id))?;
+        reviews.push(review);
+    }
+
+    if format_json == Some("json") {
+        let out = output::DependsScopeOutput {
+            root_id: root_id.clone(),
+            count: reviews.len(),
+            strands: reviews.iter().map(output::DependsOutput::from).collect(),
+        };
+        println!("{}", serde_json::to_string(&out).expect("serialize"));
+    } else {
         println!(
-            "depends-on review: {}  {}",
-            shorten(&review.id),
-            review.summary.chars().take(50).collect::<String>()
+            "depends-on review under {} (SubtreeScope, {} strand{})",
+            shorten(&root_id),
+            reviews.len(),
+            if reviews.len() == 1 { "" } else { "s" }
         );
-        println!(
-            "  upstreams: {} ({} registered)",
-            review.upstream_count, review.registered_upstream_count
-        );
-        if review.upstreams.is_empty() {
+        if reviews.is_empty() {
             println!("  (none)");
         } else {
-            for up in &review.upstreams {
-                println!(
-                    "    [{}] {}  {}",
-                    up.lifecycle,
-                    shorten(&up.id),
-                    up.summary.chars().take(45).collect::<String>()
-                );
-                println!(
-                    "      last: {}",
-                    up.last_entry.chars().take(60).collect::<String>()
-                );
-                println!("      show: {}", up.show_command);
+            for review in &reviews {
+                print_depends_review_text(review);
             }
         }
     }
     Ok(())
+}
+
+fn print_depends_review_text(review: &graph::DependsReview) {
+    println!(
+        "depends-on review: {}  {}",
+        shorten(&review.id),
+        review.summary.chars().take(50).collect::<String>()
+    );
+    println!(
+        "  upstreams: {} ({} registered)",
+        review.upstream_count, review.registered_upstream_count
+    );
+    if review.upstreams.is_empty() {
+        println!("  (none)");
+    } else {
+        for up in &review.upstreams {
+            println!(
+                "    [{}] {}  {}",
+                up.lifecycle,
+                shorten(&up.id),
+                up.summary.chars().take(45).collect::<String>()
+            );
+            println!(
+                "      last: {}",
+                up.last_entry.chars().take(60).collect::<String>()
+            );
+            println!("      show: {}", up.show_command);
+        }
+    }
 }

@@ -229,15 +229,55 @@ fn check_cutover_certificate(
 ///
 /// `since_offset`: when set, skip why-less decisions at offset <= floor
 /// (pre-policy stock); unfixed frictions are never filtered by this floor.
+///
+/// `under` / `id`: optional candidate-set shrink (SubtreeScope or single strand).
+/// Findings schema and semantics stay the same; only which home strands can
+/// emit findings changes. Fix-prefix knowledge always scans the full journal
+/// so a fix outside the scope still closes a friction inside it.
+/// Machine mode (`format_json`) forbids `@N` selection handles.
 pub(crate) fn cmd_doctor_edges(
     format_json: bool,
     since_offset: Option<usize>,
+    under: Option<&str>,
+    id: Option<&str>,
 ) -> Result<bool, String> {
     let started = Instant::now();
     let path = ensure_journal()?;
     let (events, skipped) = read_events_lossy(&path);
     let strands = projection::project_strands(&events, true);
-    let report = projection::edges_discipline_report_since(&strands, since_offset);
+    let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+    let allow_selection = !format_json;
+
+    let candidate_ids = match (under, id) {
+        (Some(_), Some(_)) => {
+            return Err("doctor edges: --under and --id conflict".to_string());
+        }
+        (Some(root), None) => {
+            let scope = crate::commands::query::scope_from_under(
+                Some(root),
+                &strands,
+                allow_selection,
+                current_max_offset,
+            )?;
+            Some(scope.resolve_ids(&strands)?)
+        }
+        (None, Some(raw)) => {
+            let full = crate::reference::resolve_strand_with_selection(
+                &strands,
+                raw,
+                allow_selection,
+                current_max_offset,
+            )?;
+            Some(std::collections::HashSet::from([full]))
+        }
+        (None, None) => None,
+    };
+
+    let report = projection::edges_discipline_report_since(
+        &strands,
+        since_offset,
+        candidate_ids.as_ref(),
+    );
     let out = output::EdgesOutput {
         open_friction_count: report.open_frictions.len(),
         open_friction_active_count: report.open_friction_active_count,
@@ -270,6 +310,11 @@ pub(crate) fn cmd_doctor_edges(
         println!("{}", serde_json::to_string(&out).expect("serialize"));
     } else {
         println!("Doctor Edges Report (edge-discipline self-check)");
+        if let Some(root) = under {
+            println!("  scope: under {} (SubtreeScope)", shorten(root));
+        } else if let Some(single) = id {
+            println!("  scope: id {} (single strand)", shorten(single));
+        }
         println!(
             "  unfixed [friction] total: {} (on active: {})",
             out.open_friction_count, out.open_friction_active_count

@@ -1,4 +1,5 @@
 use crate::cli::{Cli, exit_code_for};
+use crate::commands::doctor::*;
 use crate::commands::manage::*;
 use crate::commands::query::*;
 use crate::commands::write::*;

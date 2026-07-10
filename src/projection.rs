@@ -389,13 +389,20 @@ pub(crate) fn extract_fixes_prefix(content: &str) -> Option<&str> {
 ///   journal offset (legacy pre-policy stock); frictions are never skipped.
 #[cfg(test)]
 pub fn edges_discipline_report(strands: &[ProjectedStrand]) -> EdgesDisciplineReport {
-    edges_discipline_report_since(strands, None)
+    edges_discipline_report_since(strands, None, None)
 }
 
-/// Same as [`edges_discipline_report`], with optional decision-offset floor.
+/// Same as [`edges_discipline_report`], with optional decision-offset floor
+/// and optional candidate-set shrink.
+///
+/// `candidate_ids`: when `Some`, only those home strands emit findings
+/// (JournalScope when `None`). Fix-prefix knowledge always scans the full
+/// `strands` slice so a `[fixed]` outside the candidate set still closes a
+/// friction inside it — scope only shrinks the candidate set, not semantics.
 pub fn edges_discipline_report_since(
     strands: &[ProjectedStrand],
     since_offset: Option<usize>,
+    candidate_ids: Option<&std::collections::HashSet<String>>,
 ) -> EdgesDisciplineReport {
     // Collect every fixes= target prefix across the whole journal.
     let mut fix_prefixes: Vec<&str> = Vec::new();
@@ -433,6 +440,11 @@ pub fn edges_discipline_report_since(
     for strand in strands {
         if strand.hidden {
             continue;
+        }
+        if let Some(ids) = candidate_ids {
+            if !ids.contains(&strand.id) {
+                continue;
+            }
         }
         let strand_active = strand.state() == "registered";
         for entry in &strand.log {

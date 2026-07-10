@@ -1712,7 +1712,8 @@ fn edges_discipline_since_skips_old_why_less_decisions_not_frictions() {
     let (events2, _) = read_events_lossy(&path);
     let strands2 = projection::project_strands(&events2, true);
     let full = projection::edges_discipline_report(&strands2);
-    let filtered = projection::edges_discipline_report_since(&strands2, Some(old_decision_offset));
+    let filtered =
+        projection::edges_discipline_report_since(&strands2, Some(old_decision_offset), None);
     assert!(
         full.decisions_without_why.len() >= 2,
         "baseline has both decisions: {:?}",
@@ -2078,8 +2079,266 @@ fn under_flag_parses_on_collection_commands() {
         vec!["mnema", "pick", "--under", "0000019dd34b", "--print-id"],
         vec!["mnema", "orient", "--id", "0000019dd34b"],
         vec!["mnema", "orient", "--id", "0000019dd34b", "--tree"],
+        vec!["mnema", "depends", "--under", "0000019dd34b"],
+        vec!["mnema", "depends", "--under", "0000019dd34b", "--format", "json"],
+        vec!["mnema", "doctor", "edges", "--under", "0000019dd34b"],
+        vec!["mnema", "doctor", "edges", "--id", "0000019dd34b"],
+        vec![
+            "mnema",
+            "doctor",
+            "edges",
+            "--under",
+            "0000019dd34b",
+            "--format",
+            "json",
+        ],
     ] {
         let result = Cli::command().try_get_matches_from(&args);
         assert!(result.is_ok(), "must parse {:?}: {:?}", args, result.err());
     }
+}
+
+#[test]
+fn depends_under_and_single_id_conflict() {
+    use clap::CommandFactory;
+    let result = Cli::command().try_get_matches_from([
+        "mnema",
+        "depends",
+        "0000019dd34b",
+        "--under",
+        "0000019dd34b",
+    ]);
+    assert!(result.is_err(), "depends <ID> --under must conflict");
+}
+
+#[test]
+fn doctor_edges_under_and_id_conflict() {
+    use clap::CommandFactory;
+    let result = Cli::command().try_get_matches_from([
+        "mnema",
+        "doctor",
+        "edges",
+        "--under",
+        "0000019dd34b",
+        "--id",
+        "0000019dd34c",
+    ]);
+    assert!(result.is_err(), "doctor edges --under and --id must conflict");
+}
+
+#[test]
+fn depends_under_lists_each_subtree_strand_upstream_facts() {
+    let _env = setup();
+    let parent = create_strand("depends parent");
+    let child = create_strand("depends child");
+    let outsider = create_strand("depends outsider");
+    let upstream_a = create_strand("upstream a");
+    let upstream_b = create_strand("upstream b");
+    cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+    cmd_link(&parent, &upstream_a, Some("depends-on"), false, None).unwrap();
+    cmd_link(&child, &upstream_b, Some("depends-on"), false, None).unwrap();
+    cmd_link(&outsider, &upstream_a, Some("depends-on"), false, None).unwrap();
+
+    // Command path: smoke success (stdout not captured).
+    assert!(cmd_depends_under(&parent, Some("json")).is_ok());
+
+    // Projection-level facts: SubtreeScope(parent) = {parent, child}, not outsider.
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let scope = scope_from_under(Some(&parent), &strands, false, 0).unwrap();
+    let ids = scope.resolve_ids(&strands).unwrap();
+    assert!(ids.contains(&parent));
+    assert!(ids.contains(&child));
+    assert!(!ids.contains(&outsider));
+
+    let graph = crate::graph::StrandGraph::from_strands(&strands);
+    let parent_review = graph.depends_review(&parent).unwrap();
+    let child_review = graph.depends_review(&child).unwrap();
+    assert_eq!(parent_review.upstream_count, 1);
+    assert_eq!(parent_review.upstreams[0].id, upstream_a);
+    assert_eq!(child_review.upstream_count, 1);
+    assert_eq!(child_review.upstreams[0].id, upstream_b);
+    // No ready/blocker/critical-path fields on the review surface.
+    let json = serde_json::to_value(crate::output::DependsOutput::from(&parent_review)).unwrap();
+    let obj = json.as_object().unwrap();
+    assert!(!obj.contains_key("ready"));
+    assert!(!obj.contains_key("blockers"));
+    assert!(!obj.contains_key("critical_path"));
+}
+
+#[test]
+fn depends_under_json_forbids_selection_handle() {
+    let _env = setup();
+    let parent = create_strand("depends sel parent");
+    let err = cmd_depends_under("@1", Some("json")).expect_err("machine mode bans @N");
+    assert!(
+        err.contains("selection handle") || err.contains("@1"),
+        "expected selection ban, got: {}",
+        err
+    );
+    let _ = parent;
+}
+
+#[test]
+fn edges_discipline_candidate_set_shrinks_findings_not_fix_knowledge() {
+    let _env = setup();
+    let parent = create_strand("edges scope parent");
+    let child = create_strand("edges scope child");
+    let outsider = create_strand("edges scope outsider");
+    cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+    // Friction on child (in scope) and outsider (out of scope).
+    cmd_append(
+        Some("[friction] child blocked; at=c; tried=t"),
+        None,
+        false,
+        false,
+        None,
+        Some(&child),
+        None,
+        None,
+    )
+    .unwrap();
+    cmd_append(
+        Some("[friction] outsider blocked; at=o; tried=t"),
+        None,
+        false,
+        false,
+        None,
+        Some(&outsider),
+        None,
+        None,
+    )
+    .unwrap();
+    // Why-less decision on parent (in scope).
+    cmd_append(
+        Some("[decision] parent choose without why"),
+        None,
+        false,
+        false,
+        None,
+        Some(&parent),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let full = projection::edges_discipline_report(&strands);
+    assert!(
+        full.open_frictions.len() >= 2,
+        "journal-wide should see both frictions"
+    );
+
+    let scope = scope_from_under(Some(&parent), &strands, false, 0).unwrap();
+    let ids = scope.resolve_ids(&strands).unwrap();
+    let scoped = projection::edges_discipline_report_since(&strands, None, Some(&ids));
+    assert!(
+        scoped
+            .open_frictions
+            .iter()
+            .all(|i| i.strand_id == child || i.strand_id == parent),
+        "scoped frictions must stay inside SubtreeScope"
+    );
+    assert!(
+        !scoped
+            .open_frictions
+            .iter()
+            .any(|i| i.strand_id == outsider),
+        "outsider friction must leave the candidate set"
+    );
+    assert!(
+        scoped
+            .decisions_without_why
+            .iter()
+            .any(|i| i.strand_id == parent),
+        "in-scope decision should remain"
+    );
+
+    // Fix from outsider still closes in-scope friction (fix knowledge is journal-wide).
+    let child_strand = strands.iter().find(|s| s.id == child).unwrap();
+    let friction_id = child_strand
+        .log
+        .iter()
+        .rev()
+        .find(|e| e.content.starts_with("[friction] child blocked"))
+        .and_then(|e| e.entry_id.clone())
+        .expect("child friction entry_id");
+    let prefix = shorten(&friction_id);
+    cmd_append(
+        Some(&format!(
+            "[fixed] fixes={} repaired from outsider; verified=test",
+            prefix
+        )),
+        None,
+        false,
+        false,
+        None,
+        Some(&outsider),
+        None,
+        None,
+    )
+    .unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let scope = scope_from_under(Some(&parent), &strands, false, 0).unwrap();
+    let ids = scope.resolve_ids(&strands).unwrap();
+    let after_fix =
+        projection::edges_discipline_report_since(&strands, None, Some(&ids));
+    assert!(
+        !after_fix
+            .open_frictions
+            .iter()
+            .any(|i| i.strand_id == child),
+        "fix outside scope must still close in-scope friction"
+    );
+}
+
+#[test]
+fn doctor_edges_id_scopes_to_single_strand() {
+    let _env = setup();
+    let a = create_strand("doctor id a");
+    let b = create_strand("doctor id b");
+    cmd_append(
+        Some("[friction] only on a; at=a; tried=t"),
+        None,
+        false,
+        false,
+        None,
+        Some(&a),
+        None,
+        None,
+    )
+    .unwrap();
+    cmd_append(
+        Some("[friction] only on b; at=b; tried=t"),
+        None,
+        false,
+        false,
+        None,
+        Some(&b),
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert!(cmd_doctor_edges(true, None, None, Some(&a)).is_ok());
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let ids = std::collections::HashSet::from([a.clone()]);
+    let report = projection::edges_discipline_report_since(&strands, None, Some(&ids));
+    assert!(
+        report.open_frictions.iter().all(|i| i.strand_id == a),
+        "single-id candidate set must only report strand a"
+    );
+    assert!(
+        !report.open_frictions.iter().any(|i| i.strand_id == b),
+        "strand b must leave single-id candidate set"
+    );
 }

@@ -349,6 +349,15 @@ impl From<&crate::graph::DependsReview> for DependsOutput {
         }
     }
 }
+
+/// `depends --under X`: one DependsOutput per strand in SubtreeScope(X).
+/// Single-strand `depends` keeps DependsOutput; this shape is under-only.
+#[derive(Debug, Serialize)]
+pub(crate) struct DependsScopeOutput {
+    pub(crate) root_id: String,
+    pub(crate) count: usize,
+    pub(crate) strands: Vec<DependsOutput>,
+}
 // ── command result JSON DTOs ───────────────────────────────
 
 #[derive(Debug, Serialize)]

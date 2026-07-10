@@ -774,16 +774,26 @@ JSON shape: mnema explain json")]
 depends-on is an attention edge for review and handoff context, not an
 execution gate. Output lists upstream lifecycle facts and show handles;
 lifecycle is evidence, not a verdict. Built on the typed depends-on projection (F3).
+Does not compute ready/blocker/critical-path.
+
+Single strand (default): one task's direct depends-on upstreams.
+--under X: scoped set — same per-strand facts for every strand in
+SubtreeScope(X) (X plus belongs-to descendants).
 
 Examples:
   mnema depends <TASK>
-  mnema depends <TASK> --format json")]
+  mnema depends <TASK> --format json
+  mnema depends --under <ID>
+  mnema depends --under <ID> --format json")]
     Depends {
         #[command(flatten)]
         target: IdTarget,
-        /// Analyse the most recently active strand (explicit form of giving no id)
-        #[arg(long, conflicts_with_all = ["id_pos", "id_flag"])]
+        /// Review the most recently active strand (explicit form of giving no id)
+        #[arg(long, conflicts_with_all = ["id_pos", "id_flag", "under"])]
         last: bool,
+        /// List depends-on upstream facts for each strand in SubtreeScope(ID)
+        #[arg(long, value_name = "ID", conflicts_with_all = ["id_pos", "id_flag", "last"])]
+        under: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -792,7 +802,9 @@ Examples:
 
 #[derive(Subcommand)]
 enum DoctorTarget {
-    /// Check journal integrity
+    /// Check journal integrity (always JournalScope — parse/hash/anchor
+    /// integrity cannot be narrowed by --under/--id; scope must not hide
+    /// container damage)
     Journal,
     /// Edge-discipline self-check: open unfixed [friction] + [decision] without --why
     #[command(after_help = "\
@@ -800,6 +812,8 @@ Examples:
   mnema doctor edges
   mnema doctor edges --format json
   mnema doctor edges --since 1200
+  mnema doctor edges --under <ID>
+  mnema doctor edges --id <ID>
 
 Read-only projection of the tool's own edge discipline:
   (a) unfixed [friction]: any [friction] not targeted by any
@@ -808,7 +822,10 @@ Read-only projection of the tool's own edge discipline:
   (b) [decision] entries recorded without a --why ref
       (--since N skips decisions at offset <= N; pre-policy stock)
 JSON twin: open_frictions[] / decisions_without_why[] with entry_id;
-  open_friction_count + open_friction_active_count.")]
+  open_friction_count + open_friction_active_count.
+Same findings schema always; --under X / --id X only shrink the candidate
+set (JournalScope default; SubtreeScope / single strand). Fix knowledge
+still uses the full journal. doctor journal integrity stays JournalScope.")]
     Edges {
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -817,6 +834,12 @@ JSON twin: open_frictions[] / decisions_without_why[] with entry_id;
         /// stock). Unfixed frictions are never skipped by this floor.
         #[arg(long, value_name = "N")]
         since: Option<usize>,
+        /// Restrict findings to strands in SubtreeScope(ID)
+        #[arg(long, value_name = "ID", conflicts_with = "id")]
+        under: Option<String>,
+        /// Restrict findings to a single strand
+        #[arg(long, value_name = "ID", conflicts_with = "under")]
+        id: Option<String>,
     },
 }
 
@@ -1463,9 +1486,17 @@ fn run(command: &Commands) -> Result<(), String> {
         Commands::Doctor { target } => {
             let result = match target {
                 DoctorTarget::Journal => cmd_doctor_journal(),
-                DoctorTarget::Edges { format, since } => {
-                    cmd_doctor_edges(format.as_deref() == Some("json"), *since)
-                }
+                DoctorTarget::Edges {
+                    format,
+                    since,
+                    under,
+                    id,
+                } => cmd_doctor_edges(
+                    format.as_deref() == Some("json"),
+                    *since,
+                    under.as_deref(),
+                    id.as_deref(),
+                ),
             };
             match result {
                 Ok(true) => Err("journal issues detected".to_string()),
@@ -1499,10 +1530,15 @@ fn run(command: &Commands) -> Result<(), String> {
         Commands::Depends {
             target,
             last: _,
+            under,
             format,
         } => {
-            let id = resolve_read_target(target)?;
-            cmd_depends(&id, format.as_deref())
+            if let Some(root) = under.as_deref() {
+                cmd_depends_under(root, format.as_deref())
+            } else {
+                let id = resolve_read_target(target)?;
+                cmd_depends(&id, format.as_deref())
+            }
         }
 
         Commands::Orient {

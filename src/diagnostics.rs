@@ -140,9 +140,9 @@ search（SearchOutput）：
   ※ matches[]：strand_id / content / strand_type / hidden / entry_id / marker（entry_id=全哈希供 fixes=/--why；marker null=未筛）
 doctor edges（EdgesOutput）：
   open_frictions / decisions_without_why / open_friction_count / open_friction_active_count / decision_without_why_count
-  ※ 项：entry_id / strand_id / marker / content / offset
+  ※ 项：entry_id / strand_id / marker / content / offset；under/id 仅缩候选集；fixes= 仍扫全 journal
   ※ unfixed friction=无 fixes= 指它（不按 home strand 开闭过滤）；active_count=其中 registered 线上
-  ※ decision 无 --why；--since N 只跳过 offset<=N 的存量 decision
+  ※ decision 无 --why；--since N 只跳过 offset<=N 的存量 decision；doctor journal integrity 始终 JournalScope
 timeline（TimelineOutput）：
   timeline / truncated / count / max_offset
   ※ timeline[]：journal_offset / ts / strand_id / strand_type / kind / ts_skew
@@ -152,7 +152,7 @@ hide / unhide: strand_id / status / noop / active_count / closed_count / hidden_
 link: source_id / target_id / edge_type / status / result.source / result.target（卡片）
 cutover-v2: applied / source_journal / archive_journal / map_path / certificate_path / source_event_count / imported_event_count / strand_count / entry_count / anchor_count / unresolved_ref_count
 depends（DependsOutput）：id / summary / upstream_count / registered_upstream_count / upstreams[]
-  ※ upstreams[]：id / lifecycle / summary / last_entry / show_command
+  ※ upstreams[]：id / lifecycle / summary / last_entry / show_command；under-scope（DependsScopeOutput）：root_id / count / strands[]
 卡片/result 形态见 mnema explain card；jq 整型见 mnema explain jq"#,
     },
     TopicInfo {
@@ -240,7 +240,9 @@ entry 形状模板：
 
 常用读法：
   mnema tree --id <母线>
-  mnema depends --id <任务线>"#,
+  mnema depends --id <任务线>
+  mnema depends --under <母线>
+  mnema doctor edges --under <母线>"#,
     },
     TopicInfo {
         name: "grammar",
@@ -254,8 +256,9 @@ close/reopen 收口动作强制显式指名、禁 --last/缺省；正文只走 s
   --format json     机器输出唯一正典（explain --json 是兼容快捷）
   --provenance / --seen-offset <N>  写命令出处 / 上次看到的目标线 offset
   --tail <N>        只限显示、不改账，对任何目标可用
-  --under <ID>      集合查询的 SubtreeScope（list/search/timeline/pick）
+  --under <ID>      集合查询的 SubtreeScope（list/search/timeline/pick/depends；doctor edges 同）
   mnema orient --id <ID>。委派入口专用写法，候选集同集合查询 --under（不是把 --under 写在 orient 上）
+  doctor edges --id <ID>  单线候选集；与 --under 互斥。doctor journal integrity 始终 JournalScope，不可用 scope 隐藏容器损坏
   --edge-type       link 的边类型（--type 是 deprecated 别名）
   --why / --from    引依据/记来源：线前缀=其最新条，entry 哈希前缀=精确该条；读取用 mnema show --entry <HASH>（--deref 展开链，--before/--after 邻域）
 JSON 命名法：复数名词=数组；计数=count/*_count；自身身份=id；引用他者=<noun>_id；id/strand_id 全宽 64 hex 可 join。
@@ -834,8 +837,8 @@ mod tests {
     #[test]
     fn json_topic_fields_match_serialization() {
         use crate::output::{
-            DependsOutput, EdgesOutput, OrientOutput, SearchOutput, StrandDetailOutput,
-            StrandListItem, TimelineOutput,
+            DependsOutput, DependsScopeOutput, EdgesOutput, OrientOutput, SearchOutput,
+            StrandDetailOutput, StrandListItem, TimelineOutput,
         };
         let topic = topic_lookup("json").expect("json topic must exist");
 
@@ -958,6 +961,21 @@ mod tests {
             assert!(
                 topic.body.contains(key.as_str()),
                 "json topic missing depends field: {}",
+                key
+            );
+        }
+
+        // depends --under → DependsScopeOutput
+        let depends_scope_sample = DependsScopeOutput {
+            root_id: "root".to_string(),
+            count: 0,
+            strands: vec![],
+        };
+        let v = serde_json::to_value(&depends_scope_sample).expect("serialize DependsScopeOutput");
+        for key in v.as_object().unwrap().keys() {
+            assert!(
+                topic.body.contains(key.as_str()),
+                "json topic missing depends --under field: {}",
                 key
             );
         }
