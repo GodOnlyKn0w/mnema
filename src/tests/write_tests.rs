@@ -1273,6 +1273,75 @@ fn v2_why_writes_entry_hash_ref_only() {
 }
 
 #[test]
+fn v2_why_strand_shorthand_skips_latest_structural_effect() {
+    let _env = setup();
+    let basis = create_strand("basis strand");
+    cmd_append(
+        Some("[decision] authored rationale"),
+        None,
+        false,
+        false,
+        None,
+        Some(&basis),
+        None,
+        None,
+    )
+    .unwrap();
+    let structural_target = create_strand("structural target");
+    cmd_link(
+        &basis,
+        &structural_target,
+        Some("depends-on"),
+        false,
+        None,
+    )
+    .unwrap();
+    let consumer = create_strand("consumer strand");
+
+    let path = ensure_journal().unwrap();
+    let (before_events, _) = read_events_lossy(&path);
+    let authored_entry_id = projection::project_strands(&before_events, true)
+        .iter()
+        .find(|s| s.id == basis)
+        .and_then(|s| s.log.iter().rev().find(|entry| entry.effect.is_none()))
+        .and_then(|entry| entry.entry_id.clone())
+        .expect("authored rationale hash exists");
+
+    cmd_append_with_seen_offset(
+        Some("[decision] cite the current conclusion"),
+        None,
+        false,
+        false,
+        None,
+        Some(&consumer),
+        None,
+        None,
+        None,
+        Some(&basis),
+    )
+    .unwrap();
+
+    let (after_events, _) = read_events_lossy(&path);
+    let refs = after_events
+        .iter()
+        .find_map(|(_, event)| match event {
+            Event::LogAppended {
+                id, content, refs, ..
+            } if id == &consumer && content == "[decision] cite the current conclusion" => {
+                Some(refs.clone())
+            }
+            _ => None,
+        })
+        .expect("citing entry exists");
+
+    assert_eq!(
+        refs,
+        vec![authored_entry_id],
+        "strand shorthand must cite authored content, not the latest link effect"
+    );
+}
+
+#[test]
 fn v2_why_pins_exact_entry_by_hash_prefix() {
     let _env = setup();
     let basis = create_strand("basis line first entry");

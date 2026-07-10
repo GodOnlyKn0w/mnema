@@ -81,11 +81,23 @@ fn resolve_rationale_ref(
                 .iter()
                 .find(|s| s.id == tgt)
                 .ok_or_else(|| format!("rationale target strand {} not found", input))?;
+            // A strand shorthand means "that line's current conclusion", not
+            // its most recent structural bookkeeping event. Link/hide/close/
+            // checkpoint entries participate in the hash chain, but citing
+            // one merely because it happened last makes --why/--from drift
+            // away from the authored rationale.
             return target_basis
                 .log
-                .last()
+                .iter()
+                .rev()
+                .find(|entry| entry.effect.is_none())
                 .and_then(|entry| entry.entry_id.clone())
-                .ok_or_else(|| format!("rationale target strand {} has no entry hash", input));
+                .ok_or_else(|| {
+                    format!(
+                        "rationale target strand {} has no authored entry hash",
+                        input
+                    )
+                });
         }
         crate::reference::StrandLookup::Ambiguous(candidates) => {
             return Err(crate::reference::ambiguous_message(input, &candidates));
