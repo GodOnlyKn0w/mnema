@@ -289,6 +289,15 @@ JSON shape: mnema explain json")]
         seen_offset: Option<usize>,
     },
     /// List all strands (reverse chronological, most recent last)
+    #[command(after_help = "\
+Examples:
+  mnema list
+  mnema list --under <ID>
+  mnema list --under <ID> --format json
+  mnema list --stale 2h
+
+--under X: same fields/schema as journal list; candidate set is SubtreeScope(X)
+(X plus belongs-to descendants). Collection queries share this flag.")]
     List {
         /// Include hidden strands
         #[arg(long)]
@@ -316,6 +325,9 @@ JSON shape: mnema explain json")]
         /// Filter to strands with last entry offset > N (updated since)
         #[arg(long, value_name = "N", conflicts_with = "stale_offset")]
         since_offset: Option<usize>,
+        /// Restrict to belongs-to subtree rooted at ID (SubtreeScope)
+        #[arg(long, value_name = "ID")]
+        under: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -376,10 +388,13 @@ Examples:
   mnema search --marker friction
   mnema search win_count --marker metric --format json
   mnema search --marker decision --format json
+  mnema search friction --under <ID>
+  mnema search --marker decision --under <ID> --format json
 
 Each hit is entry-level: entry hash prefix + marker + first line.
 Use the hash for fixes=<hash> / --why <hash>. Filter with --marker
-(friction/decision/metric/… — see mnema explain markers).")]
+(friction/decision/metric/… — see mnema explain markers).
+--under X: search only inside SubtreeScope(X) (same schema, smaller candidate set).")]
     Search {
         /// Search query (substring match, case-insensitive). Optional when --marker is set.
         #[arg(default_value = "")]
@@ -390,6 +405,9 @@ Use the hash for fixes=<hash> / --why <hash>. Filter with --marker
         /// Include hidden strands in the result set (default: exclude)
         #[arg(long)]
         include_hidden: bool,
+        /// Restrict to belongs-to subtree rooted at ID (SubtreeScope)
+        #[arg(long, value_name = "ID")]
+        under: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -412,12 +430,14 @@ Examples:
   mnema pick tree
   echo \"short note\" | mnema pick append
   mnema pick --print-id
+  mnema pick --under <ID> show
 
 Rules:
   Opens an arrow-key menu (up/down to move, type to filter, Enter to select,
   Esc to cancel). In non-TTY contexts it exits with an error instead of
   waiting for input. append selects a strand interactively and reads its body
-  from stdin: echo ... | mnema pick append.")]
+  from stdin: echo ... | mnema pick append.
+--under X: only strands in SubtreeScope(X) appear in the menu.")]
     Pick {
         /// Command to run with the selected strand: show, tree, depends, append, close, reopen, hide, unhide
         #[arg(value_name = "COMMAND", default_value = "show")]
@@ -428,6 +448,9 @@ Rules:
         /// Include closed and hidden strands (default: only active + visible; --all is an alias)
         #[arg(long = "include-hidden", alias = "all")]
         include_hidden: bool,
+        /// Restrict candidates to belongs-to subtree rooted at ID (SubtreeScope)
+        #[arg(long, value_name = "ID")]
+        under: Option<String>,
     },
     /// Create a directed link between two strands
     #[command(after_help = "\
@@ -669,9 +692,9 @@ Default is a dry run. --apply performs the cutover in .mnema/:\n  - moves journa
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
-        /// Filter to events from strands in the tree rooted at ID
-        #[arg(long, value_name = "ID", conflicts_with_all = ["strand", "links"])]
-        tree: Option<String>,
+        /// Restrict to events from strands in SubtreeScope(ID) (belongs-to descendants + root)
+        #[arg(long = "under", value_name = "ID", conflicts_with_all = ["strand", "links"])]
+        under: Option<String>,
         /// Maximum events to return (from the start of the filtered window)
         #[arg(long, value_name = "N", conflicts_with = "tail")]
         limit: Option<usize>,
@@ -682,6 +705,12 @@ Default is a dry run. --apply performs the cutover in .mnema/:\n  - moves journa
     /// Session-start orientation: menu of active strands with catch-up commands
     #[command(after_help = "\
 Pure read: orient never writes to the journal.
+
+Examples:
+  mnema orient
+  mnema orient --id <ID>
+  mnema orient --id <ID> --tree
+  mnema orient --format json
 
 Output per active strand:
   handle        Strand id (use with --id)
@@ -702,6 +731,8 @@ After orienting:
 Closed strands are folded to a count; retrieve with mnema list.
 Hidden strands are folded to a count; retrieve with mnema list --all.
 
+--id X: dedicated delegated entry — candidate set is SubtreeScope(X)
+  (X plus belongs-to descendants). Same set as collection queries' --under X.
 --tree: render active strands as a belongs-to forest. Strands that declare
   a belongs-to edge to another active strand are indented under their parent;
   parallel siblings under the same parent are visible as a group.
@@ -711,6 +742,9 @@ Exit codes:
   1 journal missing or unreadable
 JSON shape: mnema explain json")]
     Orient {
+        /// Scope menu to belongs-to subtree rooted at ID (SubtreeScope; dedicated entry)
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
         format: Option<String>,
@@ -907,8 +941,7 @@ fn looks_like_strand_id_token(token: &str) -> bool {
 }
 
 fn flag_list_has_id(kept: &[String]) -> bool {
-    kept.iter()
-        .any(|t| t == "--id" || t.starts_with("--id="))
+    kept.iter().any(|t| t == "--id" || t.starts_with("--id="))
 }
 
 fn stdin_body_recovery(command: &str, rest: &[String]) -> Option<String> {
@@ -1218,6 +1251,7 @@ fn run(command: &Commands) -> Result<(), String> {
             stale,
             stale_offset,
             since_offset,
+            under,
             format,
         } => {
             let fmt = format.as_deref() == Some("json");
@@ -1230,6 +1264,7 @@ fn run(command: &Commands) -> Result<(), String> {
                 stale.as_deref(),
                 *stale_offset,
                 *since_offset,
+                under.as_deref(),
                 fmt,
             )
         }
@@ -1286,9 +1321,16 @@ fn run(command: &Commands) -> Result<(), String> {
             marker,
             format,
             include_hidden,
+            under,
         } => {
             let fmt = format.as_deref() == Some("json");
-            cmd_search(query, fmt, *include_hidden, marker.as_deref())
+            cmd_search(
+                query,
+                fmt,
+                *include_hidden,
+                marker.as_deref(),
+                under.as_deref(),
+            )
         }
         Commands::Find {
             target,
@@ -1302,7 +1344,8 @@ fn run(command: &Commands) -> Result<(), String> {
             command,
             print_id,
             include_hidden,
-        } => cmd_pick(command, *print_id, *include_hidden),
+            under,
+        } => cmd_pick(command, *print_id, *include_hidden, under.as_deref()),
         Commands::Link {
             source,
             target,
@@ -1392,7 +1435,7 @@ fn run(command: &Commands) -> Result<(), String> {
             format,
             limit,
             tail,
-            tree,
+            under,
         } => cmd_timeline(
             *since_offset,
             since_ts.as_deref(),
@@ -1403,7 +1446,7 @@ fn run(command: &Commands) -> Result<(), String> {
             format.as_deref(),
             *limit,
             *tail,
-            tree.as_deref(),
+            under.as_deref(),
         ),
         Commands::Explain { code, format, json } => {
             let is_json = *json || format.as_deref() == Some("json");
@@ -1464,11 +1507,18 @@ fn run(command: &Commands) -> Result<(), String> {
         }
 
         Commands::Orient {
+            id,
             format,
             include_hidden,
             limit,
             tree,
-        } => cmd_orient(format.as_deref(), *include_hidden, *limit, *tree),
+        } => cmd_orient(
+            format.as_deref(),
+            *include_hidden,
+            *limit,
+            *tree,
+            id.as_deref(),
+        ),
 
         Commands::Checkpoint { .. } => unreachable!(),
     }

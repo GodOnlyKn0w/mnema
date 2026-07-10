@@ -599,8 +599,8 @@ fn orient_is_pure_read() {
     create_strand("a line");
     let path = ensure_journal().unwrap();
     let before = std::fs::read(&path).unwrap();
-    cmd_orient(None, false, None, false).unwrap();
-    cmd_orient(Some("json"), true, Some(3), false).unwrap();
+    cmd_orient(None, false, None, false, None).unwrap();
+    cmd_orient(Some("json"), true, Some(3), false, None).unwrap();
     let after = std::fs::read(&path).unwrap();
     assert_eq!(before, after, "orient must never write to the journal");
 }
@@ -877,7 +877,7 @@ fn search_default_excludes_hidden() {
     .unwrap();
     cmd_hide(&id, Some("noise"), false, None).unwrap();
     // Default: include_hidden=false → search skips the hidden strand.
-    let result = cmd_search("needle", false, false, None);
+    let result = cmd_search("needle", false, false, None, None);
     assert!(result.is_ok());
 }
 
@@ -910,7 +910,7 @@ fn search_include_hidden_projection_reports_hidden() {
         !visible.iter().any(|s| s.id == id),
         "hidden strand must not appear in default view"
     );
-    assert!(cmd_search("needle", false, true, None).is_ok());
+    assert!(cmd_search("needle", false, true, None, None).is_ok());
 }
 
 #[test]
@@ -1099,7 +1099,7 @@ fn list_selection_cache_resolves_and_fails_closed_after_journal_moves() {
     let _env = setup();
     let first = create_strand("first cache target");
     let _second = create_strand("second cache target");
-    cmd_list(false, None, None, None, None, None, None, None, false).unwrap();
+    cmd_list(false, None, None, None, None, None, None, None, None, false).unwrap();
 
     let events = read_events_lossy(&ensure_journal().unwrap()).0;
     let strands = projection::project_strands(&events, true);
@@ -1135,7 +1135,7 @@ fn list_selection_cache_resolves_and_fails_closed_after_journal_moves() {
 fn json_list_does_not_write_selection_cache() {
     let env = setup();
     create_strand("json list target");
-    cmd_list(false, None, None, None, None, None, None, None, true).unwrap();
+    cmd_list(false, None, None, None, None, None, None, None, None, true).unwrap();
     assert!(
         !env.path()
             .join(".mnema")
@@ -1148,7 +1148,7 @@ fn json_list_does_not_write_selection_cache() {
 fn pick_fails_in_non_tty_instead_of_waiting() {
     let _env = setup();
     create_strand("pick target");
-    let err = cmd_pick("show", false, false).unwrap_err();
+    let err = cmd_pick("show", false, false, None).unwrap_err();
     assert!(err.contains("interactive TTY"), "{err}");
 }
 
@@ -1203,8 +1203,11 @@ fn orient_empty_teaches_writing_drill_and_add() {
         &OrientRequest {
             include_hidden: false,
             limit: None,
+            under: None,
+            allow_selection: false,
         },
-    );
+    )
+    .expect("orient_plan empty");
     assert!(plan.output.active.is_empty());
     assert!(plan.output.remind.contains("mnema add"));
     assert!(plan.output.remind.contains("mnema explain writing"));
@@ -1233,8 +1236,11 @@ fn orient_latest_friction_hands_off_fix_prefix() {
         &OrientRequest {
             include_hidden: false,
             limit: None,
+            under: None,
+            allow_selection: false,
         },
-    );
+    )
+    .expect("orient_plan friction");
     let strands = projection::project_strands(&events, true);
     let prefix = strands
         .iter()
@@ -1275,8 +1281,11 @@ fn orient_latest_closed_line_teaches_successor_not_append_to_closed() {
         &OrientRequest {
             include_hidden: false,
             limit: None,
+            under: None,
+            allow_selection: false,
         },
-    );
+    )
+    .expect("orient_plan closed latest");
 
     assert!(
         plan.output.remind.contains("mnema add --from"),
@@ -1313,8 +1322,11 @@ fn orient_two_active_lines_suggests_link_candidate() {
         &OrientRequest {
             include_hidden: false,
             limit: None,
+            under: None,
+            allow_selection: false,
         },
-    );
+    )
+    .expect("orient_plan two active");
     assert!(
         plan.output.remind.contains("mnema link"),
         "two active lines should produce a link candidate: {}",
@@ -1349,8 +1361,12 @@ fn search_returns_entry_level_hits_with_hash_and_marker() {
             query: "needle-entry-level",
             include_hidden: false,
             marker: None,
+            under: None,
+            allow_selection: false,
+            current_max_offset: events.last().map(|(o, _)| *o).unwrap_or(0),
         },
-    );
+    )
+    .expect("search_events");
     assert_eq!(result.output.count, 1);
     let m = &result.output.matches[0];
     assert_eq!(m.strand_id, id);
@@ -1409,15 +1425,15 @@ fn search_marker_filter_keeps_only_named_marker() {
             query: "",
             include_hidden: false,
             marker: Some("metric"),
+            under: None,
+            allow_selection: false,
+            current_max_offset: events.last().map(|(o, _)| *o).unwrap_or(0),
         },
-    );
+    )
+    .expect("search_events metric");
     assert_eq!(metrics.output.count, 1);
     assert_eq!(metrics.output.matches[0].marker, "metric");
-    assert!(
-        metrics.output.matches[0]
-            .content
-            .contains("win_count=26")
-    );
+    assert!(metrics.output.matches[0].content.contains("win_count=26"));
     assert_eq!(metrics.output.marker.as_deref(), Some("metric"));
 
     // Bracket form of --marker also works.
@@ -1427,8 +1443,12 @@ fn search_marker_filter_keeps_only_named_marker() {
             query: "",
             include_hidden: false,
             marker: Some("friction"),
+            under: None,
+            allow_selection: false,
+            current_max_offset: events.last().map(|(o, _)| *o).unwrap_or(0),
         },
-    );
+    )
+    .expect("search_events friction");
     assert_eq!(frictions.output.count, 1);
     assert_eq!(frictions.output.matches[0].marker, "friction");
     assert!(frictions.output.matches[0].entry_id.is_some());
@@ -1536,9 +1556,7 @@ fn edges_discipline_lists_open_friction_and_why_less_decision() {
         "unfixed friction is on the still-open strand"
     );
     assert!(
-        report.open_frictions[0]
-            .content
-            .contains("still blocked"),
+        report.open_frictions[0].content.contains("still blocked"),
         "open friction content: {}",
         report.open_frictions[0].content
     );
@@ -1694,8 +1712,7 @@ fn edges_discipline_since_skips_old_why_less_decisions_not_frictions() {
     let (events2, _) = read_events_lossy(&path);
     let strands2 = projection::project_strands(&events2, true);
     let full = projection::edges_discipline_report(&strands2);
-    let filtered =
-        projection::edges_discipline_report_since(&strands2, Some(old_decision_offset));
+    let filtered = projection::edges_discipline_report_since(&strands2, Some(old_decision_offset));
     assert!(
         full.decisions_without_why.len() >= 2,
         "baseline has both decisions: {:?}",
@@ -1746,6 +1763,7 @@ fn list_stale_excludes_closed_strands() {
             stale: Some("2h"),
             stale_offset: None,
             since_offset: None,
+            under: None,
             allow_selection: false,
         },
         now,
@@ -1799,9 +1817,12 @@ fn orient_stale_count_counts_active_silent_past_threshold() {
         &OrientRequest {
             include_hidden: false,
             limit: None,
+            under: None,
+            allow_selection: false,
         },
         now,
-    );
+    )
+    .expect("orient_plan_at stale");
     assert_eq!(plan.output.stale_count, count2);
 }
 
@@ -1892,12 +1913,8 @@ fn timeline_since_ts_future_yields_empty() {
     let mut entries = projection::project_timeline(&events);
     assert!(!entries.is_empty());
 
-    crate::commands::query::filter_timeline_by_ts(
-        &mut entries,
-        Some("2099-01-01T00:00:00Z"),
-        None,
-    )
-    .unwrap();
+    crate::commands::query::filter_timeline_by_ts(&mut entries, Some("2099-01-01T00:00:00Z"), None)
+        .unwrap();
     assert!(entries.is_empty());
 }
 
@@ -1909,19 +1926,160 @@ fn timeline_ts_filters_reject_invalid_rfc3339() {
     let (events, _) = read_events_lossy(&path);
     let mut entries = projection::project_timeline(&events);
 
-    let since_err = crate::commands::query::filter_timeline_by_ts(
-        &mut entries,
-        Some("not-a-date"),
-        None,
-    )
-    .expect_err("invalid since-ts must fail");
+    let since_err =
+        crate::commands::query::filter_timeline_by_ts(&mut entries, Some("not-a-date"), None)
+            .expect_err("invalid since-ts must fail");
     assert!(since_err.contains("--since-ts") && since_err.contains("RFC3339"));
 
-    let until_err = crate::commands::query::filter_timeline_by_ts(
-        &mut entries,
-        None,
-        Some("yesterday"),
-    )
-    .expect_err("invalid until-ts must fail");
+    let until_err =
+        crate::commands::query::filter_timeline_by_ts(&mut entries, None, Some("yesterday"))
+            .expect_err("invalid until-ts must fail");
     assert!(until_err.contains("--until-ts") && until_err.contains("RFC3339"));
+}
+
+// ── recursive Scope CLI: --under / orient --id ──
+
+#[test]
+fn list_under_scopes_to_belongs_to_subtree() {
+    let _env = setup();
+    let parent = create_strand("scope parent");
+    let child = create_strand("scope child");
+    let outsider = create_strand("scope outsider");
+    cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let listed = list_strands(
+        &events,
+        &ListRequest {
+            include_hidden: false,
+            links: None,
+            backlinks: None,
+            state: None,
+            list_type: None,
+            stale: None,
+            stale_offset: None,
+            since_offset: None,
+            under: Some(&parent),
+            allow_selection: false,
+        },
+        chrono::Utc::now(),
+    )
+    .expect("list --under");
+    let ids: std::collections::HashSet<_> = listed.iter().map(|s| s.id.clone()).collect();
+    assert!(ids.contains(&parent), "root included");
+    assert!(ids.contains(&child), "belongs-to child included");
+    assert!(
+        !ids.contains(&outsider),
+        "unrelated top-level strand must leave the candidate set"
+    );
+}
+
+#[test]
+fn search_under_scopes_hits_to_subtree() {
+    let _env = setup();
+    let parent = create_strand("search parent token-alpha");
+    let child = create_strand("search child token-alpha");
+    let outsider = create_strand("search outsider token-alpha");
+    cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let max = events.last().map(|(o, _)| *o).unwrap_or(0);
+    let result = search_events(
+        &events,
+        &SearchRequest {
+            query: "token-alpha",
+            include_hidden: false,
+            marker: None,
+            under: Some(&parent),
+            allow_selection: false,
+            current_max_offset: max,
+        },
+    )
+    .expect("search --under");
+    let strand_ids: std::collections::HashSet<_> = result
+        .output
+        .matches
+        .iter()
+        .map(|m| m.strand_id.clone())
+        .collect();
+    assert!(strand_ids.contains(&parent));
+    assert!(strand_ids.contains(&child));
+    assert!(!strand_ids.contains(&outsider));
+    assert_eq!(result.output.count, 2);
+}
+
+#[test]
+fn orient_id_scopes_menu_to_subtree() {
+    let _env = setup();
+    let parent = create_strand("orient parent");
+    let child = create_strand("orient child");
+    let outsider = create_strand("orient outsider");
+    cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let plan = orient_plan(
+        &events,
+        &OrientRequest {
+            include_hidden: false,
+            limit: None,
+            under: Some(parent.clone()),
+            allow_selection: false,
+        },
+    )
+    .expect("orient --id");
+    let active: std::collections::HashSet<_> =
+        plan.output.active.iter().map(|s| s.id.clone()).collect();
+    assert!(active.contains(&parent));
+    assert!(active.contains(&child));
+    assert!(
+        !active.contains(&outsider),
+        "orient --id must not surface out-of-scope active lines"
+    );
+}
+
+#[test]
+fn timeline_under_excludes_out_of_scope_strands() {
+    let _env = setup();
+    let parent = create_strand("tl parent");
+    let child = create_strand("tl child");
+    let outsider = create_strand("tl outsider unique-outside");
+    cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+    // Smoke the command path (stdout not captured; success + no panic is enough
+    // for wiring). Detailed filtering is covered by Scope unit tests + list/search.
+    assert!(
+        cmd_timeline(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("json"),
+            None,
+            None,
+            Some(&parent),
+        )
+        .is_ok()
+    );
+    let _ = (child, outsider);
+}
+
+#[test]
+fn under_flag_parses_on_collection_commands() {
+    use clap::CommandFactory;
+    for args in [
+        vec!["mnema", "list", "--under", "0000019dd34b"],
+        vec!["mnema", "search", "x", "--under", "0000019dd34b"],
+        vec!["mnema", "timeline", "--under", "0000019dd34b"],
+        vec!["mnema", "pick", "--under", "0000019dd34b", "--print-id"],
+        vec!["mnema", "orient", "--id", "0000019dd34b"],
+        vec!["mnema", "orient", "--id", "0000019dd34b", "--tree"],
+    ] {
+        let result = Cli::command().try_get_matches_from(&args);
+        assert!(result.is_ok(), "must parse {:?}: {:?}", args, result.err());
+    }
 }

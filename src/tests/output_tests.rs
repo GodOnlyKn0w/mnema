@@ -104,7 +104,7 @@ fn show_search_unchanged() {
     let r = cmd_show(Some(&id), false, None, false, false, false, None);
     assert!(r.is_ok());
     // search
-    let r = cmd_search("entry", false, false, None);
+    let r = cmd_search("entry", false, false, None, None);
     assert!(r.is_ok());
 }
 
@@ -456,8 +456,12 @@ fn handles_list_search_ids_intact() {
             query: "unique_search_token_xyz",
             include_hidden: false,
             marker: None,
+            under: None,
+            allow_selection: false,
+            current_max_offset: events.last().map(|(o, _)| *o).unwrap_or(0),
         },
-    );
+    )
+    .expect("search_events");
     let search_matches = &result.output.matches;
     assert!(
         !search_matches.is_empty(),
@@ -666,8 +670,12 @@ fn handles_truncate_never_applied_to_ids() {
             query: "unique_audit_token_abc123",
             include_hidden: false,
             marker: None,
+            under: None,
+            allow_selection: false,
+            current_max_offset: events.last().map(|(o, _)| *o).unwrap_or(0),
         },
-    );
+    )
+    .expect("search_events");
     let m = result
         .output
         .matches

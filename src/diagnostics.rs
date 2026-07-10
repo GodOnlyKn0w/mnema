@@ -252,6 +252,8 @@ close/reopen 收口动作强制显式指名、禁 --last/缺省；正文只走 s
   --format json     机器输出唯一正典（explain --json 是兼容快捷）
   --provenance / --seen-offset <N>  写命令出处 / 上次看到的目标线 offset
   --tail <N>        只限显示、不改账，对任何目标可用
+  --under <ID>      集合查询的 SubtreeScope（list/search/timeline/pick）
+  mnema orient --id <ID>。委派入口专用写法，候选集同集合查询 --under（不是把 --under 写在 orient 上）
   --edge-type       link 的边类型（--type 是 deprecated 别名）
   --why / --from    引依据/记来源：线前缀=其最新条，entry 哈希前缀=精确该条；读取用 mnema show --entry <HASH>（--deref 展开链，--before/--after 邻域）
 JSON 命名法：复数名词=数组；计数=count/*_count；自身身份=id；引用他者=<noun>_id；id/strand_id 全宽 64 hex 可 join。

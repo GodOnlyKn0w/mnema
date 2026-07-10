@@ -37,7 +37,31 @@ pub(crate) struct ListRequest<'a> {
     pub(crate) stale: Option<&'a str>,
     pub(crate) stale_offset: Option<usize>,
     pub(crate) since_offset: Option<usize>,
+    /// Raw `--under` root (prefix ok); None = JournalScope.
+    pub(crate) under: Option<&'a str>,
     pub(crate) allow_selection: bool,
+}
+
+/// Resolve optional `--under X` / `orient --id X` into a collection Scope.
+/// Uses the same strand shorthand rules as other read commands.
+pub(crate) fn scope_from_under(
+    under: Option<&str>,
+    strands: &[projection::ProjectedStrand],
+    allow_selection: bool,
+    current_max_offset: usize,
+) -> Result<crate::scope::Scope, String> {
+    match under {
+        None => Ok(crate::scope::Scope::journal()),
+        Some(root) => {
+            let full = crate::reference::resolve_strand_with_selection(
+                strands,
+                root,
+                allow_selection,
+                current_max_offset,
+            )?;
+            Ok(crate::scope::Scope::subtree(full))
+        }
+    }
 }
 
 pub(crate) fn list_strands(
@@ -46,6 +70,7 @@ pub(crate) fn list_strands(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<projection::ProjectedStrand>, String> {
     let canonical_strands = projection::project_strands(events, true);
+    let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
     let links_id = req
         .links
         .map(|src| {
@@ -53,7 +78,7 @@ pub(crate) fn list_strands(
                 &canonical_strands,
                 src,
                 req.allow_selection,
-                events.last().map(|(offset, _)| *offset).unwrap_or(0),
+                current_max_offset,
             )
         })
         .transpose()?;
@@ -64,11 +89,20 @@ pub(crate) fn list_strands(
                 &canonical_strands,
                 tgt,
                 req.allow_selection,
-                events.last().map(|(offset, _)| *offset).unwrap_or(0),
+                current_max_offset,
             )
         })
         .transpose()?;
+    let scope = scope_from_under(
+        req.under,
+        &canonical_strands,
+        req.allow_selection,
+        current_max_offset,
+    )?;
     let mut strands = projection::project_strands(events, req.include_hidden);
+    // Scope changes only the candidate set; all other filters keep the same
+    // field semantics (CORPUS §7.1).
+    scope.retain_strands(&mut strands, &canonical_strands)?;
     strands.sort_by(|a, b| b.last_ts().cmp(a.last_ts()));
 
     if let Some(type_filter) = req.list_type {
@@ -127,6 +161,7 @@ pub(crate) fn cmd_list(
     stale: Option<&str>,
     stale_offset: Option<usize>,
     since_offset: Option<usize>,
+    under: Option<&str>,
     format_json: bool,
 ) -> Result<(), String> {
     let started = Instant::now();
@@ -141,6 +176,7 @@ pub(crate) fn cmd_list(
         stale,
         stale_offset,
         since_offset,
+        under,
         allow_selection: !format_json,
     };
     let strands = list_strands(&events, &request, chrono::Utc::now())?;
@@ -199,6 +235,10 @@ pub(crate) struct SearchRequest<'a> {
     pub(crate) include_hidden: bool,
     /// Bare marker name without brackets (e.g. "friction"); None = unrestricted.
     pub(crate) marker: Option<&'a str>,
+    /// Raw `--under` root (prefix ok); None = JournalScope.
+    pub(crate) under: Option<&'a str>,
+    pub(crate) allow_selection: bool,
+    pub(crate) current_max_offset: usize,
 }
 
 pub(crate) struct SearchResult {
@@ -225,15 +265,28 @@ pub(crate) fn normalize_marker_filter(raw: &str) -> Result<String, String> {
     Ok(bare.to_ascii_lowercase())
 }
 
-pub(crate) fn search_events(events: &[(usize, Event)], req: &SearchRequest<'_>) -> SearchResult {
+pub(crate) fn search_events(
+    events: &[(usize, Event)],
+    req: &SearchRequest<'_>,
+) -> Result<SearchResult, String> {
     let q = req.query.to_lowercase();
     let marker_filter = req.marker.map(|m| m.to_ascii_lowercase());
     // Project with include_hidden so entry_id is always folded; filter per-strand below.
-    let strands = projection::project_strands(events, true);
+    let all_strands = projection::project_strands(events, true);
+    let scope = scope_from_under(
+        req.under,
+        &all_strands,
+        req.allow_selection,
+        req.current_max_offset,
+    )?;
+    let scope_ids = scope.resolve_ids(&all_strands)?;
 
     let mut matches = Vec::new();
     let mut text_rows = Vec::new();
-    for strand in &strands {
+    for strand in &all_strands {
+        if !scope_ids.contains(&strand.id) {
+            continue;
+        }
         if strand.hidden && !req.include_hidden {
             continue;
         }
@@ -272,7 +325,7 @@ pub(crate) fn search_events(events: &[(usize, Event)], req: &SearchRequest<'_>) 
         }
     }
     let count = matches.len();
-    SearchResult {
+    Ok(SearchResult {
         output: output::SearchOutput {
             matches,
             count,
@@ -280,7 +333,7 @@ pub(crate) fn search_events(events: &[(usize, Event)], req: &SearchRequest<'_>) 
             marker: marker_filter,
         },
         text_rows,
-    }
+    })
 }
 
 pub(crate) fn cmd_search(
@@ -288,6 +341,7 @@ pub(crate) fn cmd_search(
     format_json: bool,
     include_hidden: bool,
     marker: Option<&str>,
+    under: Option<&str>,
 ) -> Result<(), String> {
     let started = Instant::now();
     let marker_norm = match marker {
@@ -303,8 +357,11 @@ pub(crate) fn cmd_search(
         query,
         include_hidden,
         marker: marker_norm.as_deref(),
+        under,
+        allow_selection: !format_json,
+        current_max_offset: events.last().map(|(offset, _)| *offset).unwrap_or(0),
     };
-    let result = search_events(&events, &request);
+    let result = search_events(&events, &request)?;
 
     if format_json {
         println!(
@@ -372,16 +429,12 @@ pub(crate) fn filter_timeline_by_ts(
     if let Some(st) = since_ts {
         let threshold = crate::util::parse_event_ts(st)
             .ok_or_else(|| format!("invalid --since-ts '{st}': expected RFC3339 timestamp"))?;
-        entries.retain(|e| {
-            crate::util::parse_event_ts(&e.ts).is_some_and(|ts| ts >= threshold)
-        });
+        entries.retain(|e| crate::util::parse_event_ts(&e.ts).is_some_and(|ts| ts >= threshold));
     }
     if let Some(ut) = until_ts {
         let threshold = crate::util::parse_event_ts(ut)
             .ok_or_else(|| format!("invalid --until-ts '{ut}': expected RFC3339 timestamp"))?;
-        entries.retain(|e| {
-            crate::util::parse_event_ts(&e.ts).is_some_and(|ts| ts <= threshold)
-        });
+        entries.retain(|e| crate::util::parse_event_ts(&e.ts).is_some_and(|ts| ts <= threshold));
     }
     Ok(())
 }
@@ -396,7 +449,7 @@ pub(crate) fn cmd_timeline(
     format_json: Option<&str>,
     limit: Option<usize>,
     tail: Option<usize>,
-    tree_root: Option<&str>,
+    under: Option<&str>,
 ) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
@@ -441,17 +494,12 @@ pub(crate) fn cmd_timeline(
         entries.retain(|e| linked_ids.contains(&e.strand_id));
     }
 
-    let scope = if let Some(root_id) = tree_root {
-        let full_root = crate::reference::resolve_strand_with_selection(
-            &canonical_strands,
-            root_id,
-            allow_selection,
-            current_max_offset,
-        )?;
-        crate::scope::Scope::subtree(full_root)
-    } else {
-        crate::scope::Scope::journal()
-    };
+    let scope = scope_from_under(
+        under,
+        &canonical_strands,
+        allow_selection,
+        current_max_offset,
+    )?;
     let scope_ids = scope.resolve_ids(&canonical_strands)?;
     entries.retain(|entry| scope_ids.contains(&entry.strand_id));
 
@@ -493,8 +541,8 @@ pub(crate) fn cmd_timeline(
         if let Some(lid) = links {
             parts.push(format!("links {}", lid));
         }
-        if let Some(root) = tree_root {
-            parts.push(format!("tree {}", root));
+        if let Some(root) = under {
+            parts.push(format!("under {}", root));
         }
         if parts.is_empty() {
             println!("(journal is empty)");
@@ -548,12 +596,18 @@ pub(crate) fn cmd_timeline(
 pub(crate) struct OrientRequest {
     pub(crate) include_hidden: bool,
     pub(crate) limit: Option<usize>,
+    /// Raw `orient --id X` root (prefix ok); None = JournalScope.
+    /// Same candidate set as collection `--under X` (CORPUS §7.1–7.2).
+    pub(crate) under: Option<String>,
+    pub(crate) allow_selection: bool,
 }
 
 pub(crate) struct OrientPlan {
     pub(crate) strands: Vec<projection::ProjectedStrand>,
     pub(crate) view: projection::OrientView,
     pub(crate) output: output::OrientOutput,
+    /// Resolved full root id when this plan used SubtreeScope; None = JournalScope.
+    pub(crate) scope_root: Option<String>,
 }
 
 /// Default stale threshold surfaced by orient (matches `list --stale` help example).
@@ -580,7 +634,10 @@ pub(crate) fn count_stale_active(
         .count()
 }
 
-pub(crate) fn orient_plan(events: &[(usize, Event)], req: &OrientRequest) -> OrientPlan {
+pub(crate) fn orient_plan(
+    events: &[(usize, Event)],
+    req: &OrientRequest,
+) -> Result<OrientPlan, String> {
     orient_plan_at(events, req, chrono::Utc::now())
 }
 
@@ -588,26 +645,39 @@ pub(crate) fn orient_plan_at(
     events: &[(usize, Event)],
     req: &OrientRequest,
     now: chrono::DateTime<chrono::Utc>,
-) -> OrientPlan {
+) -> Result<OrientPlan, String> {
     let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
-    let strands = projection::project_strands(events, true);
+    let mut strands = projection::project_strands(events, true);
+    // orient --id X = SubtreeScope(X): menu/candidate set is the root plus
+    // belongs-to descendants. Integrity remains journal-level (container health).
+    let scope = scope_from_under(
+        req.under.as_deref(),
+        &strands,
+        req.allow_selection,
+        max_offset,
+    )?;
+    // Collect scope ids first so retain can borrow strands mutably.
+    if !scope.is_journal() {
+        let ids = scope.resolve_ids(&strands)?;
+        strands.retain(|s| ids.contains(&s.id));
+    }
     let (entry_count, strand_count) = orient_maturity_counts(&strands, req.include_hidden);
     let score = orient_maturity_score(entry_count, strand_count);
     let limit = req.limit.unwrap_or_else(|| adaptive_orient_limit(score));
     let view = projection::build_orient_view(&strands, req.include_hidden, limit, max_offset);
     let mut output = output::OrientOutput::from((&view, strands.as_slice()));
     // Questions ① and ③ (CORPUS §8): the integrity glance needs the raw event
-    // stream, needs-judgment notices need the full strand set.
+    // stream; needs-judgment notices use the scoped strand set.
     output.integrity = integrity_glance(events);
     output.notices = projection::orient_notices(&strands);
     output.remind = adaptive_orient_remind(&strands, &view, req.include_hidden, score);
-    output.stale_count =
-        count_stale_active(&strands, req.include_hidden, now, ORIENT_STALE_SECS);
-    OrientPlan {
+    output.stale_count = count_stale_active(&strands, req.include_hidden, now, ORIENT_STALE_SECS);
+    Ok(OrientPlan {
         strands,
         view,
         output,
-    }
+        scope_root: scope.root_id().map(|s| s.to_string()),
+    })
 }
 
 fn print_orient_stale(stale_count: usize) {
@@ -827,6 +897,7 @@ pub(crate) fn cmd_orient(
     include_hidden: bool,
     limit: Option<usize>,
     show_tree: bool,
+    under: Option<&str>,
 ) -> Result<(), String> {
     let started = Instant::now();
     let path = ensure_journal()?;
@@ -834,11 +905,14 @@ pub(crate) fn cmd_orient(
     let request = OrientRequest {
         include_hidden,
         limit,
+        under: under.map(|s| s.to_string()),
+        allow_selection: format != Some("json"),
     };
-    let plan = orient_plan(&events, &request);
+    let plan = orient_plan(&events, &request)?;
     let strands = &plan.strands;
     let view = &plan.view;
     let out = &plan.output;
+    let scope_label = plan.scope_root.as_deref().map(shorten);
 
     if show_tree {
         // Build the belongs-to forest from the active strand set.
@@ -874,6 +948,9 @@ pub(crate) fn cmd_orient(
                 out.closed_count,
                 out.hidden_count
             );
+            if let Some(ref root) = scope_label {
+                println!("scope: under {} (SubtreeScope)", root);
+            }
             println!("integrity: {}", out.integrity);
             print_orient_stale(out.stale_count);
             print_orient_forest(&tree_out.roots, 0);
@@ -895,6 +972,9 @@ pub(crate) fn cmd_orient(
             out.closed_count,
             out.hidden_count
         );
+        if let Some(ref root) = scope_label {
+            println!("scope: under {} (SubtreeScope)", root);
+        }
         println!("integrity: {}", out.integrity);
         print_orient_stale(out.stale_count);
         for s in &out.active {
@@ -1379,17 +1459,32 @@ pub(crate) fn cmd_show_entry(
 
 // ── Human picker ─────────────────────────────────────────
 
-pub(crate) fn cmd_pick(command: &str, print_id: bool, all: bool) -> Result<(), String> {
+pub(crate) fn cmd_pick(
+    command: &str,
+    print_id: bool,
+    all: bool,
+    under: Option<&str>,
+) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
+    let universe = projection::project_strands(&events, true);
+    let max_offset = events.last().map(|(o, _)| *o).unwrap_or(0);
+    let scope = scope_from_under(under, &universe, true, max_offset)?;
     let mut strands = projection::project_strands(&events, all);
+    scope.retain_strands(&mut strands, &universe)?;
     if !all {
         // Default picker view: active work only. Closed lines fold out (like
         // orient); `--all` brings closed and hidden back.
         strands.retain(|s| s.state() == "registered");
     }
     if strands.is_empty() {
-        return Err(if all {
+        return Err(if under.is_some() {
+            if all {
+                "no strands to pick under scope".to_string()
+            } else {
+                "no active strands to pick under scope — use --all for closed/hidden".to_string()
+            }
+        } else if all {
             "no strands to pick".to_string()
         } else {
             "no active strands to pick — use --all for closed/hidden".to_string()

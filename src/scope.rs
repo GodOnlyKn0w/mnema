@@ -22,6 +22,19 @@ impl Scope {
         Self::Subtree(root_id.into())
     }
 
+    /// True when this is a journal-wide candidate set (no subtree root).
+    pub(crate) fn is_journal(&self) -> bool {
+        matches!(self, Self::Journal)
+    }
+
+    /// Root id when this is a subtree scope.
+    pub(crate) fn root_id(&self) -> Option<&str> {
+        match self {
+            Self::Journal => None,
+            Self::Subtree(id) => Some(id.as_str()),
+        }
+    }
+
     pub(crate) fn resolve_ids(
         &self,
         strands: &[ProjectedStrand],
@@ -32,6 +45,26 @@ impl Scope {
                 .subtree_ids(root_id)
                 .ok_or_else(|| format!("scope root {} not found or ambiguous", root_id)),
         }
+    }
+
+    /// Retain only strands whose id is in this scope. Graph is built from
+    /// `universe` (typically the full projection) so descendants resolve even
+    /// when the working set is already partially filtered. For Journal scope
+    /// this is a no-op.
+    ///
+    /// `universe` may alias the same storage as `strands` only when the set has
+    /// not yet been narrowed (resolve collects ids first, then retain).
+    pub(crate) fn retain_strands(
+        &self,
+        strands: &mut Vec<ProjectedStrand>,
+        universe: &[ProjectedStrand],
+    ) -> Result<(), String> {
+        if self.is_journal() {
+            return Ok(());
+        }
+        let ids = self.resolve_ids(universe)?;
+        strands.retain(|strand| ids.contains(&strand.id));
+        Ok(())
     }
 }
 
