@@ -30,6 +30,90 @@ pub(crate) enum RefV3 {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum EdgeTypeV3 {
+    BelongsTo,
+    DependsOn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CloseDispositionV3 {
+    Done,
+    Failed,
+    Cancelled,
+    Merged,
+    Verified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum EffectPayloadV3 {
+    Close {
+        disposition: CloseDispositionV3,
+    },
+    Reopen,
+    Link {
+        edge_type: EdgeTypeV3,
+        target_strand_id: String,
+    },
+    Unlink {
+        edge_type: EdgeTypeV3,
+        target_strand_id: String,
+        link_entry_id: String,
+    },
+    Hide,
+    Unhide,
+}
+
+impl EffectPayloadV3 {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Link {
+                target_strand_id, ..
+            } => validate_full_hex("effect target_strand_id", target_strand_id),
+            Self::Unlink {
+                target_strand_id,
+                link_entry_id,
+                ..
+            } => {
+                validate_full_hex("effect target_strand_id", target_strand_id)?;
+                validate_full_hex("effect link_entry_id", link_entry_id)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn into_value(self) -> Value {
+        serde_json::to_value(self).expect("EffectPayloadV3 is serializable")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CheckpointPayloadV3 {
+    pub(crate) observed: String,
+    pub(crate) action: String,
+}
+
+impl CheckpointPayloadV3 {
+    pub(crate) fn into_value(self) -> Value {
+        serde_json::to_value(self).expect("CheckpointPayloadV3 is serializable")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SubjectBindingPayloadV3 {
+    pub(crate) subject_type: String,
+    pub(crate) subject_id: String,
+}
+
+impl SubjectBindingPayloadV3 {
+    pub(crate) fn into_value(self) -> Value {
+        serde_json::to_value(self).expect("SubjectBindingPayloadV3 is serializable")
+    }
+}
+
 /// The exact logical value hashed for a v3 entry.
 ///
 /// Every field is present in canonical JSON. Missing legacy values are encoded
@@ -112,6 +196,33 @@ impl EntryHashViewV3 {
         }
         if self.kind.trim().is_empty() {
             return Err("entry kind cannot be empty".to_string());
+        }
+        match self.kind.as_str() {
+            "effect" => {
+                let effect: EffectPayloadV3 = serde_json::from_value(self.payload.clone())
+                    .map_err(|error| format!("invalid effect payload: {error}"))?;
+                effect.validate()?;
+            }
+            "checkpoint" => {
+                let checkpoint: CheckpointPayloadV3 = serde_json::from_value(self.payload.clone())
+                    .map_err(|error| format!("invalid checkpoint payload: {error}"))?;
+                if checkpoint.observed.trim().is_empty() || checkpoint.action.trim().is_empty() {
+                    return Err(
+                        "checkpoint payload requires non-empty observed and action".to_string()
+                    );
+                }
+            }
+            "subject_binding" => {
+                let binding: SubjectBindingPayloadV3 = serde_json::from_value(self.payload.clone())
+                    .map_err(|error| format!("invalid subject_binding payload: {error}"))?;
+                if binding.subject_type.trim().is_empty() || binding.subject_id.trim().is_empty() {
+                    return Err(
+                        "subject_binding payload requires non-empty subject_type and subject_id"
+                            .to_string(),
+                    );
+                }
+            }
+            _ => {}
         }
         chrono::DateTime::parse_from_rfc3339(&self.created_at)
             .map_err(|error| format!("created_at must be RFC3339: {error}"))?;
@@ -337,8 +448,8 @@ mod tests {
                 seed: "11".repeat(32),
             },
             None,
-            "effect",
-            "link",
+            "note",
+            "object ordering",
             Vec::new(),
             Some("agent".to_string()),
             "2026-07-11T00:00:00Z",
@@ -350,8 +461,8 @@ mod tests {
                 seed: "11".repeat(32),
             },
             None,
-            "effect",
-            "link",
+            "note",
+            "object ordering",
             Vec::new(),
             Some("agent".to_string()),
             "2026-07-11T00:00:00Z",
@@ -505,5 +616,52 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("duplicate strand"));
+    }
+
+    #[test]
+    fn structural_kinds_require_typed_payloads() {
+        let effect = EntryHashViewV3::new(
+            StrandKeyV3::Genesis {
+                seed: "99".repeat(32),
+            },
+            None,
+            "effect",
+            "link belongs-to",
+            Vec::new(),
+            None,
+            "2026-07-11T00:00:00Z",
+            EffectPayloadV3::Link {
+                edge_type: EdgeTypeV3::BelongsTo,
+                target_strand_id: "aa".repeat(32),
+            }
+            .into_value(),
+            Value::Null,
+        );
+        effect.validate().unwrap();
+
+        let mut invalid = effect;
+        invalid.payload = serde_json::json!({"type": "link", "edge_type": "belongs-to"});
+        assert!(invalid.validate().unwrap_err().contains("effect payload"));
+    }
+
+    #[test]
+    fn checkpoint_and_binding_payloads_round_trip() {
+        let checkpoint = CheckpointPayloadV3 {
+            observed: "tests fail".to_string(),
+            action: "inspect logs".to_string(),
+        };
+        assert_eq!(
+            serde_json::from_value::<CheckpointPayloadV3>(checkpoint.clone().into_value()).unwrap(),
+            checkpoint
+        );
+        let binding = SubjectBindingPayloadV3 {
+            subject_type: "issue".to_string(),
+            subject_id: "MNEMA-42".to_string(),
+        };
+        assert_eq!(
+            serde_json::from_value::<SubjectBindingPayloadV3>(binding.clone().into_value())
+                .unwrap(),
+            binding
+        );
     }
 }
