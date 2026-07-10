@@ -666,6 +666,12 @@ pub(crate) fn orient_plan_at(
     let limit = req.limit.unwrap_or_else(|| adaptive_orient_limit(score));
     let view = projection::build_orient_view(&strands, req.include_hidden, limit, max_offset);
     let mut output = output::OrientOutput::from((&view, strands.as_slice()));
+    if let Some(root_id) = scope.root_id() {
+        output.since_command = format!(
+            "mnema timeline --since-offset {} --under {}",
+            view.max_offset, root_id
+        );
+    }
     // Questions ① and ③ (CORPUS §8): the integrity glance needs the raw event
     // stream; needs-judgment notices use the scoped strand set.
     output.integrity = integrity_glance(events);

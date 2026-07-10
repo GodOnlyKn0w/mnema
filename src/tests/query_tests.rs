@@ -2061,6 +2061,13 @@ fn orient_id_scopes_menu_to_subtree() {
         plan.output.active.iter().map(|s| s.id.clone()).collect();
     assert!(active.contains(&parent));
     assert!(active.contains(&child));
+    assert_eq!(
+        plan.output.since_command,
+        format!(
+            "mnema timeline --since-offset {} --under {}",
+            plan.output.max_offset, parent
+        )
+    );
     assert!(
         !active.contains(&outsider),
         "orient --id must not surface out-of-scope active lines"
