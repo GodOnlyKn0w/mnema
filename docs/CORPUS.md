@@ -451,6 +451,7 @@ v3 journal 使用一个小型 manifest 作为唯一激活点：
 - 激活 manifest 前，v2 仍是完整活动状态；原子替换 manifest 后，v3 是完整活动状态；
 - manifest 创建成功就是 commit point；若随后目录持久化同步失败，结果必须表达“已激活但耐久性未确认”，不能倒报为未激活；
 - prepared artifacts、mapping、certificate 和 target 全部验证并持久化后才能替换 manifest；
+- apply 在旧 journal 的同一独占写锁内完成最终 source digest 校验与 manifest commit，禁止 v2 append 穿越两者之间的窗口；
 - 重复迁移根据 source digest 与 migration identity 收敛为 resume 或 noop，不产生第二个活动 journal；
 - 旧 binary 产生的 legacy shadow 不参与 v3 解析，Doctor 将其报告为独立事实。
 
