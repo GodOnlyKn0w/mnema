@@ -154,6 +154,15 @@ Hard error 只覆盖不可执行条件和硬不变量：
 | `belongs-multiple-parent` | structure | child 已有直接 parent，调用未显式执行 reparent | 未写入；先 unlink 或显式 reparent |
 | `expected-offset-mismatch` | concurrency | compare-and-append 的预期位置与当前位置不同 | 未写入；增量读取后重试 |
 | `reference-invalid` | reference | ref 的类型、形状或标识不符合 grammar | 未写入；修正 ref 后重试 |
+| `source-schema-unsupported` | integrity | cutover source 不是受支持且可严格验证的历史 schema | 未激活；使用对应迁移器或恢复 source |
+| `migration-source-invalid` | integrity | source 存在断链、重复 identity、未解析本地 ref 或其他不可迁移事实 | 未激活；先修复或显式裁决历史事实 |
+| `migration-source-changed` | concurrency | prepare 之后 source bytes/digest 发生变化 | 未激活；重新 prepare 后重试 |
+| `migration-map-incomplete` | integrity | 不是每条 source record、identity 和 local ref 都有唯一处置 | 未激活；修复 converter |
+| `migration-id-collision` | integrity | 两个不同 source identity 映射到同一 v3 identity | 未激活；修复 canonical identity 或 seed |
+| `migration-artifact-conflict` | integrity | 同一 migration identity 已存在内容不同的 target、map 或 certificate | 未激活；检查 staging 与历史文件 |
+| `active-schema-unsupported` | integrity | manifest 指向 Core 不支持的活动 schema | 拒绝读写；使用支持该 schema 的版本 |
+| `legacy-history-write-forbidden` | resolution | mutation 目标解析到冻结的历史 identity | 未写入；通过 migration map 取得 v3 identity |
+| `atomic-activation-failed` | concurrency | prepared v3 已验证，但原子替换 active manifest 失败 | 未激活；保留 artifacts，允许 resume |
 
 `depends-on` 环不得产生 `belongs-cycle`；两种关系具有不同不变量。
 
