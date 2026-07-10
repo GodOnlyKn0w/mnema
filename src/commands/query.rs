@@ -359,6 +359,33 @@ pub(crate) fn apply_timeline_window_limit(
     entries.len() < pre_truncate_len
 }
 
+/// Apply `--since-ts` / `--until-ts` filters on a timeline projection.
+///
+/// Timestamps are parsed as RFC3339. Invalid caller input is rejected rather
+/// than silently string-compared. A future `--since-ts` correctly produces an
+/// empty window.
+pub(crate) fn filter_timeline_by_ts(
+    entries: &mut Vec<projection::TimelineEntry>,
+    since_ts: Option<&str>,
+    until_ts: Option<&str>,
+) -> Result<(), String> {
+    if let Some(st) = since_ts {
+        let threshold = crate::util::parse_event_ts(st)
+            .ok_or_else(|| format!("invalid --since-ts '{st}': expected RFC3339 timestamp"))?;
+        entries.retain(|e| {
+            crate::util::parse_event_ts(&e.ts).is_some_and(|ts| ts >= threshold)
+        });
+    }
+    if let Some(ut) = until_ts {
+        let threshold = crate::util::parse_event_ts(ut)
+            .ok_or_else(|| format!("invalid --until-ts '{ut}': expected RFC3339 timestamp"))?;
+        entries.retain(|e| {
+            crate::util::parse_event_ts(&e.ts).is_some_and(|ts| ts <= threshold)
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_timeline(
     since_offset: Option<usize>,
     since_ts: Option<&str>,
@@ -382,16 +409,7 @@ pub(crate) fn cmd_timeline(
     if let Some(uo) = until_offset {
         entries.retain(|e| e.journal_offset <= uo);
     }
-    // since_ts: convert to approximate offset
-    if let Some(st) = since_ts {
-        let first_idx = entries.iter().position(|e| e.ts.as_str() >= st);
-        if let Some(idx) = first_idx {
-            entries.drain(0..idx);
-        }
-    }
-    if let Some(ut) = until_ts {
-        entries.retain(|e| e.ts.as_str() <= ut);
-    }
+    filter_timeline_by_ts(&mut entries, since_ts, until_ts)?;
 
     // Filter by strand or links
     let canonical_strands = projection::project_strands(&events, true);

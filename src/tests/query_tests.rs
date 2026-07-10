@@ -1878,3 +1878,46 @@ fn timeline_limit_still_keeps_head_events() {
         "--limit N must keep the first N events"
     );
 }
+
+#[test]
+fn timeline_since_ts_future_yields_empty() {
+    let _env = setup();
+    create_strand("timeline since-ts seed");
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let mut entries = projection::project_timeline(&events);
+    assert!(!entries.is_empty());
+
+    crate::commands::query::filter_timeline_by_ts(
+        &mut entries,
+        Some("2099-01-01T00:00:00Z"),
+        None,
+    )
+    .unwrap();
+    assert!(entries.is_empty());
+}
+
+#[test]
+fn timeline_ts_filters_reject_invalid_rfc3339() {
+    let _env = setup();
+    create_strand("timeline invalid timestamp seed");
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let mut entries = projection::project_timeline(&events);
+
+    let since_err = crate::commands::query::filter_timeline_by_ts(
+        &mut entries,
+        Some("not-a-date"),
+        None,
+    )
+    .expect_err("invalid since-ts must fail");
+    assert!(since_err.contains("--since-ts") && since_err.contains("RFC3339"));
+
+    let until_err = crate::commands::query::filter_timeline_by_ts(
+        &mut entries,
+        None,
+        Some("yesterday"),
+    )
+    .expect_err("invalid until-ts must fail");
+    assert!(until_err.contains("--until-ts") && until_err.contains("RFC3339"));
+}
