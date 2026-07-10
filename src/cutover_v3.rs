@@ -32,6 +32,7 @@ pub(crate) const CERTIFICATE_REL: &str = "history/migration-v2-to-v3.certificate
 const MIGRATION_ID_DOMAIN: &[u8] = b"mnema.migration.v2-to-v3\0";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CutoverV3SourceRecord {
     pub(crate) offset: usize,
     pub(crate) variant: String,
@@ -43,6 +44,7 @@ pub(crate) struct CutoverV3SourceRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CutoverV3EntryMap {
     pub(crate) old_offset: usize,
     pub(crate) old_strand_id: String,
@@ -54,12 +56,14 @@ pub(crate) struct CutoverV3EntryMap {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CutoverV3RefMap {
     pub(crate) source: String,
     pub(crate) target: RefV3,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CutoverV3Map {
     pub(crate) schema: String,
     pub(crate) migration_id: String,
@@ -76,6 +80,7 @@ pub(crate) struct CutoverV3Map {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CutoverV3Certificate {
     pub(crate) schema: String,
     pub(crate) created_at: String,
@@ -161,6 +166,15 @@ pub(crate) fn build_cutover_v3_plan(
     {
         return Err(format!(
             "source journal_id must be 64 lowercase hex, found {source_journal_id}"
+        ));
+    }
+    if source_sha256.len() != 64
+        || !source_sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(format!(
+            "source sha256 must be 64 lowercase hex, found {source_sha256}"
         ));
     }
 
@@ -672,9 +686,14 @@ fn emit_entry(
         link_entry_id: Some(link_id),
     }) = effect
     {
+        let mapped_link_id = state
+            .entry_map
+            .get(link_id)
+            .cloned()
+            .unwrap_or_else(|| link_id.clone());
         if let Some(map) = state.live_links.get_mut(old_strand_id) {
             if let Some(list) = map.get_mut(&(target.clone(), edge_type.clone())) {
-                list.retain(|id| id != link_id);
+                list.retain(|id| id != &mapped_link_id);
                 if list.is_empty() {
                     map.remove(&(target.clone(), edge_type.clone()));
                 }
@@ -1167,6 +1186,70 @@ fn check_projection_equivalence(
     if hidden_v2 != hidden_v3 {
         mismatches.push(format!("hidden count v2={hidden_v2} v3={hidden_v3}"));
     }
+
+    // Compare each strand's durable projection, not only aggregate counts.
+    // Entry counts may legitimately expand for legacy key tombstones, but
+    // identity metadata, lifecycle, visibility, and live typed edges must be
+    // equivalent after applying the migration map.
+    let v2_projected = crate::projection::project_strands(source, true);
+    let v3_events: Vec<(usize, Event)> = records_to_v2_events(records)
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| (index + 1, event))
+        .collect();
+    let v3_projected = crate::projection::project_strands(&v3_events, true);
+    for old in &v2_projected {
+        let Some(new_id) = map.strands.get(&old.id) else {
+            continue;
+        };
+        let Some(new) = v3_projected.iter().find(|strand| &strand.id == new_id) else {
+            mismatches.push(format!(
+                "mapped strand {} missing from v3 projection",
+                old.id
+            ));
+            continue;
+        };
+        if old.slug != new.slug {
+            mismatches.push(format!("strand {} slug changed", old.id));
+        }
+        if old.strand_type != new.strand_type {
+            mismatches.push(format!("strand {} type changed", old.id));
+        }
+        if old.hidden != new.hidden {
+            mismatches.push(format!("strand {} visibility changed", old.id));
+        }
+        let old_state = crate::projection::compute_state_from_events(source, &old.id).0;
+        let new_state = crate::projection::compute_state_from_events(&v3_events, new_id).0;
+        if old_state != new_state {
+            mismatches.push(format!(
+                "strand {} lifecycle changed: {} -> {}",
+                old.id, old_state, new_state
+            ));
+        }
+        let map_targets = |targets: &[String]| -> Vec<String> {
+            let mut mapped: Vec<String> = targets
+                .iter()
+                .map(|target| {
+                    map.strands
+                        .get(target)
+                        .cloned()
+                        .unwrap_or_else(|| format!("unmapped:{target}"))
+                })
+                .collect();
+            mapped.sort();
+            mapped
+        };
+        let mut new_belongs = new.belongs_to_edges.clone();
+        new_belongs.sort();
+        if map_targets(&old.belongs_to_edges) != new_belongs {
+            mismatches.push(format!("strand {} belongs-to projection changed", old.id));
+        }
+        let mut new_depends = new.depends_on_edges.clone();
+        new_depends.sort();
+        if map_targets(&old.depends_on_edges) != new_depends {
+            mismatches.push(format!("strand {} depends-on projection changed", old.id));
+        }
+    }
     let _ = v2_entry_events;
 
     ProjectionEquivalence {
@@ -1259,14 +1342,17 @@ pub(crate) fn apply_cutover_v3(
             write_records_prepared(&target_path, &plan.map.target_journal_id, &plan.records)?
         };
 
-        let map_json = serde_json::to_vec_pretty(&plan.map)
-            .map_err(|e| format!("serialize migration map: {e}"))?;
+        let map_json =
+            serde_jcs::to_vec(&plan.map).map_err(|e| format!("canonicalize migration map: {e}"))?;
         install_bytes_idempotent(&map_path, &map_json, "migration map")?;
         let map_sha = sha256_bytes(&map_json);
 
         let certificate = CutoverV3Certificate {
             schema: CERTIFICATE_SCHEMA.to_string(),
-            created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            created_at: canonicalize_timestamp(
+                "certificate created_at",
+                &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+            )?,
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             tool_commit: env!("MNEMA_COMMIT").to_string(),
             migration_id: plan.map.migration_id.clone(),
@@ -1283,8 +1369,8 @@ pub(crate) fn apply_cutover_v3(
             history_sha256: source_sha,
             unresolved_ref_count: plan.map.unresolved_refs.len(),
         };
-        let cert_json = serde_json::to_vec_pretty(&certificate)
-            .map_err(|e| format!("serialize certificate: {e}"))?;
+        let cert_json = serde_jcs::to_vec(&certificate)
+            .map_err(|e| format!("canonicalize certificate: {e}"))?;
         if certificate_path.exists() {
             let existing = std::fs::read(&certificate_path).map_err(|e| {
                 format!(
@@ -1292,13 +1378,28 @@ pub(crate) fn apply_cutover_v3(
                     certificate_path.display()
                 )
             })?;
-            let parsed: CutoverV3Certificate = serde_json::from_slice(&existing).map_err(|e| {
+            let text = std::str::from_utf8(&existing).map_err(|e| {
+                format!(
+                    "parse existing certificate {} as UTF-8: {e}",
+                    certificate_path.display()
+                )
+            })?;
+            let parsed: CutoverV3Certificate = crate::strict_json::from_str(text).map_err(|e| {
                 format!(
                     "parse existing certificate {}: {e}",
                     certificate_path.display()
                 )
             })?;
-            if parsed.migration_id != certificate.migration_id
+            let canonical = serde_jcs::to_vec(&parsed)
+                .map_err(|e| format!("canonicalize existing certificate: {e}"))?;
+            if existing != canonical {
+                return Err(format!(
+                    "migration artifact conflict: {} is not canonical JCS",
+                    certificate_path.display()
+                ));
+            }
+            if parsed.schema != CERTIFICATE_SCHEMA
+                || parsed.migration_id != certificate.migration_id
                 || parsed.source_sha256 != certificate.source_sha256
                 || parsed.target_sha256 != certificate.target_sha256
                 || parsed.map_sha256 != certificate.map_sha256
@@ -1309,8 +1410,7 @@ pub(crate) fn apply_cutover_v3(
                 ));
             }
         } else {
-            std::fs::write(&certificate_path, &cert_json)
-                .map_err(|e| format!("write certificate {}: {e}", certificate_path.display()))?;
+            install_bytes_idempotent(&certificate_path, &cert_json, "migration certificate")?;
         }
 
         // Hash the exact on-disk map/certificate bytes for the origin commitment.
@@ -1379,7 +1479,15 @@ fn install_bytes_idempotent(path: &Path, bytes: &[u8], label: &str) -> Result<()
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create parent for {}: {e}", path.display()))?;
     }
-    std::fs::write(path, bytes).map_err(|e| format!("write {label} {}: {e}", path.display()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| format!("create {label} {}: {e}", path.display()))?;
+    use std::io::Write;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| format!("persist {label} {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -1563,7 +1671,11 @@ pub(crate) fn plan_from_journal_dir(journal_dir: &Path) -> Result<CutoverV3Plan,
             read.diagnostics.len()
         ));
     }
-    let journal_id = journal::ensure_journal_id_in(journal_dir)?.to_ascii_lowercase();
+    let journal_id = journal::existing_journal_id_in(journal_dir)?
+        .ok_or_else(|| {
+            "journal-id.json is missing; run mnema init once before planning cutover-v3".to_string()
+        })?
+        .to_ascii_lowercase();
     if journal_id.len() != 64 || !journal_id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("journal_id sidecar is not 64 hex".to_string());
     }
@@ -1607,6 +1719,15 @@ mod tests {
             .map(|(i, e)| (i + 1, e))
             .collect();
         (journal_id, numbered)
+    }
+
+    fn event_entry_id(event: &Event) -> String {
+        match event {
+            Event::LogAppended {
+                entry_id: Some(id), ..
+            } => id.clone(),
+            _ => panic!("expected chained log entry"),
+        }
     }
 
     #[test]
@@ -1686,6 +1807,17 @@ mod tests {
         assert!(mnema.join(TARGET_V3_REL).exists());
         // Source remains (copy, not move).
         assert!(source_path.exists());
+        let map_bytes = std::fs::read(mnema.join(MAP_REL)).unwrap();
+        let parsed_map: CutoverV3Map =
+            crate::strict_json::from_str(std::str::from_utf8(&map_bytes).unwrap()).unwrap();
+        assert_eq!(map_bytes, serde_jcs::to_vec(&parsed_map).unwrap());
+        let certificate_bytes = std::fs::read(mnema.join(CERTIFICATE_REL)).unwrap();
+        let parsed_certificate: CutoverV3Certificate =
+            crate::strict_json::from_str(std::str::from_utf8(&certificate_bytes).unwrap()).unwrap();
+        assert_eq!(
+            certificate_bytes,
+            serde_jcs::to_vec(&parsed_certificate).unwrap()
+        );
 
         let second = apply_cutover_v3(&mnema, &source_path, &plan).unwrap();
         assert_eq!(second, CutoverV3ApplyOutcome::AlreadyActive);
@@ -1712,5 +1844,129 @@ mod tests {
         assert!(!mnema.join("active-journal.json").exists());
         assert!(!mnema.join("history").exists());
         assert!(!mnema.join("journals").exists());
+    }
+
+    #[test]
+    fn dry_run_does_not_create_missing_journal_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mnema = dir.path().join(".mnema");
+        std::fs::create_dir_all(&mnema).unwrap();
+        std::fs::write(mnema.join("journal.jsonl"), "").unwrap();
+        let error = plan_from_journal_dir(&mnema).unwrap_err();
+        assert!(error.contains("journal-id.json is missing"), "{error}");
+        assert!(!mnema.join("journal-id.json").exists());
+        assert!(!mnema.join("history").exists());
+        assert!(!mnema.join("journals").exists());
+    }
+
+    #[test]
+    fn multi_refs_are_typed_and_fully_mapped() {
+        let journal_id = "aa".repeat(32);
+        let (first_created, first_entry) = event::make_strand_created("first", Some("task"));
+        let first_id = event_entry_id(&first_entry);
+        let (second_created, second_entry) = event::make_strand_created("second", Some("task"));
+        let second_id = event_entry_id(&second_entry);
+        let (consumer_created, consumer_entry) = event::make_strand_created_with_refs_and_slug(
+            "consumer",
+            Some("task"),
+            vec![first_id, second_id],
+            None,
+            None,
+            Some("consumer"),
+        );
+        let source: Vec<_> = vec![
+            first_created,
+            first_entry,
+            second_created,
+            second_entry,
+            consumer_created,
+            consumer_entry,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| (index + 1, event))
+        .collect();
+        let plan = build_cutover_v3_plan(&journal_id, &"bb".repeat(32), &source).unwrap();
+        let consumer = plan
+            .records
+            .iter()
+            .find_map(|record| match record {
+                JournalRecordV3::Entry(entry) if entry.entry.body == "consumer" => Some(entry),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(2, consumer.entry.refs.len());
+        assert!(consumer.entry.refs.iter().all(|reference| matches!(
+            reference,
+            RefV3::Entry { journal_id: id, .. } if id == &journal_id
+        )));
+        assert_eq!(2, plan.map.refs.len());
+        assert!(plan.map.unresolved_refs.is_empty());
+    }
+
+    #[test]
+    fn typed_unlink_is_not_reexpanded_by_later_key_tombstone() {
+        let journal_id = "aa".repeat(32);
+        let (parent_created, parent_entry) = event::make_strand_created("parent", Some("task"));
+        let parent_id = parent_created.strand_id().unwrap().to_string();
+        let (child_created, child_entry) = event::make_strand_created("child", Some("task"));
+        let child_id = child_created.strand_id().unwrap().to_string();
+        let child_head = event_entry_id(&child_entry);
+        let link = event::make_edge_linked(
+            &child_id,
+            Some(&child_head),
+            &parent_id,
+            Some("depends-on"),
+            None,
+        );
+        let link_id = event_entry_id(&link);
+        let typed_unlink = event::make_log_appended_entry_with_effect(
+            &child_id,
+            Some(&link_id),
+            "unlink depends-on parent",
+            Vec::new(),
+            None,
+            Some(EntryEffect::Unlink {
+                target: parent_id.clone(),
+                edge_type: "depends-on".to_string(),
+                link_entry_id: Some(link_id.clone()),
+            }),
+            None,
+        );
+        let legacy_tombstone = Event::EdgeUnlinked {
+            id: child_id,
+            ts: "2026-07-11T00:00:12Z".to_string(),
+            to: parent_id,
+            edge_type: Some("depends-on".to_string()),
+            provenance: None,
+        };
+        let source: Vec<_> = vec![
+            parent_created,
+            parent_entry,
+            child_created,
+            child_entry,
+            link,
+            typed_unlink,
+            legacy_tombstone,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| (index + 1, event))
+        .collect();
+        let plan = build_cutover_v3_plan(&journal_id, &"bb".repeat(32), &source).unwrap();
+        let last = plan.map.source_records.last().unwrap();
+        assert_eq!("unlink_noop_no_live_links", last.disposition);
+        assert!(last.new_entry_ids.is_empty());
+        assert_eq!(0, plan.equivalence.edge_count_v3);
+    }
+
+    #[test]
+    fn migration_artifact_schemas_reject_unknown_fields() {
+        let (journal_id, source) = pure_v2_fixture();
+        let plan = build_cutover_v3_plan(&journal_id, &"bb".repeat(32), &source).unwrap();
+        let mut value = serde_json::to_value(&plan.map).unwrap();
+        value["future"] = serde_json::json!(true);
+        let text = serde_json::to_string(&value).unwrap();
+        assert!(crate::strict_json::from_str::<CutoverV3Map>(&text).is_err());
     }
 }

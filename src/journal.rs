@@ -228,6 +228,12 @@ fn read_journal_id_file(path: &std::path::Path) -> Result<Option<String>, String
     Ok(Some(parsed.journal_id))
 }
 
+pub(crate) fn existing_journal_id_in(
+    journal_dir: &std::path::Path,
+) -> Result<Option<String>, String> {
+    read_journal_id_file(&journal_id_path_in(journal_dir))
+}
+
 /// Create the journal-id sidecar only if absent (create_new). Never overwrites.
 fn write_journal_id_file_new(path: &std::path::Path, journal_id: &str) -> Result<(), String> {
     use std::io::Write;
