@@ -55,6 +55,9 @@ pub(crate) struct JournalRead {
     pub(crate) events: Vec<(usize, Event)>,
     pub(crate) diagnostics: Vec<JournalParseDiagnostic>,
     pub(crate) read_error: Option<String>,
+    /// Physical lines consumed by the v2 reader. Unlike `events.len()`, this
+    /// includes blank and malformed lines and therefore preserves v2 offsets.
+    pub(crate) total_lines: usize,
 }
 
 impl JournalRead {
@@ -67,6 +70,7 @@ impl JournalRead {
             events: Vec::new(),
             diagnostics: Vec::new(),
             read_error: Some(error),
+            total_lines: 0,
         }
     }
 }
@@ -432,6 +436,7 @@ pub(crate) fn read_journal_lossy_locked() -> JournalRead {
             let records = crate::journal_v3::read_records_strict(&path, &journal_id)?;
             let events = crate::cutover_v3::records_to_v2_events(&records);
             Ok(JournalRead {
+                total_lines: events.len(),
                 events: events
                     .into_iter()
                     .enumerate()
@@ -878,13 +883,23 @@ pub(crate) enum AppendGate {
     Skip,
 }
 
-/// Like `append_entry_to_strand_checked`, but the gate may also decide —
-/// from the events read under the write lock — that no entry is needed.
-/// Returns `Ok(None)` when the gate skipped, `Ok(Some(outcome))` when it wrote.
-pub(crate) fn append_entry_to_strand_gated(
-    req: JournalEntryAppendRequest,
-    gate: impl FnOnce(&[(usize, Event)]) -> Result<AppendGate, String>,
-) -> Result<Option<JournalAppendOutcome>, String> {
+/// A single-lock journal transaction planned from one validated event view.
+/// The returned event view includes the appended entry when `request` is set,
+/// so callers can derive post-write projections without rereading the journal.
+pub(crate) struct EntryTransactionPlan<T> {
+    pub(crate) request: Option<JournalEntryAppendRequest>,
+    pub(crate) value: T,
+}
+
+pub(crate) struct EntryTransactionOutcome<T> {
+    pub(crate) append: Option<JournalAppendOutcome>,
+    pub(crate) value: T,
+    pub(crate) events: Vec<(usize, Event)>,
+}
+
+pub(crate) fn transact_entry<T>(
+    plan: impl FnOnce(&[(usize, Event)]) -> Result<EntryTransactionPlan<T>, String>,
+) -> Result<EntryTransactionOutcome<T>, String> {
     if let ActiveJournal::V3 {
         journal_id, path, ..
     } = resolve_active_journal()?
@@ -900,15 +915,20 @@ pub(crate) fn append_entry_to_strand_gated(
             .map_err(|e| format!("cannot acquire journal lock: {e}"))?;
         let result = (|| {
             let validated = crate::journal_v3::read_validated_journal(&path, &journal_id)?;
-            let events: Vec<(usize, Event)> =
+            let mut events: Vec<(usize, Event)> =
                 crate::cutover_v3::records_to_v2_events(&validated.records)
                     .into_iter()
                     .enumerate()
                     .map(|(index, event)| (index + 1, event))
                     .collect();
-            if matches!(gate(&events)?, AppendGate::Skip) {
-                return Ok(None);
-            }
+            let planned = plan(&events)?;
+            let Some(req) = planned.request else {
+                return Ok(EntryTransactionOutcome {
+                    append: None,
+                    value: planned.value,
+                    events,
+                });
+            };
             let prev = current_entry_head(&events, &req.strand_id);
             let mut event = crate::event::make_log_appended_entry_with_effect(
                 &req.strand_id,
@@ -940,7 +960,13 @@ pub(crate) fn append_entry_to_strand_gated(
             {
                 *entry_id = appended.entry_ids.get(&provisional).cloned();
             }
-            Ok(Some(JournalAppendOutcome::from_event(event)))
+            let outcome = JournalAppendOutcome::from_event(event.clone());
+            events.push((events.len() + 1, event));
+            Ok(EntryTransactionOutcome {
+                append: Some(outcome),
+                value: planned.value,
+                events,
+            })
         })();
         let _ = fs2::FileExt::unlock(&lock_file);
         return result;
@@ -958,13 +984,39 @@ pub(crate) fn append_entry_to_strand_gated(
                 read.diagnostics.len()
             ));
         }
-        match gate(&read.events)? {
-            AppendGate::Skip => Ok(None),
-            AppendGate::Proceed => {
-                append_entry_to_strand_unlocked(journal, &read.events, req).map(Some)
-            }
-        }
+        let mut events = read.events;
+        let next_offset = read.total_lines;
+        let planned = plan(&events)?;
+        let append = if let Some(req) = planned.request {
+            let outcome = append_entry_to_strand_unlocked(journal, &events, req)?;
+            events.push((next_offset, outcome.event.clone()));
+            Some(outcome)
+        } else {
+            None
+        };
+        Ok(EntryTransactionOutcome {
+            append,
+            value: planned.value,
+            events,
+        })
     })
+}
+
+/// Like `append_entry_to_strand_checked`, but the gate may also decide —
+/// from the events read under the write lock — that no entry is needed.
+/// Returns `Ok(None)` when the gate skipped, `Ok(Some(outcome))` when it wrote.
+pub(crate) fn append_entry_to_strand_gated(
+    req: JournalEntryAppendRequest,
+    gate: impl FnOnce(&[(usize, Event)]) -> Result<AppendGate, String>,
+) -> Result<Option<JournalAppendOutcome>, String> {
+    Ok(transact_entry(|events| {
+        let request = match gate(events)? {
+            AppendGate::Skip => None,
+            AppendGate::Proceed => Some(req),
+        };
+        Ok(EntryTransactionPlan { request, value: () })
+    })?
+    .append)
 }
 
 pub(crate) fn append_entry_to_strand(
@@ -1002,6 +1054,7 @@ pub(crate) fn read_journal_lossy(path: &PathBuf) -> JournalRead {
                 Ok(records) => {
                     let events = crate::cutover_v3::records_to_v2_events(&records);
                     JournalRead {
+                        total_lines: events.len(),
                         events: events
                             .into_iter()
                             .enumerate()
@@ -1033,6 +1086,7 @@ pub(crate) fn read_events_lossy(path: &PathBuf) -> (Vec<(usize, Event)>, usize) 
 fn read_journal_lossy_reader<R: BufRead>(reader: R) -> JournalRead {
     let mut read = JournalRead::default();
     for (line_no, line) in reader.lines().enumerate() {
+        read.total_lines = line_no + 1;
         let line = match line {
             Ok(l) => l,
             Err(e) => {

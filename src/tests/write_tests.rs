@@ -94,6 +94,13 @@ fn append_default_multi_active_discloses_resolve() {
     assert_eq!(multi.strand_id, b);
     assert_eq!(multi.resolved_by, Some("most_recent_active_strand"));
     assert_eq!(multi.active_count, Some(2));
+    let (card, state) = multi
+        .card_state
+        .as_ref()
+        .expect("append transaction must return a post-write card");
+    assert_eq!(state, "registered");
+    assert_eq!(card.entry_count, 2);
+    assert_eq!(card.last_entry, "note multi");
     let disclosure = multi_active_resolve_disclosure(&multi.strand_id, multi.active_count.unwrap())
         .expect("2 active lines must produce resolve disclosure");
     assert!(
@@ -156,6 +163,46 @@ fn append_default_single_active_no_resolve_disclosure() {
         multi_active_resolve_disclosure(&outcome.strand_id, 1).is_none(),
         "single active line must not emit resolve disclosure"
     );
+}
+
+#[test]
+fn append_transaction_preserves_v2_physical_offsets_with_blank_lines() {
+    use std::io::Write as _;
+
+    let _env = setup();
+    let id = create_strand("v2 offset target");
+    let path = ensure_journal().unwrap();
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+    )
+    .unwrap();
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+    )
+    .unwrap();
+
+    let outcome = execute_append(AppendRequest {
+        content: Some("after blank line"),
+        legacy_id: None,
+        new: false,
+        stdin: false,
+        file: None,
+        explicit_id: Some(&id),
+        provenance_raw: None,
+        seen_offset: None,
+        why: None,
+        allow_selection: false,
+    })
+    .expect("v2 append transaction must accept blank journal lines");
+    let (card, _) = outcome.card_state.expect("post-write card");
+    assert_eq!(card.last_offset, 5);
+    assert_eq!(card.last_entry, "after blank line");
 }
 
 #[test]

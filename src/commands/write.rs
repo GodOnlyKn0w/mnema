@@ -7,8 +7,8 @@
 use crate::diagnostics;
 use crate::event::{self, Event};
 use crate::journal::{
-    JournalEntryAppendRequest, append_entry_to_strand, append_entry_to_strand_checked,
-    append_events, ensure_journal, read_events_lossy, read_events_strict,
+    EntryTransactionPlan, JournalEntryAppendRequest, append_entry_to_strand_checked, append_events,
+    ensure_journal, read_events_lossy, read_events_strict, transact_entry,
 };
 use crate::markers::{
     is_closing_annotation_marker, is_known_marker_str, suggest_marker, validate_lifecycle_marker,
@@ -20,7 +20,8 @@ use crate::util::{
     shorten,
 };
 use crate::{
-    print_card_with_state, print_handle_line, strand_card_fresh, strand_card_fresh_with_state,
+    journal_view::strand_card_with_state, print_card_with_state, print_handle_line,
+    strand_card_fresh, strand_card_fresh_with_state,
 };
 
 /// Strip at most one trailing newline (\n or \r\n).
@@ -527,9 +528,6 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
     let stored = normalize_content(&raw);
     validate_lifecycle_marker(&stored)?;
 
-    let path = ensure_journal()?;
-    let (events, _) = read_events_lossy(&path);
-
     if req.explicit_id.map_or(false, |id| id.trim().is_empty()) {
         return Err("explicit --id cannot be empty".to_string());
     }
@@ -584,73 +582,91 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         });
     }
 
-    let all_strands = projection::project_strands(&events, true);
-    let target_id = req.explicit_id.or(req.legacy_id);
-    let (full_id, resolved_by, active_count) = if let Some(id) = target_id {
-        let full = crate::reference::resolve_strand_with_selection(
-            &all_strands,
-            id,
-            req.allow_selection,
-            events.last().map(|(offset, _)| *offset).unwrap_or(0),
-        ).map_err(|e| {
-            let mut msg = e;
-            if id == "-" {
-                msg.push_str(
-                    ". If you meant to pipe content from stdin, use:\n  echo \"...\" | mnema append --id <id>",
-                );
-            }
-            msg
-        })?;
-        (full, None, None)
-    } else {
-        let visible_strands = projection::project_strands(&events, false);
-        let active_count = count_active_strands(&visible_strands);
-        let recent = resolve_most_recent_strand(&visible_strands)
-            .ok_or("no active strand — use 'add', 'append --new', or pass --id")?;
-        (
-            recent.id.clone(),
-            Some("most_recent_active_strand"),
-            Some(active_count),
-        )
-    };
+    let transaction = transact_entry(|events| {
+        let all_strands = projection::project_strands(events, true);
+        let (full_id, resolved_by, active_count) = if let Some(id) = req.explicit_id {
+            let full = crate::reference::resolve_strand_with_selection(
+                &all_strands,
+                id,
+                req.allow_selection,
+                events.last().map(|(offset, _)| *offset).unwrap_or(0),
+            )
+            .map_err(|e| {
+                let mut msg = e;
+                if id == "-" {
+                    msg.push_str(
+                        ". If you meant to pipe content from stdin, use:\n  echo \"...\" | mnema append --id <id>",
+                    );
+                }
+                msg
+            })?;
+            (full, None, None)
+        } else {
+            let visible_strands = projection::project_strands(events, false);
+            let active_count = count_active_strands(&visible_strands);
+            let recent = resolve_most_recent_strand(&visible_strands)
+                .ok_or("no active strand — use 'add', 'append --new', or pass --id")?;
+            (
+                recent.id.clone(),
+                Some("most_recent_active_strand"),
+                Some(active_count),
+            )
+        };
 
-    let target_strand = all_strands
-        .iter()
-        .find(|s| s.id == full_id)
-        .ok_or_else(|| format!("strand {} not found", full_id))?;
-    let strand_last_offset = target_strand.last_offset();
-    let closed_target_warning = if req.explicit_id.is_some() {
-        diagnostics::check_w059_append_closed_strand(target_strand)
-    } else {
-        None
-    };
-
-    let seen_warning =
-        diagnostics::check_w076_seen_offset(&full_id, req.seen_offset, strand_last_offset);
-    let mut refs: Vec<String> = Vec::new();
-    if let Some(w) = req.why {
-        refs.push(resolve_rationale_ref(
-            &events,
-            &all_strands,
-            w,
-            req.allow_selection,
-        )?);
-    }
-    let appended = append_entry_to_strand(JournalEntryAppendRequest {
-        strand_id: full_id.clone(),
-        content: stored.clone(),
-        refs,
-        legacy_ref: None,
-        effect: None,
-        provenance: provenance.clone(),
-        kind_override: None,
-        payload_override: None,
+        let target_strand = all_strands
+            .iter()
+            .find(|s| s.id == full_id)
+            .ok_or_else(|| format!("strand {} not found", full_id))?;
+        let closed_target_warning = if req.explicit_id.is_some() {
+            diagnostics::check_w059_append_closed_strand(target_strand)
+        } else {
+            None
+        };
+        let seen_warning = diagnostics::check_w076_seen_offset(
+            &full_id,
+            req.seen_offset,
+            target_strand.last_offset(),
+        );
+        let mut refs = Vec::new();
+        if let Some(w) = req.why {
+            refs.push(resolve_rationale_ref(
+                events,
+                &all_strands,
+                w,
+                req.allow_selection,
+            )?);
+        }
+        let request = JournalEntryAppendRequest {
+            strand_id: full_id.clone(),
+            content: stored.clone(),
+            refs,
+            legacy_ref: None,
+            effect: None,
+            provenance: provenance.clone(),
+            kind_override: None,
+            payload_override: None,
+        };
+        Ok(EntryTransactionPlan {
+            request: Some(request),
+            value: (
+                full_id,
+                resolved_by,
+                active_count,
+                seen_warning,
+                closed_target_warning,
+            ),
+        })
     })?;
-    let entry_id = appended.entry_id;
+    let (full_id, resolved_by, active_count, seen_warning, closed_target_warning) =
+        transaction.value;
+    let entry_id = transaction
+        .append
+        .expect("append transaction always supplies a request")
+        .entry_id;
 
     let marker_warning = possible_marker_warning(&stored);
     let closing_marker_warning = is_closing_annotation_marker(&stored);
-    let card_state = strand_card_fresh_with_state(&full_id);
+    let card_state = strand_card_with_state(&transaction.events, &full_id);
 
     Ok(AppendOutcome {
         kind: AppendOutcomeKind::AppendedExisting,

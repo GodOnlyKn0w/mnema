@@ -76,11 +76,17 @@ fn fresh_v3_add_and_append_keep_genesis_identity_and_append_only_prefix() {
     assert_eq!(Some("root"), genesis["strand"]["slug"].as_str());
     assert_eq!(Some("task"), genesis["strand"]["strand_type"].as_str());
 
-    success(run(
+    let append = success(run(
         dir.path(),
         &["append", "--id", &strand_id, "--format", "json"],
         Some("[progress] next\n"),
     ));
+    let append: serde_json::Value = serde_json::from_str(append.trim()).unwrap();
+    assert_eq!(Some(2), append["result"]["entry_count"].as_u64());
+    assert_eq!(
+        Some("[progress] next"),
+        append["result"]["last_entry"].as_str()
+    );
     let final_bytes = std::fs::read(&journal_path).unwrap();
     assert!(final_bytes.starts_with(&after_add));
     assert_eq!(

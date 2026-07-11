@@ -21,7 +21,14 @@ pub(crate) fn strand_card_fresh_with_state(
 ) -> Option<(output::OrientStrand, String)> {
     let path = ensure_journal().ok()?;
     let (events, _) = read_events_lossy(&path);
-    let strands = projection::project_strands(&events, true);
+    strand_card_with_state(&events, strand_id)
+}
+
+pub(crate) fn strand_card_with_state(
+    events: &[(usize, crate::event::Event)],
+    strand_id: &str,
+) -> Option<(output::OrientStrand, String)> {
+    let strands = projection::project_strands(events, true);
     strands
         .iter()
         .find(|s| s.id == strand_id)
