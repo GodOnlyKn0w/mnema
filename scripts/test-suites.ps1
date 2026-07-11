@@ -5,6 +5,7 @@ function Get-MnemaTestSuites {
 
     $all = @(
         [pscustomobject]@{ Name = 'format'; Phase = 0; TimeoutMs = 60000; Argv = @('cargo', 'fmt', '--check') },
+        [pscustomobject]@{ Name = 'build-release'; Phase = 1; TimeoutMs = 600000; Argv = @('cargo', 'build', '--release') },
         [pscustomobject]@{ Name = 'compile-release'; Phase = 1; TimeoutMs = 600000; Argv = @('cargo', 'test', '--release', '--no-run') },
         [pscustomobject]@{ Name = 'compile-failpoints'; Phase = 1; TimeoutMs = 300000; Argv = @('cargo', 'test', '--release', '--features', 'test-failpoints', '--test', 'crash_atomicity', '--no-run') },
         [pscustomobject]@{ Name = 'unit'; Phase = 2; TimeoutMs = 600000; Argv = @('cargo', 'test', '--release', '--bin', 'mnema') },
@@ -19,7 +20,7 @@ function Get-MnemaTestSuites {
     )
 
     switch ($Mode) {
-        'Fast' { return @($all | Where-Object Name -in @('format', 'compile-release', 'behavior', 'cli-recovery')) }
+        'Fast' { return @($all | Where-Object Name -in @('format', 'build-release', 'compile-release', 'behavior', 'cli-recovery')) }
         'Full' { return @($all | Where-Object Phase -lt 4) }
         'Nightly' { return $all } # extended suites are registered before being added here
     }
