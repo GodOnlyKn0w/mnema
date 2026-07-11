@@ -235,3 +235,14 @@ fn v3_doctor_warns_when_an_old_binary_creates_a_fresh_origin_shadow() {
     assert!(stderr.contains("legacy-shadow-diverged"), "{stderr}");
     assert!(stderr.contains("old binary"), "{stderr}");
 }
+
+#[test]
+fn v3_orient_uses_strict_v3_integrity_instead_of_v2_rehashing() {
+    let dir = tempfile::tempdir().unwrap();
+    success(run(dir.path(), &["init"], None));
+    success(run(dir.path(), &["add"], Some("orient target\n")));
+    let output = success(run(dir.path(), &["orient", "--format", "json"], None));
+    let value: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    let integrity = value["integrity"].as_str().unwrap();
+    assert!(integrity.starts_with("ok (v3 strict-read"), "{integrity}");
+}

@@ -881,6 +881,20 @@ fn print_orient_notices(notices: &[String]) {
 /// anchor verification — O(events); fine at current scale, and can drop to a
 /// latest-anchor-only check if orient ever gets slow on huge journals.
 fn integrity_glance(events: &[(usize, Event)]) -> String {
+    // Active-v3 records were already identity/chain/anchor validated by the
+    // strict codec before projection. Re-hashing their projected Event shape
+    // with the v2 algorithm necessarily false-fails healthy v3 journals.
+    if matches!(
+        crate::journal::resolve_active_journal(),
+        Ok(crate::journal::ActiveJournal::V3 { .. })
+    ) {
+        let anchors = events
+            .iter()
+            .filter(|(_, event)| matches!(event, Event::JournalAnchored { .. }))
+            .count();
+        return format!("ok (v3 strict-read, {anchors} anchors)");
+    }
+
     let raw: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
     let report = crate::diagnostics::verify_journal_integrity(&raw);
     if report.has_errors() {

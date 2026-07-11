@@ -538,12 +538,22 @@ fn append_events_as_v3_locked(
     events: &[Event],
     entry_override: Option<(String, serde_json::Value)>,
 ) -> Result<JournalBatchAppendOutcome, String> {
+    let validated = crate::journal_v3::read_validated_journal(path, journal_id)?;
+    append_events_to_validated_v3_locked(path, journal_id, events, entry_override, validated)
+}
+
+fn append_events_to_validated_v3_locked(
+    path: &std::path::Path,
+    journal_id: &str,
+    events: &[Event],
+    entry_override: Option<(String, serde_json::Value)>,
+    validated: crate::journal_v3::ValidatedJournalV3,
+) -> Result<JournalBatchAppendOutcome, String> {
     use crate::canonical::{EntryHashViewV3, JournalRecordV3, StrandKeyV3, random_genesis_seed};
 
-    let mut records = crate::journal_v3::read_records_strict(path, journal_id)?;
     let mut heads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut known_entries = std::collections::HashSet::new();
-    for record in &records {
+    for record in &validated.records {
         if let JournalRecordV3::Entry(entry) = record {
             heads.insert(entry.strand_id.clone(), entry.entry_id.clone());
             known_entries.insert(entry.entry_id.clone());
@@ -717,23 +727,21 @@ fn append_events_as_v3_locked(
         }
         heads.insert(entry.strand_id.clone(), entry.entry_id.clone());
         known_entries.insert(entry.entry_id.clone());
-        records.push(record.clone());
         appended.push(record);
     }
 
     if !pending.is_empty() {
         return Err("v3 strand creation batch is missing its genesis entry".to_string());
     }
-    let anchor = crate::journal_v3::make_anchor(
+    let anchor = crate::journal_v3::make_anchor_after_validated(
         journal_id,
-        &records,
+        &validated,
+        &appended,
         crate::canonical::canonicalize_timestamp(
             "anchor created_at",
             &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
         )?,
     )?;
-    records.push(anchor.clone());
-    crate::journal_v3::validate_records(journal_id, &records)?;
     appended.push(anchor);
     append_v3_records(path, &appended)?;
     Ok(outcome)
@@ -807,13 +815,15 @@ fn append_v3_records(
         .append(true)
         .open(path)
         .map_err(|e| format!("open active v3 journal {}: {e}", path.display()))?;
+    let mut batch = Vec::new();
     for record in records {
         let bytes =
             serde_jcs::to_vec(record).map_err(|e| format!("canonicalize v3 append record: {e}"))?;
-        file.write_all(&bytes)
-            .and_then(|_| file.write_all(b"\n"))
-            .map_err(|e| format!("append active v3 journal {}: {e}", path.display()))?;
+        batch.extend_from_slice(&bytes);
+        batch.push(b'\n');
     }
+    file.write_all(&batch)
+        .map_err(|e| format!("append active v3 journal {}: {e}", path.display()))?;
     file.flush()
         .and_then(|_| file.sync_all())
         .map_err(|e| format!("sync active v3 journal {}: {e}", path.display()))?;
@@ -889,12 +899,13 @@ pub(crate) fn append_entry_to_strand_gated(
         fs2::FileExt::lock_exclusive(&lock_file)
             .map_err(|e| format!("cannot acquire journal lock: {e}"))?;
         let result = (|| {
-            let records = crate::journal_v3::read_records_strict(&path, &journal_id)?;
-            let events: Vec<(usize, Event)> = crate::cutover_v3::records_to_v2_events(&records)
-                .into_iter()
-                .enumerate()
-                .map(|(index, event)| (index + 1, event))
-                .collect();
+            let validated = crate::journal_v3::read_validated_journal(&path, &journal_id)?;
+            let events: Vec<(usize, Event)> =
+                crate::cutover_v3::records_to_v2_events(&validated.records)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, event)| (index + 1, event))
+                    .collect();
             if matches!(gate(&events)?, AppendGate::Skip) {
                 return Ok(None);
             }
@@ -917,8 +928,13 @@ pub(crate) fn append_entry_to_strand_gated(
                 (None, None) => None,
                 _ => return Err("typed entry override requires both kind and payload".to_string()),
             };
-            let appended =
-                append_events_as_v3_locked(&path, &journal_id, &[event.clone()], entry_override)?;
+            let appended = append_events_to_validated_v3_locked(
+                &path,
+                &journal_id,
+                &[event.clone()],
+                entry_override,
+                validated,
+            )?;
             if let (Some(provisional), Event::LogAppended { entry_id, .. }) =
                 (provisional_entry_id, &mut event)
             {

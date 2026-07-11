@@ -12,6 +12,18 @@ pub(crate) fn read_records_strict(
     path: &Path,
     journal_id: &str,
 ) -> Result<Vec<JournalRecordV3>, String> {
+    Ok(read_validated_journal(path, journal_id)?.records)
+}
+
+pub(crate) struct ValidatedJournalV3 {
+    pub(crate) records: Vec<JournalRecordV3>,
+    replay: ReplayState,
+}
+
+pub(crate) fn read_validated_journal(
+    path: &Path,
+    journal_id: &str,
+) -> Result<ValidatedJournalV3, String> {
     let file = std::fs::File::open(path)
         .map_err(|error| format!("open v3 journal {}: {error}", path.display()))?;
     let mut records = Vec::new();
@@ -23,9 +35,6 @@ pub(crate) fn read_records_strict(
         }
         let record: JournalRecordV3 = crate::strict_json::from_str(&line)
             .map_err(|error| format!("parse v3 journal line {line_number}: {error}"))?;
-        record
-            .validate()
-            .map_err(|error| format!("invalid v3 journal line {line_number}: {error}"))?;
         let canonical = serde_jcs::to_string(&record)
             .map_err(|error| format!("canonicalize v3 journal line {line_number}: {error}"))?;
         if line != canonical {
@@ -35,8 +44,8 @@ pub(crate) fn read_records_strict(
         }
         records.push(record);
     }
-    validate_records(journal_id, &records)?;
-    Ok(records)
+    let replay = replay_records(journal_id, &records, true)?;
+    Ok(ValidatedJournalV3 { records, replay })
 }
 
 pub(crate) fn write_records_prepared(
@@ -97,8 +106,44 @@ pub(crate) fn make_anchor(
     )?))
 }
 
+pub(crate) fn make_anchor_after_validated(
+    journal_id: &str,
+    validated: &ValidatedJournalV3,
+    appended: &[JournalRecordV3],
+    created_at: impl Into<String>,
+) -> Result<JournalRecordV3, String> {
+    let mut state = validated.replay.clone();
+    for (relative_index, record) in appended.iter().enumerate() {
+        apply_record(
+            journal_id,
+            validated.records.len() + relative_index,
+            record,
+            &mut state,
+        )?;
+    }
+    let covered_record_count = u64::try_from(validated.records.len() + appended.len())
+        .map_err(|_| "v3 journal record count does not fit u64".to_string())?;
+    let heads = state
+        .heads
+        .into_iter()
+        .map(|(strand_id, entry_id)| AnchorHeadV3 {
+            strand_id,
+            entry_id,
+        })
+        .collect();
+    Ok(JournalRecordV3::Anchor(AnchorRecordV3::new(
+        created_at,
+        covered_record_count,
+        state.previous_anchor,
+        sequence_digest(&state.sequence_hasher),
+        heads,
+    )?))
+}
+
+#[derive(Clone)]
 struct ReplayState {
     heads: BTreeMap<String, String>,
+    entries: HashSet<String>,
     previous_anchor: Option<String>,
     sequence_hasher: Sha256,
 }
@@ -109,100 +154,120 @@ fn replay_records(
     require_final_anchor: bool,
 ) -> Result<ReplayState, String> {
     validate_full_hex("journal_id", journal_id)?;
-    let mut heads: BTreeMap<String, String> = BTreeMap::new();
-    let mut entries: HashSet<String> = HashSet::new();
-    let mut previous_anchor: Option<String> = None;
+    let heads: BTreeMap<String, String> = BTreeMap::new();
+    let previous_anchor: Option<String> = None;
     let mut sequence_hasher = Sha256::new();
     sequence_hasher.update(RECORD_SEQUENCE_DOMAIN);
 
+    let mut state = ReplayState {
+        heads,
+        entries: HashSet::new(),
+        previous_anchor,
+        sequence_hasher,
+    };
+
     for (index, record) in records.iter().enumerate() {
-        record
-            .validate()
-            .map_err(|error| format!("record {index}: {error}"))?;
-        match record {
-            JournalRecordV3::Entry(record) => {
-                if entries.contains(&record.entry_id) {
-                    return Err(format!(
-                        "record {index}: duplicate entry id {}",
-                        record.entry_id
-                    ));
-                }
-                validate_local_refs(index, journal_id, &record.entry.refs, &entries, &heads)?;
-                match &record.entry.strand {
-                    StrandKeyV3::Genesis { .. } => {
-                        if heads
-                            .insert(record.strand_id.clone(), record.entry_id.clone())
-                            .is_some()
-                        {
-                            return Err(format!(
-                                "record {index}: duplicate genesis strand {}",
-                                record.strand_id
-                            ));
-                        }
-                    }
-                    StrandKeyV3::Existing { id } => {
-                        let expected = heads.get(id).ok_or_else(|| {
-                            format!("record {index}: existing strand {id} has no genesis")
-                        })?;
-                        let actual_prev = record.entry.prev.as_deref().ok_or_else(|| {
-                            format!("record {index}: existing strand {id} has no prev")
-                        })?;
-                        if actual_prev != expected {
-                            return Err(format!(
-                                "record {index}: prev mismatch for strand {id}: expected {expected}, found {actual_prev}"
-                            ));
-                        }
-                        heads.insert(id.clone(), record.entry_id.clone());
-                    }
-                }
-                entries.insert(record.entry_id.clone());
-            }
-            JournalRecordV3::Anchor(anchor) => {
-                let expected: Vec<AnchorHeadV3> = heads
-                    .iter()
-                    .map(|(strand_id, entry_id)| AnchorHeadV3 {
-                        strand_id: strand_id.clone(),
-                        entry_id: entry_id.clone(),
-                    })
-                    .collect();
-                if anchor.heads != expected {
-                    return Err(format!(
-                        "record {index}: anchor heads do not match replayed strand heads"
-                    ));
-                }
-                if anchor.covered_record_count != index as u64 {
-                    return Err(format!(
-                        "record {index}: anchor covers {} records, expected {index}",
-                        anchor.covered_record_count
-                    ));
-                }
-                if anchor.previous_anchor != previous_anchor {
-                    return Err(format!(
-                        "record {index}: anchor previous digest does not match prior anchor"
-                    ));
-                }
-                let expected_sequence = sequence_digest(&sequence_hasher);
-                if anchor.covered_records_digest != expected_sequence {
-                    return Err(format!(
-                        "record {index}: anchor covered-record digest mismatch"
-                    ));
-                }
-                previous_anchor = Some(anchor.digest.clone());
-            }
-        }
-        update_sequence_digest(&mut sequence_hasher, record)
-            .map_err(|error| format!("record {index}: {error}"))?;
+        apply_record(journal_id, index, record, &mut state)?;
     }
     if require_final_anchor && !matches!(records.last(), Some(JournalRecordV3::Anchor(_))) {
         return Err(
             "v3 journal is missing its final anchor (unanchored tail or truncation)".to_string(),
         );
     }
-    Ok(ReplayState {
-        heads,
-        previous_anchor,
-        sequence_hasher,
-    })
+    Ok(state)
+}
+
+fn apply_record(
+    journal_id: &str,
+    index: usize,
+    record: &JournalRecordV3,
+    state: &mut ReplayState,
+) -> Result<(), String> {
+    record
+        .validate()
+        .map_err(|error| format!("record {index}: {error}"))?;
+    match record {
+        JournalRecordV3::Entry(record) => {
+            if state.entries.contains(&record.entry_id) {
+                return Err(format!(
+                    "record {index}: duplicate entry id {}",
+                    record.entry_id
+                ));
+            }
+            validate_local_refs(
+                index,
+                journal_id,
+                &record.entry.refs,
+                &state.entries,
+                &state.heads,
+            )?;
+            match &record.entry.strand {
+                StrandKeyV3::Genesis { .. } => {
+                    if state
+                        .heads
+                        .insert(record.strand_id.clone(), record.entry_id.clone())
+                        .is_some()
+                    {
+                        return Err(format!(
+                            "record {index}: duplicate genesis strand {}",
+                            record.strand_id
+                        ));
+                    }
+                }
+                StrandKeyV3::Existing { id } => {
+                    let expected = state.heads.get(id).ok_or_else(|| {
+                        format!("record {index}: existing strand {id} has no genesis")
+                    })?;
+                    let actual_prev = record.entry.prev.as_deref().ok_or_else(|| {
+                        format!("record {index}: existing strand {id} has no prev")
+                    })?;
+                    if actual_prev != expected {
+                        return Err(format!(
+                            "record {index}: prev mismatch for strand {id}: expected {expected}, found {actual_prev}"
+                        ));
+                    }
+                    state.heads.insert(id.clone(), record.entry_id.clone());
+                }
+            }
+            state.entries.insert(record.entry_id.clone());
+        }
+        JournalRecordV3::Anchor(anchor) => {
+            let expected: Vec<AnchorHeadV3> = state
+                .heads
+                .iter()
+                .map(|(strand_id, entry_id)| AnchorHeadV3 {
+                    strand_id: strand_id.clone(),
+                    entry_id: entry_id.clone(),
+                })
+                .collect();
+            if anchor.heads != expected {
+                return Err(format!(
+                    "record {index}: anchor heads do not match replayed strand heads"
+                ));
+            }
+            if anchor.covered_record_count != index as u64 {
+                return Err(format!(
+                    "record {index}: anchor covers {} records, expected {index}",
+                    anchor.covered_record_count
+                ));
+            }
+            if anchor.previous_anchor != state.previous_anchor {
+                return Err(format!(
+                    "record {index}: anchor previous digest does not match prior anchor"
+                ));
+            }
+            let expected_sequence = sequence_digest(&state.sequence_hasher);
+            if anchor.covered_records_digest != expected_sequence {
+                return Err(format!(
+                    "record {index}: anchor covered-record digest mismatch"
+                ));
+            }
+            state.previous_anchor = Some(anchor.digest.clone());
+        }
+    }
+    update_sequence_digest(&mut state.sequence_hasher, record)
+        .map_err(|error| format!("record {index}: {error}"))?;
+    Ok(())
 }
 
 fn update_sequence_digest(hasher: &mut Sha256, record: &JournalRecordV3) -> Result<(), String> {
@@ -330,6 +395,31 @@ mod tests {
         let digest = write_records_prepared(&path, &journal_id, &records).unwrap();
         assert_eq!(digest.len(), 64);
         assert_eq!(read_records_strict(&path, &journal_id).unwrap(), records);
+    }
+
+    #[test]
+    fn incremental_anchor_matches_full_replay_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.v3.jsonl");
+        let journal_id = "aa".repeat(32);
+        let first = genesis("12");
+        let (strand_id, first_id) = ids(&first);
+        let mut initial = vec![first.clone()];
+        initial.push(make_anchor(&journal_id, &initial, CREATED_AT).unwrap());
+        write_records_prepared(&path, &journal_id, &initial).unwrap();
+        let validated = read_validated_journal(&path, &journal_id).unwrap();
+        let next = append(strand_id, first_id, Vec::new());
+        let incremental = make_anchor_after_validated(
+            &journal_id,
+            &validated,
+            std::slice::from_ref(&next),
+            "2026-07-11T00:00:02Z",
+        )
+        .unwrap();
+        let mut full = initial;
+        full.push(next);
+        let replayed = make_anchor(&journal_id, &full, "2026-07-11T00:00:02Z").unwrap();
+        assert_eq!(incremental, replayed);
     }
 
     #[test]
