@@ -954,6 +954,27 @@ pub struct TimelineOutput {
     pub truncated: bool,
     pub count: usize,
     pub max_offset: usize,
+    pub scope: TimelineScopeOutput,
+    pub window: TimelineWindowOutput,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TimelineScopeOutput {
+    pub kind: String,
+    pub root: Option<String>,
+    pub membership: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TimelineWindowOutput {
+    pub since_offset: Option<usize>,
+    pub since_ts: Option<String>,
+    pub until_offset: Option<usize>,
+    pub until_ts: Option<String>,
+    /// Highest journal offset whose facts were available to this query.
+    pub observed_through: usize,
+    /// Safe value for the next `--since-offset`, even when no rows matched.
+    pub next_since_offset: usize,
 }
 
 impl From<&crate::projection::TimelineEntry> for TimelineEntryOutput {

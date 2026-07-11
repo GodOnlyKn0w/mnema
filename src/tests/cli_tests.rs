@@ -1000,6 +1000,19 @@ fn grammar_json_field_naming() {
             truncated: false,
             count: 0,
             max_offset: 0,
+            scope: output::TimelineScopeOutput {
+                kind: "journal".to_string(),
+                root: None,
+                membership: "not-applicable".to_string(),
+            },
+            window: output::TimelineWindowOutput {
+                since_offset: None,
+                since_ts: None,
+                until_offset: None,
+                until_ts: None,
+                observed_through: 0,
+                next_since_offset: 0,
+            },
         })
         .unwrap(),
         // Write-command JSON built inline with json!() is invisible to

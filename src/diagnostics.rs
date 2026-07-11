@@ -144,8 +144,9 @@ doctor edges（EdgesOutput）：
   ※ unfixed friction=无 fixes= 指它（不按 home strand 开闭过滤）；active_count=其中 registered 线上
   ※ decision 无 --why；--since N 只跳过 offset<=N 的存量 decision；doctor journal integrity 始终 JournalScope
 timeline（TimelineOutput）：
-  timeline / truncated / count / max_offset
+  timeline / truncated / count / max_offset / scope / window
   ※ timeline[]：journal_offset / ts / strand_id / strand_type / kind / ts_skew
+  ※ scope={kind,root,membership(current|event-time|not-applicable)}；window={since_offset,since_ts,until_offset,until_ts,observed_through,next_since_offset}，空命中也可安全续读
 append: seen_offset / seen_gap / warnings / closed_target / result / resolved_by / active_count；checkpoint: seen_offset / seen_gap / warnings / result
 add: id / status / provenance / slug / parent_id / edge_type / result；find: id
 hide / unhide: strand_id / status / noop / active_count / closed_count / hidden_count / result（卡片）
@@ -1110,6 +1111,19 @@ mod tests {
             truncated: false,
             count: 0,
             max_offset: 0,
+            scope: crate::output::TimelineScopeOutput {
+                kind: "journal".to_string(),
+                root: None,
+                membership: "not-applicable".to_string(),
+            },
+            window: crate::output::TimelineWindowOutput {
+                since_offset: None,
+                since_ts: None,
+                until_offset: None,
+                until_ts: None,
+                observed_through: 0,
+                next_since_offset: 0,
+            },
         };
         let v = serde_json::to_value(&timeline_sample).expect("serialize TimelineOutput");
         for key in v.as_object().unwrap().keys() {

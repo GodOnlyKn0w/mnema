@@ -363,6 +363,8 @@ mnema timeline --under X --since-offset N --scope-at-event
 
 `--scope-at-event` 按每个事件发生时的 belongs-to 成员关系过滤：纳入使 strand 加入/离开子树的 link/unlink，纳入在域期间的事实，排除加入前和离开后的事实。该模式必须显式选择，不能由 `--since-offset` 暗中改变 `--under` 的含义。
 
+机器输出必须自描述这次读取的解释边界：`timeline --format json` 的 `scope` 给出 selector、规范化 root 与 membership 模式；`window.observed_through` 给出本次实际观察到的 journal 水位，`window.next_since_offset` 给出不会倒退的下一 cursor。它们与“返回了几条”正交，空命中也必须推进已观察水位。
+
 ---
 
 ## 8. CLI 与能力发现

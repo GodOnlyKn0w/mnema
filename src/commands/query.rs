@@ -549,9 +549,25 @@ pub(crate) fn cmd_timeline(
 
     let count = entries.len();
     let max_offset = entries.last().map(|e| e.journal_offset).unwrap_or(0);
+    let journal_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
+    let observed_through = until_offset
+        .map(|until| until.min(journal_max_offset))
+        .unwrap_or(journal_max_offset);
     let is_json = format_json == Some("json");
 
     if is_json {
+        let requested_root = under.or(strand).or(links);
+        let resolved_root = requested_root
+            .map(|raw| {
+                let strands = projection::project_strands(&events, true);
+                crate::reference::resolve_strand_with_selection(
+                    &strands,
+                    raw,
+                    false,
+                    journal_max_offset,
+                )
+            })
+            .transpose()?;
         let output = output::TimelineOutput {
             timeline: entries
                 .iter()
@@ -560,6 +576,37 @@ pub(crate) fn cmd_timeline(
             truncated,
             count,
             max_offset,
+            scope: output::TimelineScopeOutput {
+                kind: if under.is_some() {
+                    "subtree"
+                } else if strand.is_some() {
+                    "strand"
+                } else if links.is_some() {
+                    "links"
+                } else {
+                    "journal"
+                }
+                .to_string(),
+                root: resolved_root,
+                membership: if under.is_some() && scope_at_event {
+                    "event-time"
+                } else if under.is_some() {
+                    "current"
+                } else {
+                    "not-applicable"
+                }
+                .to_string(),
+            },
+            window: output::TimelineWindowOutput {
+                since_offset,
+                since_ts: since_ts.map(str::to_string),
+                until_offset,
+                until_ts: until_ts.map(str::to_string),
+                observed_through,
+                next_since_offset: since_offset
+                    .map(|since| since.max(observed_through))
+                    .unwrap_or(observed_through),
+            },
         };
         println!("{}", serde_json::to_string(&output).expect("serialize"));
     } else if entries.is_empty() {

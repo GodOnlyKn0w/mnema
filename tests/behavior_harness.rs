@@ -73,6 +73,23 @@ fn manifest() -> Manifest {
     serde_json::from_str(include_str!("behavior/scenarios.json")).expect("scenario manifest")
 }
 
+fn fixture_command(id: &str, fixture: &RecursiveFixture) -> Vec<String> {
+    manifest()
+        .scenarios
+        .into_iter()
+        .find(|scenario| scenario.id == id)
+        .expect("fixture scenario")
+        .command
+        .into_iter()
+        .map(|arg| {
+            arg.replace("${root_id}", &fixture.root).replace(
+                "${checkpoint_offset}",
+                &fixture.checkpoint_offset.to_string(),
+            )
+        })
+        .collect()
+}
+
 /// Independent belongs-to oracle. It deliberately consumes public timeline
 /// JSON rather than production projection types.
 #[derive(Default)]
@@ -104,6 +121,29 @@ impl ScopeOracle {
         }
         found
     }
+
+    fn fold_global_timeline(rows: &[Value]) -> Self {
+        let mut oracle = Self::default();
+        for row in rows {
+            let Some(source) = row["strand_id"].as_str() else {
+                continue;
+            };
+            let kind = &row["kind"];
+            let effect = &kind["effect"];
+            if effect["edge_type"].as_str() != Some("belongs-to") {
+                continue;
+            }
+            let Some(target) = effect["target"].as_str() else {
+                continue;
+            };
+            match effect["kind"].as_str() {
+                Some("link") => oracle.link(source, target),
+                Some("unlink") => oracle.unlink(source, target),
+                _ => {}
+            }
+        }
+        oracle
+    }
 }
 
 struct RecursiveFixture {
@@ -111,6 +151,7 @@ struct RecursiveFixture {
     child: String,
     grandchild: String,
     outsider: String,
+    evidence: String,
     late_joiner: String,
     checkpoint_offset: usize,
 }
@@ -168,6 +209,7 @@ fn recursive_scope_v1(cwd: &Path) -> RecursiveFixture {
         child,
         grandchild,
         outsider,
+        evidence,
         late_joiner,
         checkpoint_offset,
     }
@@ -235,32 +277,30 @@ fn behavior_manifest_is_executable_and_declares_normalization() {
 fn recursive_scope_fixture_agrees_with_independent_current_scope_oracle() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = recursive_scope_v1(dir.path());
-    let mut oracle = ScopeOracle::default();
-    oracle.link(&fixture.grandchild, &fixture.child);
-    oracle.link(&fixture.late_joiner, &fixture.root);
-    // child→root was unlinked; outsider and refs never imply membership.
-    oracle.unlink(&fixture.child, &fixture.root);
+    let global: Value =
+        serde_json::from_str(ok(dir.path(), &["timeline", "--format", "json"], None).trim())
+            .unwrap();
+    let oracle = ScopeOracle::fold_global_timeline(timeline_rows(&global));
     let expected = oracle.subtree(&fixture.root);
     assert_eq!(
         expected,
         HashSet::from([fixture.root.clone(), fixture.late_joiner.clone()])
     );
 
-    let actual: Value = serde_json::from_str(
-        ok(
-            dir.path(),
-            &["timeline", "--under", &fixture.root, "--format", "json"],
-            None,
-        )
-        .trim(),
-    )
-    .unwrap();
+    let command = fixture_command("recursive-scope-journey", &fixture);
+    let output = run(dir.path(), &command, None);
+    assert!(output.status.success());
+    let actual: Value = serde_json::from_slice(&output.stdout).unwrap();
     let actual_ids: HashSet<String> = timeline_rows(&actual)
         .iter()
         .map(|row| row["strand_id"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(actual_ids, expected);
     assert!(!actual_ids.contains(&fixture.outsider));
+    assert!(
+        !actual_ids.contains(&fixture.evidence),
+        "refs never expand subtree membership"
+    );
     assert!(!actual_ids.contains(&fixture.grandchild));
 }
 
@@ -286,24 +326,10 @@ fn event_time_incremental_scope_differs_from_current_scope_at_join_and_leave() {
         .trim(),
     )
     .unwrap();
-    let event_time: Value = serde_json::from_str(
-        ok(
-            dir.path(),
-            &[
-                "timeline",
-                "--under",
-                &fixture.root,
-                "--since-offset",
-                &n,
-                "--scope-at-event",
-                "--format",
-                "json",
-            ],
-            None,
-        )
-        .trim(),
-    )
-    .unwrap();
+    let event_command = fixture_command("incremental-scope-journey", &fixture);
+    let event_output = run(dir.path(), &event_command, None);
+    assert!(event_output.status.success());
+    let event_time: Value = serde_json::from_slice(&event_output.stdout).unwrap();
     let current_text = timeline_rows(&current)
         .iter()
         .map(row_text)
@@ -324,16 +350,27 @@ fn event_time_incremental_scope_differs_from_current_scope_at_join_and_leave() {
         !current_text.contains("before leave"),
         "departed child is not a current member"
     );
+    assert!(!current_text.contains("postleave secret"));
 
     assert!(!event_text.contains("prejoin secret"));
     assert!(event_text.contains("before leave"));
     assert!(!event_text.contains("postleave secret"));
     assert!(event_text.contains(&fixture.child));
     assert!(!event_text.contains(&fixture.outsider));
+    assert!(timeline_rows(&event_time).iter().any(|row| {
+        row["strand_id"].as_str() == Some(fixture.late_joiner.as_str())
+            && row["kind"]["effect"]["kind"].as_str() == Some("link")
+            && row["kind"]["effect"]["target"].as_str() == Some(fixture.root.as_str())
+    }));
+    assert!(timeline_rows(&event_time).iter().any(|row| {
+        row["strand_id"].as_str() == Some(fixture.child.as_str())
+            && row["kind"]["effect"]["kind"].as_str() == Some("unlink")
+            && row["kind"]["effect"]["target"].as_str() == Some(fixture.root.as_str())
+    }));
 }
 
 #[test]
-fn concurrent_parent_plus_ref_adds_are_complete_batches() {
+fn concurrent_parent_plus_ref_adds_converge_to_complete_results() {
     let dir = tempfile::tempdir().unwrap();
     ok(dir.path(), &["init"], None);
     let parent = id(&add(dir.path(), "[task] concurrent parent\n", &[]));
@@ -412,4 +449,43 @@ fn concurrent_parent_plus_ref_adds_are_complete_batches() {
         );
     }
     ok(dir.path(), &["doctor", "journal"], None);
+}
+
+#[test]
+fn timeline_json_self_describes_scope_and_advances_empty_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = recursive_scope_v1(dir.path());
+    let prefix = &fixture.root[..12];
+    let baseline: Value =
+        serde_json::from_str(ok(dir.path(), &["timeline", "--format", "json"], None).trim())
+            .unwrap();
+    let journal_tip = baseline["window"]["observed_through"].as_u64().unwrap();
+    assert!(journal_tip > 0);
+
+    let beyond = (journal_tip + 100).to_string();
+    let empty: Value = serde_json::from_str(
+        ok(
+            dir.path(),
+            &[
+                "timeline",
+                "--under",
+                prefix,
+                "--since-offset",
+                &beyond,
+                "--scope-at-event",
+                "--format",
+                "json",
+            ],
+            None,
+        )
+        .trim(),
+    )
+    .unwrap();
+    assert_eq!(empty["count"], 0);
+    assert_eq!(empty["scope"]["kind"], "subtree");
+    assert_eq!(empty["scope"]["root"], fixture.root);
+    assert_eq!(empty["scope"]["membership"], "event-time");
+    assert_eq!(empty["window"]["since_offset"], journal_tip + 100);
+    assert_eq!(empty["window"]["observed_through"], journal_tip);
+    assert_eq!(empty["window"]["next_since_offset"], journal_tip + 100);
 }
