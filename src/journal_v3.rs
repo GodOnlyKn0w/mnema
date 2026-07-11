@@ -124,6 +124,17 @@ fn cache_checksum(payload: &ReplayCachePayload) -> Result<String, String> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+fn canonical_jsonl_digest(records: &[JournalRecordV3]) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    for record in records {
+        let bytes = serde_jcs::to_vec(record)
+            .map_err(|error| format!("canonicalize cached v3 record: {error}"))?;
+        hasher.update(bytes);
+        hasher.update(b"\n");
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 fn covered_anchor(records: &[JournalRecordV3]) -> Option<&str> {
     match records.last() {
         Some(JournalRecordV3::Anchor(anchor)) => Some(anchor.digest.as_str()),
@@ -159,6 +170,7 @@ fn read_replay_cache(
         || payload.journal_sha256 != journal_sha256
         || Some(payload.covered_anchor.as_str()) != journal_anchor
         || cache_checksum(payload).ok()? != envelope.checksum
+        || canonical_jsonl_digest(&payload.records).ok()? != journal_sha256
         || covered_anchor(&payload.records)? != payload.covered_anchor
     {
         return None;
@@ -662,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn uncached_integrity_reader_ignores_a_forged_healthy_cache() {
+    fn forged_cache_cannot_change_corrupt_integrity_verdict() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.v3.jsonl");
         let journal_id = "aa".repeat(32);
@@ -677,8 +689,26 @@ mod tests {
         let digest = hex::encode(Sha256::digest(&damaged));
         write_replay_cache(&path, &journal_id, damaged.len() as u64, &digest, &records).unwrap();
 
-        assert_eq!(read_records_strict(&path, &journal_id).unwrap(), records);
+        assert!(read_records_strict(&path, &journal_id).is_err());
         assert!(read_records_strict_uncached(&path, &journal_id).is_err());
+    }
+
+    #[test]
+    fn forged_alternate_records_cannot_poison_a_healthy_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.v3.jsonl");
+        let journal_id = "aa".repeat(32);
+        let mut records = vec![genesis("20")];
+        records.push(make_anchor(&journal_id, &records, CREATED_AT).unwrap());
+        let journal_digest = write_records_prepared(&path, &journal_id, &records).unwrap();
+        let journal_len = std::fs::metadata(&path).unwrap().len();
+
+        let mut forged = records.clone();
+        forged[0] = genesis("21");
+        write_replay_cache(&path, &journal_id, journal_len, &journal_digest, &forged).unwrap();
+
+        assert_eq!(read_records_strict(&path, &journal_id).unwrap(), records);
+        assert_eq!(read_records_strict(&path, &journal_id).unwrap(), records);
     }
 
     #[test]
