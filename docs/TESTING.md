@@ -69,14 +69,15 @@ changes must be reviewed like public API changes.
 
 ## async-exec boundary
 
-When async-exec is available, it may host long-running suites and preserve their
-process facts and artifacts. It does not decide whether a semantic test passed,
-retry a failed suite, understand a mnema strand, or become a workflow engine.
+`scripts/ci.ps1` is the local entrypoint. `-Executor Direct` and
+`-Executor AsyncExec` select execution mechanics without changing suite
+semantics; both emit `mnema.ci-report/v1`. The async adapter supplies explicit
+suite, cwd, environment allowlist, timeout and output budget, then preserves the
+canonical Handle, TerminalEvent and logs under `.artifacts/ci/`.
 
-The future adapter should accept an explicit suite, cwd, environment allowlist,
-timeout, and output budget, then return a canonical RunHandle. A coordinator may
-attach that handle as evidence to a strand and later interpret the terminal
-event plus the test report.
+async-exec does not decide whether a semantic test passed, retry a failed suite,
+understand a mnema strand, or become a workflow engine. The PowerShell wrapper
+only aggregates the registered process results into the gate report.
 
 ## Planned order
 

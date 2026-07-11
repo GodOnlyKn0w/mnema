@@ -19,7 +19,7 @@
 | Suite id | Layer / protected claim | Exact entrypoint | Lane | Isolation | Observed | Evidence / owner |
 |---|---|---|---|---|---:|---|
 | `format` | Rust 格式稳定 | `cargo fmt --check` | Fast, Full | repo read-only | 秒级 | exit code；Rust source |
-| `compile-release` | release profile 可编译；所有 test binaries 可链接 | `cargo test --release --no-run` | Full | 独占或独立 `CARGO_TARGET_DIR` | 约 1–3 分钟（冷） | Cargo log + TerminalEvent；Cargo.toml |
+| `compile-release` | release profile 可编译；所有 test binaries 可链接 | `cargo test --release --no-run` | Fast, Full | 独占或独立 `CARGO_TARGET_DIR` | 约 1–3 分钟（冷） | Cargo log + TerminalEvent；Cargo.toml |
 | `unit` | event/canonical/activation/v3 codec/projection/CLI/JSON/help/write/read contracts | `cargo test --release --bin mnema` | Full | Rust tests 使用自身 temp/CWD lock；不可触碰 repo `.mnema` | 382 tests，约 203 秒 | Rust test report；`src/**/*` + `src/tests/*` |
 | `behavior` | release CLI 黑盒 scope、cursor、refs、并发完成态、manifest smoke | `cargo test --release --test behavior_harness` | Fast, Full | 每场景独立 temp project；固定 `NO_COLOR`/`TZ` | 6 tests，约 18 秒 | test report；`tests/behavior_harness.rs`, `tests/behavior/*` |
 | `cli-recovery` | 错误 argv 的 exit/stderr 修复提示，不污染正文 | `cargo test --release --test cli_recovery` | Fast, Full | Cargo 提供 release binary；无 repo journal | 3 tests，<1 秒 | test report；`tests/cli_recovery.rs` |

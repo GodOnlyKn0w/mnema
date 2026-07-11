@@ -4,6 +4,7 @@ target/
 
 # transient agent run logs
 .agents/
+.artifacts/
 
 # stray/temp cargo target dirs (random-suffixed)
 target*/
