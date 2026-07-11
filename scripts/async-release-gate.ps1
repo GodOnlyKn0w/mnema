@@ -25,7 +25,8 @@ if ($Mode -eq 'Nightly') {
     $env:MNEMA_DIFF_EVENTS = '240'
     $env:MNEMA_FUZZ_CASES = '10000'
 }
-if ($IsWindows -and -not $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER) {
+$runningOnWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+if ($runningOnWindows -and -not $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER) {
     $linker = Get-ChildItem 'C:\Program Files (x86)\Microsoft Visual Studio' -Recurse `
         -Filter link.exe -ErrorAction SilentlyContinue |
         Where-Object FullName -Like '*\bin\Hostx64\x64\link.exe' |
