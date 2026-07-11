@@ -145,8 +145,7 @@ doctor edges（EdgesOutput）：
   ※ decision 无 --why；--since N 只跳过 offset<=N 的存量 decision；doctor journal integrity 始终 JournalScope
 timeline（TimelineOutput）：
   timeline / truncated / count / max_offset / scope / window
-  ※ timeline[]：journal_offset / ts / strand_id / strand_type / kind / ts_skew
-  ※ scope={kind,root,membership(current|event-time|not-applicable)}；window={since_offset,since_ts,until_offset,until_ts,observed_through,next_since_offset}，空命中也可安全续读
+  ※ timeline[]：journal_offset / ts / strand_id / strand_type / kind / ts_skew；scope={kind,root,membership(current|event-time|not-applicable)}；window={since_offset,since_ts,until_offset,until_ts,observed_through,next_since_offset}，空命中也可安全续读
 append: seen_offset / seen_gap / warnings / closed_target / result / resolved_by / active_count；checkpoint: seen_offset / seen_gap / warnings / result
 add: id / status / provenance / slug / parent_id / edge_type / result；find: id
 hide / unhide: strand_id / status / noop / active_count / closed_count / hidden_count / result（卡片）
