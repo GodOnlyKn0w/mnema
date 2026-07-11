@@ -122,4 +122,32 @@ mod tests {
         let value: Value = from_str(r#"{"a":[null,true,-2,1.5,"x"]}"#).unwrap();
         assert_eq!(value, serde_json::json!({"a": [null, true, -2, 1.5, "x"]}));
     }
+
+    #[test]
+    fn deterministic_hostile_ascii_corpus_never_panics() {
+        let cases = std::env::var("MNEMA_FUZZ_CASES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(512);
+        let alphabet = b"{}[],:\\\"-+0123456789truefalsenull abcXYZ\n\r\t";
+        let mut state = 0x9e3779b97f4a7c15_u64;
+        for case in 0..cases {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let len = (state as usize % 512) + 1;
+            let mut input = String::with_capacity(len);
+            for _ in 0..len {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                input.push(alphabet[state as usize % alphabet.len()] as char);
+            }
+            let result = std::panic::catch_unwind(|| from_str::<Value>(&input));
+            assert!(
+                result.is_ok(),
+                "strict JSON parser panicked for case {case}"
+            );
+        }
+    }
 }

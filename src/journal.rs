@@ -829,6 +829,10 @@ fn append_v3_records(
     path: &std::path::Path,
     records: &[crate::canonical::JournalRecordV3],
 ) -> Result<(), String> {
+    #[cfg(feature = "test-failpoints")]
+    if std::env::var("MNEMA_TEST_FAILPOINT").as_deref() == Ok("before-v3-batch-write") {
+        std::process::abort();
+    }
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(path)
@@ -842,6 +846,10 @@ fn append_v3_records(
     }
     file.write_all(&batch)
         .map_err(|e| format!("append active v3 journal {}: {e}", path.display()))?;
+    #[cfg(feature = "test-failpoints")]
+    if std::env::var("MNEMA_TEST_FAILPOINT").as_deref() == Ok("after-v3-write-before-sync") {
+        std::process::abort();
+    }
     file.flush()
         .and_then(|_| file.sync_all())
         .map_err(|e| format!("sync active v3 journal {}: {e}", path.display()))?;

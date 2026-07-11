@@ -2685,7 +2685,15 @@ fn generated_scope_model_matches_full_and_incremental_replay() {
         found
     }
 
-    for seed in 0..64_u64 {
+    let seed_count = std::env::var("MNEMA_DIFF_SEEDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(64);
+    let event_count = std::env::var("MNEMA_DIFF_EVENTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(80);
+    for seed in 0..seed_count {
         let root = "root";
         let ids = ["root", "a", "b", "c", "d", "e"];
         let mut events = Vec::new();
@@ -2710,7 +2718,7 @@ fn generated_scope_model_matches_full_and_incremental_replay() {
         }
 
         let mut rng = seed + 1;
-        for step in 0..80 {
+        for step in 0..event_count {
             let offset = events.len() + 1;
             let source = ids[(next(&mut rng) as usize) % ids.len()];
             let target = ids[(next(&mut rng) as usize) % ids.len()];

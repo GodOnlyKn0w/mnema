@@ -20,6 +20,11 @@ New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
 $env:CARGO_TARGET_DIR = $targetDir
 $env:NO_COLOR = '1'
 $env:TZ = 'UTC'
+if ($Mode -eq 'Nightly') {
+    $env:MNEMA_DIFF_SEEDS = '256'
+    $env:MNEMA_DIFF_EVENTS = '240'
+    $env:MNEMA_FUZZ_CASES = '10000'
+}
 if ($IsWindows -and -not $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER) {
     $linker = Get-ChildItem 'C:\Program Files (x86)\Microsoft Visual Studio' -Recurse `
         -Filter link.exe -ErrorAction SilentlyContinue |
@@ -60,6 +65,9 @@ foreach ($optional in @('CARGO_HOME', 'RUSTUP_HOME')) {
 }
 if (Test-Path env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER) {
     $inherit += 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER'
+}
+foreach ($nightlyVariable in @('MNEMA_DIFF_SEEDS', 'MNEMA_DIFF_EVENTS', 'MNEMA_FUZZ_CASES')) {
+    if (Test-Path "env:$nightlyVariable") { $inherit += $nightlyVariable }
 }
 foreach ($buildVariable in @('LIB', 'INCLUDE', 'LIBPATH')) {
     if (Test-Path "env:$buildVariable") { $inherit += $buildVariable }
@@ -120,6 +128,12 @@ foreach ($suite in @($suites | Where-Object Phase -lt 2 | Sort-Object Phase)) {
 if (-not ($results | Where-Object { -not $_.passed })) {
     $parallel = @($suites | Where-Object Phase -eq 2 | ForEach-Object { Start-Suite $_ })
     foreach ($started in $parallel) { $results.Add((Await-Suite $started)) }
+}
+if (-not ($results | Where-Object { -not $_.passed })) {
+    foreach ($suite in @($suites | Where-Object Phase -gt 2 | Sort-Object Phase)) {
+        $results.Add((Await-Suite (Start-Suite $suite)))
+        if (-not $results[$results.Count - 1].passed) { break }
+    }
 }
 
 $report = [ordered]@{

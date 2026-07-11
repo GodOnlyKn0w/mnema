@@ -1,0 +1,68 @@
+Usage: mnema.exe [OPTIONS] <COMMAND>
+
+Commands:
+  init        Initialize .mnema/ directory and journal
+  add         Create a new strand with first log entry from stdin
+  append      Append stdin content to a strand, or create a new strand from stdin
+  checkpoint  Record context before an irreversible or state-closing action
+  list        List all strands (reverse chronological, most recent last)
+  show        Show full details of one strand
+  search      Full-text search across all log content (entry-level hits with hashes)
+  find        Resolve a prefix to full strand ID
+  pick        Pick a strand, then run a read/manage command on it
+  link        Create a directed link between two strands
+  unlink      Remove a directed link between two strands (writes an unlink effect entry)
+  hide        Hide a strand from default list view
+  unhide      Unhide a previously hidden strand
+  close       Close a strand (write a close effect entry)
+  reopen      Reopen a closed strand (write a reopen effect entry)
+  explain     Explain a diagnostic code or encyclopaedia topic
+  doctor      Diagnose journal integrity
+  export      Export journal to a standalone audit artifact
+  cutover-v2  Rewrite/import the current journal into pure v2 form
+  cutover-v3  Migrate pure v2 journal into activated v3 form
+  timeline    Show entry events in journal append order (timeline projection)
+  orient      Session-start orientation: menu of active strands with catch-up commands
+  tree        Build nested tree projection from strand edges
+  depends     Inspect depends-on upstreams as review context
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -C, --chdir <DIR>  Operate as if started in DIR (journal walk-up and relative paths use DIR)
+  -h, --help         Print help
+  -V, --version      Print version
+
+loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
+
+  orient        Session entry: active strand menu + catch-up commands
+
+看 / read:
+  list          List strands
+  show          Show one strand (--digest one-glance, --tail N recent)
+  timeline      Chronological entries across strands (+linked)
+  search        Full-text search (entry hashes; --marker filter)
+  find          Resolve a strand id
+  pick          Pick a strand from an arrow-key menu; append reads body from stdin
+  tree          Strand forest (belongs-to nesting)
+  depends       depends-on upstream review context
+
+做 / change:
+  add           Create a new strand
+  append        Append an entry to a strand
+  close         Close a strand (close effect entry)
+  reopen        Reopen a closed strand (reopen effect entry)
+  checkpoint    Record context before an irreversible action
+  link          Link strands (belongs-to / depends-on)
+  unlink        Remove a link (unlink effect entry; projection drops the edge)
+
+管 / manage:
+  init          Initialize .mnema/ journal
+  hide          Hide a strand from active orient (parked, revivable)
+  unhide        Unhide a strand
+  doctor        Diagnose journal integrity (journal | edges)
+  export        Export journal as standalone audit artifact
+  cutover-v2    Rewrite/import current journal into pure v2 form
+  cutover-v3    Migrate pure v2 journal into activated v3 (manifest commit)
+  explain       Explain a diagnostic code or topic (markers, json, grammar, writing, ...)
+
+Run:  mnema <command> --help

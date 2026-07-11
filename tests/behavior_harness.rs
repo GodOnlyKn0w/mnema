@@ -223,6 +223,44 @@ fn row_text(row: &Value) -> String {
     row.to_string()
 }
 
+fn normalized_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).replace("\r\n", "\n")
+}
+
+#[test]
+fn reviewed_text_snapshots_match_exact_public_output() {
+    let root = tempfile::tempdir().unwrap();
+    let help = run(root.path(), &["--help".to_string()], None);
+    assert!(help.status.success());
+    assert_eq!(
+        normalized_text(&help.stdout),
+        include_str!("behavior/snapshots/root-help.stdout.txt")
+    );
+    assert!(help.stderr.is_empty());
+
+    let project = tempfile::tempdir().unwrap();
+    assert!(
+        run(project.path(), &["init".to_string()], None)
+            .status
+            .success()
+    );
+    let invalid = run(
+        project.path(),
+        &[
+            "show".to_string(),
+            "--id".to_string(),
+            "not-an-id".to_string(),
+        ],
+        None,
+    );
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(invalid.stdout.is_empty());
+    assert_eq!(
+        normalized_text(&invalid.stderr),
+        include_str!("behavior/snapshots/invalid-id.stderr.txt")
+    );
+}
+
 #[test]
 fn behavior_manifest_is_executable_and_declares_normalization() {
     let manifest = manifest();

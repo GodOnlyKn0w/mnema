@@ -13,6 +13,11 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $commit = (& git -C $repo rev-parse HEAD).Trim()
 $artifactRoot = Join-Path $repo ".artifacts\ci\$commit\$($Mode.ToLowerInvariant())"
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+if ($Mode -eq 'Nightly') {
+    $env:MNEMA_DIFF_SEEDS = '256'
+    $env:MNEMA_DIFF_EVENTS = '240'
+    $env:MNEMA_FUZZ_CASES = '10000'
+}
 
 if ($Executor -eq 'AsyncExec') {
     & (Join-Path $PSScriptRoot 'async-release-gate.ps1') -Mode $Mode -RepoRoot $repo `

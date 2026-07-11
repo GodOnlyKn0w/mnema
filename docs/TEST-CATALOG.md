@@ -20,8 +20,8 @@
 |---|---|---|---|---|---:|---|
 | `format` | Rust 格式稳定 | `cargo fmt --check` | Fast, Full | repo read-only | 秒级 | exit code；Rust source |
 | `compile-release` | release profile 可编译；所有 test binaries 可链接 | `cargo test --release --no-run` | Fast, Full | 独占或独立 `CARGO_TARGET_DIR` | 约 1–3 分钟（冷） | Cargo log + TerminalEvent；Cargo.toml |
-| `unit` | event/canonical/activation/v3 codec/projection/CLI/JSON/help/write/read contracts | `cargo test --release --bin mnema` | Full | Rust tests 使用自身 temp/CWD lock；不可触碰 repo `.mnema` | 382 tests，约 203 秒 | Rust test report；`src/**/*` + `src/tests/*` |
-| `behavior` | release CLI 黑盒 scope、cursor、refs、并发完成态、manifest smoke | `cargo test --release --test behavior_harness` | Fast, Full | 每场景独立 temp project；固定 `NO_COLOR`/`TZ` | 6 tests，约 18 秒 | test report；`tests/behavior_harness.rs`, `tests/behavior/*` |
+| `unit` | event/canonical/activation/v3 codec/projection/CLI/JSON/help/write/read contracts | `cargo test --release --bin mnema` | Full | Rust tests 使用自身 temp/CWD lock；不可触碰 repo `.mnema` | 383 tests，约 203 秒 | Rust test report；`src/**/*` + `src/tests/*` |
+| `behavior` | release CLI 黑盒 scope、cursor、refs、并发完成态、manifest smoke 与 reviewed text snapshots | `cargo test --release --test behavior_harness` | Fast, Full | 每场景独立 temp project；固定 `NO_COLOR`/`TZ` | 7 tests，约 20 秒 | test report；`tests/behavior_harness.rs`, `tests/behavior/*` |
 | `cli-recovery` | 错误 argv 的 exit/stderr 修复提示，不污染正文 | `cargo test --release --test cli_recovery` | Fast, Full | Cargo 提供 release binary；无 repo journal | 3 tests，<1 秒 | test report；`tests/cli_recovery.rs` |
 | `v2-v3-compat` | 冻结 v2 bytes 的 source/migration/target identity、raw v3 records、迁移前后投影 | `cargo test --release --test v2_v3_compat` | Full | fixture 只读复制到 temp；fixture 强制 LF | 1 test，<1 秒 | golden hashes + report；`tests/fixtures/*`, `tests/v2_v3_compat.rs` |
 | `v3-runtime` | fresh v3 写入、manifest、doctor、shadow、checkpoint、orient strict read | `cargo test --release --test v3_runtime` | Full | 每 test 独立 temp project | 7 tests，约 3 秒 | test report；`tests/v3_runtime.rs` |
@@ -34,13 +34,13 @@
 
 | Suite id | Status | Claim | Planned lane | Required isolation / artifact |
 |---|---|---|---|---|
-| `behavior-snapshots` | planned | reviewed stdout/stderr/exit JSON/text 不发生未审漂移 | Full | 每场景 temp；只替换声明动态值；checked-in snapshots + diff |
-| `crash-atomicity` | planned | 写入/anchor/cutover/cache 提交点被杀后，只见旧态、完整新态或明确 integrity failure | Full（小集）, Nightly（矩阵） | test-only failpoints；独立 process containment；journal artifact |
+| `behavior-snapshots` | current | reviewed root-help 与 invalid-id 的 stdout/stderr/exit 不发生未审漂移 | Fast, Full | 每场景 temp；checked-in exact snapshots + diff；入口 `cargo test --release --test behavior_harness reviewed_text_snapshots` |
+| `crash-atomicity` | current (v3 batch boundary) | v3 batch 写前 abort 保留完整旧态；完整 write 后 sync 前 abort 暴露完整可验证新态 | Full；入口 `cargo test --release --features test-failpoints --test crash_atomicity` | feature-gated failpoints；独立 temp journal/process；后续扩展 anchor/cutover/cache 点 |
 | `concurrent-visibility` | planned | reader 在 parent+refs 与 anchor 批次中途看不到半状态 | Full | 多进程 writer+reader；独立 temp journal；事件时间线 |
-| `performance-smoke` | planned | 100/1k/10k events 的核心读写路径无数量级退化 | Full（小规模） | 固定数据生成器；机器信息；JSON measurements |
+| `performance-smoke` | current observational | 25 appends 后 append p50/p95/max、timeline/orient 与 observed cursor 可测且有界完成 | Full；入口 `pwsh -File scripts/benchmark.ps1 -Sizes 25` | 独立 temp journal；机器信息 + `mnema.performance-smoke/v1` JSON；暂不设硬阈值 |
 | `performance-scale` | planned | 100k/1m events 的 p50/p95/p99、吞吐、冷暖 cache 曲线 | Nightly | 独占机器/target；不与 correctness shard 并发；baseline JSON |
-| `differential-expanded` | planned | 扩大 seed、事件数、cursor、cache 状态 | Nightly | 固定 seed catalog；failure corpus |
-| `fuzz-strict-input` | planned | strict JSON/canonical/v3 reader 对 hostile input 不 panic/hang | Nightly | 有界 corpus/time/memory；crash corpus |
+| `differential-expanded` | current | 256 seeds × 240 events 的 current/event-time full+incremental 独立模型差分 | Nightly；入口由 `ci.ps1` 设置 `MNEMA_DIFF_SEEDS/EVENTS` 后运行固定 test | failure 输出 seed/cursor；后续扩 cache 状态 |
+| `fuzz-strict-input` | current deterministic corpus | strict JSON reader 对 10,000 个可复现 hostile ASCII inputs 不 panic | Nightly；入口由 `ci.ps1` 设置 `MNEMA_FUZZ_CASES` | 失败输出 case；后续可接 libFuzzer corpus |
 | `fixture-typed-unlink` | planned | typed unlink + legacy tombstone 的 v2→v3 解释冻结 | Full | 新版本 fixture，不修改 compat-v1 |
 | `fixture-retired-why` | planned | legacy why 只迁成 ref、不成为 live edge | Full | 新版本 fixture，不修改 compat-v1 |
 
