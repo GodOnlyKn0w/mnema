@@ -1,0 +1,53 @@
+{
+  "schema": "mnema-behavior-scenarios/v1",
+  "defaults": {
+    "binary": "target/release/mnema",
+    "isolated_project": true,
+    "environment": {
+      "NO_COLOR": "1",
+      "TZ": "UTC"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "root-help",
+      "purpose": "Protect the top-level discovery surface.",
+      "setup": [],
+      "command": ["--help"],
+      "format": "text",
+      "allowed_dynamic_values": []
+    },
+    {
+      "id": "empty-orient-json",
+      "purpose": "Describe a newly initialized journal without ambient state.",
+      "setup": [["init"]],
+      "command": ["orient", "--format", "json"],
+      "format": "canonical-json",
+      "allowed_dynamic_values": ["project_path", "journal_id"]
+    },
+    {
+      "id": "invalid-id-diagnostic",
+      "purpose": "Protect the public diagnostic and exit behavior for an invalid id.",
+      "setup": [["init"]],
+      "command": ["show", "--id", "not-an-id"],
+      "format": "text",
+      "allowed_dynamic_values": []
+    },
+    {
+      "id": "recursive-scope-journey",
+      "purpose": "Expose parent, descendant, outsider, and ref facts through one scoped timeline.",
+      "setup_fixture": "recursive-scope-v1",
+      "command": ["timeline", "--under", "${root_id}", "--format", "json"],
+      "format": "canonical-json",
+      "allowed_dynamic_values": ["strand_ids", "entry_hashes", "journal_id", "timestamps", "offsets"]
+    },
+    {
+      "id": "incremental-scope-journey",
+      "purpose": "Protect the public expression of changes under X after offset N.",
+      "setup_fixture": "recursive-scope-v1",
+      "command": ["timeline", "--under", "${root_id}", "--since-offset", "${checkpoint_offset}", "--format", "json"],
+      "format": "canonical-json",
+      "allowed_dynamic_values": ["strand_ids", "entry_hashes", "journal_id", "timestamps", "offsets"]
+    }
+  ]
+}
