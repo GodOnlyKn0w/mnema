@@ -1,0 +1,415 @@
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+
+#[derive(Debug, Deserialize)]
+struct Manifest {
+    schema: String,
+    scenarios: Vec<Scenario>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Scenario {
+    id: String,
+    purpose: String,
+    #[serde(default)]
+    setup: Vec<Vec<String>>,
+    setup_fixture: Option<String>,
+    command: Vec<String>,
+    format: String,
+    allowed_dynamic_values: Vec<String>,
+}
+
+fn run(cwd: &Path, args: &[String], stdin: Option<&str>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mnema"));
+    command
+        .current_dir(cwd)
+        .args(args)
+        .env("NO_COLOR", "1")
+        .env("TZ", "UTC")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    let mut child = command.spawn().expect("spawn mnema");
+    if let Some(body) = stdin {
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(body.as_bytes())
+            .expect("write stdin");
+    }
+    child.wait_with_output().expect("wait for mnema")
+}
+
+fn ok(cwd: &Path, args: &[&str], stdin: Option<&str>) -> String {
+    let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let output = run(cwd, &args, stdin);
+    assert!(
+        output.status.success(),
+        "mnema {args:?} failed\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("utf8 stdout")
+}
+
+fn add(cwd: &Path, body: &str, extra: &[&str]) -> Value {
+    let mut args = vec!["add", "--format", "json"];
+    args.extend_from_slice(extra);
+    serde_json::from_str(ok(cwd, &args, Some(body)).trim()).expect("add json")
+}
+
+fn id(value: &Value) -> String {
+    value["id"].as_str().expect("strand id").to_string()
+}
+
+fn manifest() -> Manifest {
+    serde_json::from_str(include_str!("behavior/scenarios.json")).expect("scenario manifest")
+}
+
+/// Independent belongs-to oracle. It deliberately consumes public timeline
+/// JSON rather than production projection types.
+#[derive(Default)]
+struct ScopeOracle {
+    children: HashMap<String, HashSet<String>>,
+}
+
+impl ScopeOracle {
+    fn link(&mut self, child: &str, parent: &str) {
+        self.children
+            .entry(parent.to_string())
+            .or_default()
+            .insert(child.to_string());
+    }
+
+    fn unlink(&mut self, child: &str, parent: &str) {
+        if let Some(children) = self.children.get_mut(parent) {
+            children.remove(child);
+        }
+    }
+
+    fn subtree(&self, root: &str) -> HashSet<String> {
+        let mut found = HashSet::new();
+        let mut pending = vec![root.to_string()];
+        while let Some(id) = pending.pop() {
+            if found.insert(id.clone()) {
+                pending.extend(self.children.get(&id).into_iter().flatten().cloned());
+            }
+        }
+        found
+    }
+}
+
+struct RecursiveFixture {
+    root: String,
+    child: String,
+    grandchild: String,
+    outsider: String,
+    late_joiner: String,
+    checkpoint_offset: usize,
+}
+
+fn recursive_scope_v1(cwd: &Path) -> RecursiveFixture {
+    ok(cwd, &["init"], None);
+    let root = id(&add(cwd, "[task] fixture root\n", &["--slug", "root"]));
+    let child = id(&add(cwd, "[task] fixture child\n", &["--parent", &root]));
+    let grandchild = id(&add(
+        cwd,
+        "[task] fixture grandchild\n",
+        &["--parent", &child],
+    ));
+    let outsider = id(&add(cwd, "[task] fixture outsider\n", &[]));
+    let evidence = id(&add(cwd, "[evidence] fixture rationale\n", &[]));
+    ok(
+        cwd,
+        &["append", "--id", &child, "--ref", &evidence],
+        Some("[progress] cited in-scope fact\n"),
+    );
+
+    let global: Value =
+        serde_json::from_str(ok(cwd, &["timeline", "--format", "json"], None).trim())
+            .expect("global timeline json");
+    let checkpoint_offset = global["max_offset"].as_u64().expect("max offset") as usize;
+
+    let late_joiner = id(&add(cwd, "[task] fixture late joiner\n", &[]));
+    ok(
+        cwd,
+        &["append", "--id", &late_joiner],
+        Some("[progress] prejoin secret\n"),
+    );
+    ok(
+        cwd,
+        &["link", &late_joiner, &root, "--edge-type", "belongs-to"],
+        None,
+    );
+    ok(
+        cwd,
+        &["append", "--id", &child],
+        Some("[progress] before leave\n"),
+    );
+    ok(
+        cwd,
+        &["unlink", &child, &root, "--edge-type", "belongs-to"],
+        None,
+    );
+    ok(
+        cwd,
+        &["append", "--id", &child],
+        Some("[progress] postleave secret\n"),
+    );
+    RecursiveFixture {
+        root,
+        child,
+        grandchild,
+        outsider,
+        late_joiner,
+        checkpoint_offset,
+    }
+}
+
+fn timeline_rows(value: &Value) -> &[Value] {
+    value["timeline"].as_array().expect("timeline array")
+}
+
+fn row_text(row: &Value) -> String {
+    row.to_string()
+}
+
+#[test]
+fn behavior_manifest_is_executable_and_declares_normalization() {
+    let manifest = manifest();
+    assert_eq!(manifest.schema, "mnema-behavior-scenarios/v1");
+    let ids: HashSet<&str> = manifest.scenarios.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids.len(), manifest.scenarios.len(), "scenario ids unique");
+    for scenario in &manifest.scenarios {
+        assert!(
+            !scenario.purpose.trim().is_empty(),
+            "{} purpose",
+            scenario.id
+        );
+        assert!(!scenario.command.is_empty(), "{} command", scenario.id);
+        assert!(matches!(
+            scenario.format.as_str(),
+            "text" | "canonical-json"
+        ));
+        let allowed: HashSet<&str> = scenario
+            .allowed_dynamic_values
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(allowed.len(), scenario.allowed_dynamic_values.len());
+        assert!(scenario.setup.is_empty() || scenario.setup_fixture.is_none());
+    }
+
+    // Execute the manifest's self-contained scenarios. Fixture scenarios have
+    // stronger semantic coverage below.
+    for scenario in manifest
+        .scenarios
+        .iter()
+        .filter(|scenario| scenario.setup_fixture.is_none())
+    {
+        let dir = tempfile::tempdir().unwrap();
+        for setup in &scenario.setup {
+            let output = run(dir.path(), setup, None);
+            assert!(output.status.success(), "{} setup failed", scenario.id);
+        }
+        let output = run(dir.path(), &scenario.command, None);
+        if scenario.id == "invalid-id-diagnostic" {
+            assert!(!output.status.success());
+        } else {
+            assert!(output.status.success(), "{} failed", scenario.id);
+        }
+        if scenario.format == "canonical-json" && output.status.success() {
+            let _: Value = serde_json::from_slice(&output.stdout).expect("valid json output");
+        }
+    }
+}
+
+#[test]
+fn recursive_scope_fixture_agrees_with_independent_current_scope_oracle() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = recursive_scope_v1(dir.path());
+    let mut oracle = ScopeOracle::default();
+    oracle.link(&fixture.grandchild, &fixture.child);
+    oracle.link(&fixture.late_joiner, &fixture.root);
+    // child→root was unlinked; outsider and refs never imply membership.
+    oracle.unlink(&fixture.child, &fixture.root);
+    let expected = oracle.subtree(&fixture.root);
+    assert_eq!(
+        expected,
+        HashSet::from([fixture.root.clone(), fixture.late_joiner.clone()])
+    );
+
+    let actual: Value = serde_json::from_str(
+        ok(
+            dir.path(),
+            &["timeline", "--under", &fixture.root, "--format", "json"],
+            None,
+        )
+        .trim(),
+    )
+    .unwrap();
+    let actual_ids: HashSet<String> = timeline_rows(&actual)
+        .iter()
+        .map(|row| row["strand_id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_ids, expected);
+    assert!(!actual_ids.contains(&fixture.outsider));
+    assert!(!actual_ids.contains(&fixture.grandchild));
+}
+
+#[test]
+fn event_time_incremental_scope_differs_from_current_scope_at_join_and_leave() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = recursive_scope_v1(dir.path());
+    let n = fixture.checkpoint_offset.to_string();
+    let current: Value = serde_json::from_str(
+        ok(
+            dir.path(),
+            &[
+                "timeline",
+                "--under",
+                &fixture.root,
+                "--since-offset",
+                &n,
+                "--format",
+                "json",
+            ],
+            None,
+        )
+        .trim(),
+    )
+    .unwrap();
+    let event_time: Value = serde_json::from_str(
+        ok(
+            dir.path(),
+            &[
+                "timeline",
+                "--under",
+                &fixture.root,
+                "--since-offset",
+                &n,
+                "--scope-at-event",
+                "--format",
+                "json",
+            ],
+            None,
+        )
+        .trim(),
+    )
+    .unwrap();
+    let current_text = timeline_rows(&current)
+        .iter()
+        .map(row_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let event_text = timeline_rows(&event_time)
+        .iter()
+        .map(row_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(current_text.contains(&fixture.late_joiner));
+    assert!(
+        current_text.contains("prejoin secret"),
+        "current membership includes late joiner's history"
+    );
+    assert!(
+        !current_text.contains("before leave"),
+        "departed child is not a current member"
+    );
+
+    assert!(!event_text.contains("prejoin secret"));
+    assert!(event_text.contains("before leave"));
+    assert!(!event_text.contains("postleave secret"));
+    assert!(event_text.contains(&fixture.child));
+    assert!(!event_text.contains(&fixture.outsider));
+}
+
+#[test]
+fn concurrent_parent_plus_ref_adds_are_complete_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    ok(dir.path(), &["init"], None);
+    let parent = id(&add(dir.path(), "[task] concurrent parent\n", &[]));
+    let evidence = id(&add(dir.path(), "[evidence] shared basis\n", &[]));
+
+    let mut workers = Vec::new();
+    for index in 0..8 {
+        let cwd = dir.path().to_path_buf();
+        let parent = parent.clone();
+        let evidence = evidence.clone();
+        workers.push(std::thread::spawn(move || {
+            let slug = format!("concurrent-child-{index}");
+            let body = format!("[task] concurrent child {index}\n");
+            let args = vec![
+                "add".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+                "--slug".to_string(),
+                slug,
+                "--parent".to_string(),
+                parent,
+                "--ref".to_string(),
+                evidence,
+            ];
+            run(&cwd, &args, Some(&body))
+        }));
+    }
+
+    let mut child_ids = HashSet::new();
+    for worker in workers {
+        let output = worker.join().expect("worker join");
+        assert!(
+            output.status.success(),
+            "concurrent add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).expect("add output json");
+        child_ids.insert(value["id"].as_str().unwrap().to_string());
+        assert_eq!(value["refs"].as_array().unwrap().len(), 1);
+    }
+    assert_eq!(child_ids.len(), 8);
+
+    let tree = ok(
+        dir.path(),
+        &["tree", "--id", &parent, "--format", "json"],
+        None,
+    );
+    for child in &child_ids {
+        assert!(tree.contains(child), "tree missing atomic child {child}");
+    }
+    let timeline: Value =
+        serde_json::from_str(ok(dir.path(), &["timeline", "--format", "json"], None).trim())
+            .unwrap();
+    for child in &child_ids {
+        let rows: Vec<&Value> = timeline_rows(&timeline)
+            .iter()
+            .filter(|row| row["strand_id"].as_str() == Some(child.as_str()))
+            .collect();
+        assert!(
+            rows.len() >= 2,
+            "child {child} exposed without its structural batch"
+        );
+        let joined = rows.iter().map(|row| row.to_string()).collect::<String>();
+        assert!(
+            joined.contains("belongs-to"),
+            "child {child} missing parent link"
+        );
+        let show = ok(
+            dir.path(),
+            &["show", "--id", child, "--format", "json"],
+            None,
+        );
+        assert!(
+            show.contains(&evidence),
+            "child {child} missing rationale ref"
+        );
+    }
+    ok(dir.path(), &["doctor", "journal"], None);
+}

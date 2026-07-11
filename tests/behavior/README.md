@@ -19,7 +19,11 @@ Rules for future fixtures:
 - keep platform variants explicit;
 - do not record snapshots automatically in CI.
 
-The eventual record/replay integration may use `rere.py`, but the scenario
-driver owns isolation and normalization. This prevents the snapshot tool from
-becoming an implicit source of mnema semantics.
+`tests/behavior_harness.rs` is the first executable driver. It validates and
+runs self-contained manifest scenarios, builds `recursive-scope-v1` in a fresh
+temporary journal, and compares scoped CLI output with an independent
+belongs-to oracle. It intentionally stops before snapshot recording: the
+eventual record/replay integration may use `rere.py`, but the scenario driver
+owns isolation and normalization. This prevents the snapshot tool from becoming
+an implicit source of mnema semantics.
 

@@ -80,10 +80,10 @@ event plus the test report.
 
 ## Planned order
 
-1. Add the shared scope oracle and table-driven recursive command matrix.
+1. Extend the executable behavior driver from structural assertions to reviewed snapshots.
 2. Add historical fixture conventions and a first v2-to-v3 compatibility set.
 3. Add reference-model/differential generation for replay and incremental reads.
-4. Add multi-process atomicity cases and test-only persistence failpoints.
-5. Introduce the normalized behavior driver, then vendor or pin `rere.py`.
+4. Extend the initial multi-process parent+refs case with test-only persistence failpoints.
+5. Vendor or pin `rere.py` only after normalization policy has reviewed examples.
 6. Add scheduled fuzz, large-journal, and async-exec-hosted suites.
 
