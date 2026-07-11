@@ -45,7 +45,7 @@
       "id": "incremental-scope-journey",
       "purpose": "Protect the public expression of changes under X after offset N.",
       "setup_fixture": "recursive-scope-v1",
-      "command": ["timeline", "--under", "${root_id}", "--since-offset", "${checkpoint_offset}", "--format", "json"],
+      "command": ["timeline", "--under", "${root_id}", "--since-offset", "${checkpoint_offset}", "--scope-at-event", "--format", "json"],
       "format": "canonical-json",
       "allowed_dynamic_values": ["strand_ids", "entry_hashes", "journal_id", "timestamps", "offsets"]
     }
