@@ -656,6 +656,13 @@ pub(crate) fn orient_plan_at(
         req.allow_selection,
         max_offset,
     )?;
+    let scope_context = scope.context(&strands)?;
+    let scope_root_card = scope_context.as_ref().and_then(|context| {
+        strands
+            .iter()
+            .find(|strand| strand.id == context.root_id)
+            .map(output::OrientStrand::from)
+    });
     // Collect scope ids first so retain can borrow strands mutably.
     if !scope.is_journal() {
         let ids = scope.resolve_ids(&strands)?;
@@ -671,6 +678,21 @@ pub(crate) fn orient_plan_at(
             "mnema timeline --since-offset {} --under {}",
             view.max_offset, root_id
         );
+        output.stale_command = format!("mnema list --stale 2h --under {}", root_id);
+        let context = scope_context.expect("subtree scope has context");
+        output.scope = output::OrientScopeOutput {
+            kind: "subtree".to_string(),
+            root: scope_root_card,
+            context: context
+                .pointers
+                .into_iter()
+                .map(|pointer| output::OrientContextPointer {
+                    kind: pointer.kind.to_string(),
+                    id: pointer.id,
+                    command: pointer.command,
+                })
+                .collect(),
+        };
     }
     // Questions ① and ③ (CORPUS §8): the integrity glance needs the raw event
     // stream; needs-judgment notices use the scoped strand set.
@@ -686,11 +708,11 @@ pub(crate) fn orient_plan_at(
     })
 }
 
-fn print_orient_stale(stale_count: usize) {
+fn print_orient_stale(stale_count: usize, stale_command: &str) {
     // Always print so the discovery surface exists even when the count is zero.
     println!(
-        "stale: {} active silent ≥{} → mnema list --stale {}",
-        stale_count, ORIENT_STALE_DURATION, ORIENT_STALE_DURATION
+        "stale: {} active silent ≥{} → {}",
+        stale_count, ORIENT_STALE_DURATION, stale_command
     );
 }
 
@@ -958,6 +980,8 @@ pub(crate) fn cmd_orient(
             remind: out.remind.clone(),
             pause: out.pause.clone(),
             stale_count: out.stale_count,
+            stale_command: out.stale_command.clone(),
+            scope: out.scope.clone(),
         };
 
         if format == Some("json") {
@@ -976,7 +1000,7 @@ pub(crate) fn cmd_orient(
             println!("integrity: {}", out.integrity);
             println!("since: {}", out.since_command);
             println!("delegation: {}", out.delegation_command);
-            print_orient_stale(out.stale_count);
+            print_orient_stale(out.stale_count, &out.stale_command);
             print_orient_forest(&tree_out.roots, 0);
             if out.active.is_empty() {
                 println!("(no active strands) — start one: echo \"<summary>\" | mnema add");
@@ -1002,7 +1026,7 @@ pub(crate) fn cmd_orient(
         println!("integrity: {}", out.integrity);
         println!("since: {}", out.since_command);
         println!("delegation: {}", out.delegation_command);
-        print_orient_stale(out.stale_count);
+        print_orient_stale(out.stale_count, &out.stale_command);
         for s in &out.active {
             let type_info = s
                 .strand_type

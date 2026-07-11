@@ -2,6 +2,19 @@ use crate::graph::StrandGraph;
 use crate::projection::ProjectedStrand;
 use std::collections::HashSet;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextPointer {
+    pub(crate) kind: &'static str,
+    pub(crate) id: String,
+    pub(crate) command: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ScopeContext {
+    pub(crate) root_id: String,
+    pub(crate) pointers: Vec<ContextPointer>,
+}
+
 /// The candidate set used by a collection query.
 ///
 /// Scope changes which strands participate; it never changes the query's
@@ -65,6 +78,57 @@ impl Scope {
         let ids = self.resolve_ids(universe)?;
         strands.retain(|strand| ids.contains(&strand.id));
         Ok(())
+    }
+
+    /// Direct, deliberately unexpanded context for a delegated entry point.
+    /// Descendants belong to the scope itself; ancestors, attention edges and
+    /// entry refs remain pointers so orient never manufactures a summary.
+    pub(crate) fn context(
+        &self,
+        universe: &[ProjectedStrand],
+    ) -> Result<Option<ScopeContext>, String> {
+        let Some(root_id) = self.root_id() else {
+            return Ok(None);
+        };
+        let root = universe
+            .iter()
+            .find(|strand| strand.id == root_id)
+            .ok_or_else(|| format!("scope root {} not found or ambiguous", root_id))?;
+        let mut pointers = Vec::new();
+        let mut seen = HashSet::new();
+        for id in &root.belongs_to_edges {
+            if seen.insert(("parent", id.clone())) {
+                pointers.push(ContextPointer {
+                    kind: "parent",
+                    id: id.clone(),
+                    command: format!("mnema show --id {} --digest", id),
+                });
+            }
+        }
+        for id in &root.depends_on_edges {
+            if seen.insert(("depends-on", id.clone())) {
+                pointers.push(ContextPointer {
+                    kind: "depends-on",
+                    id: id.clone(),
+                    command: format!("mnema show --id {} --digest", id),
+                });
+            }
+        }
+        for entry in &root.log {
+            for id in &entry.refs {
+                if seen.insert(("ref", id.clone())) {
+                    pointers.push(ContextPointer {
+                        kind: "ref",
+                        id: id.clone(),
+                        command: format!("mnema show --entry {} --deref 0", id),
+                    });
+                }
+            }
+        }
+        Ok(Some(ScopeContext {
+            root_id: root.id.clone(),
+            pointers,
+        }))
     }
 }
 
@@ -139,5 +203,23 @@ mod tests {
         let strands = vec![strand("root", None, &[])];
         let error = Scope::subtree("missing").resolve_ids(&strands).unwrap_err();
         assert!(error.contains("scope root missing"));
+    }
+
+    #[test]
+    fn subtree_context_exposes_pointers_without_expanding_other_strands() {
+        let mut root = strand("root", Some("parent"), &["upstream"]);
+        root.log[0].refs = vec!["entry-ref".to_string()];
+        let strands = vec![
+            root,
+            strand("parent", None, &[]),
+            strand("upstream", None, &[]),
+        ];
+        let context = Scope::subtree("root").context(&strands).unwrap().unwrap();
+        assert_eq!(context.root_id, "root");
+        assert_eq!(
+            context.pointers.iter().map(|p| p.kind).collect::<Vec<_>>(),
+            vec!["parent", "depends-on", "ref"]
+        );
+        assert!(context.pointers[2].command.ends_with("--deref 0"));
     }
 }

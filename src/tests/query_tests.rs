@@ -332,6 +332,8 @@ fn orient_tree_json_shape_is_nested() {
         remind: out.remind.clone(),
         pause: out.pause.clone(),
         stale_count: out.stale_count,
+        stale_command: out.stale_command.clone(),
+        scope: out.scope.clone(),
     };
 
     let json_str = serde_json::to_string(&tree_out).unwrap();
@@ -2072,6 +2074,48 @@ fn orient_id_scopes_menu_to_subtree() {
         !active.contains(&outsider),
         "orient --id must not surface out-of-scope active lines"
     );
+}
+
+#[test]
+fn orient_id_keeps_closed_root_and_upstream_as_unexpanded_scope_context() {
+    let _env = setup();
+    let upstream = create_strand("orient upstream");
+    let parent = create_strand("orient context root");
+    let child = create_strand("orient context child");
+    cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+    cmd_link(&parent, &upstream, Some("depends-on"), false, None).unwrap();
+    cmd_close(&parent, Some("done"), None, false).unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let plan = orient_plan(
+        &events,
+        &OrientRequest {
+            include_hidden: false,
+            limit: None,
+            under: Some(parent.clone()),
+            allow_selection: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(plan.output.scope.kind, "subtree");
+    assert_eq!(
+        plan.output.stale_command,
+        format!("mnema list --stale 2h --under {}", parent)
+    );
+    let root = plan.output.scope.root.as_ref().unwrap();
+    assert_eq!(root.id, parent);
+    assert_eq!(root.lifecycle, "closed:done");
+    assert!(plan.output.active.iter().any(|card| card.id == child));
+    assert!(!plan.output.active.iter().any(|card| card.id == upstream));
+    let pointer = plan
+        .output
+        .scope
+        .context
+        .iter()
+        .find(|p| p.id == upstream)
+        .unwrap();
+    assert_eq!(pointer.kind, "depends-on");
+    assert!(pointer.command.contains("mnema show --id"));
 }
 
 #[test]

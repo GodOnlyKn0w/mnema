@@ -133,8 +133,9 @@ list（StrandListOutput.strands[]，StrandListItem）：
   edges / belongs_to_edges / depends_on_edges / status / state_marker /
   state_offset / last_entry_ts / last_entry_offset
 orient（OrientOutput）：
-  max_offset / active / closed_count / hidden_count / integrity / notices / since_command / delegation_command / remind / pause / stale_count
-  ※ active[] 卡片见 card；stale_count=活跃且末条 silent≥2h（指针 list --stale 2h）
+  max_offset / active / closed_count / hidden_count / integrity / notices / since_command / delegation_command / remind / pause / stale_count / stale_command / scope
+  ※ active[] 卡片见 card；scope={kind,root,context[]}，context 只给未展开的 parent/depends-on/ref 身份与读取命令
+  ※ stale_count=scope 内活跃且末条 silent≥2h；stale_command 保留当前 scope
 search（SearchOutput）：
   matches / count / query / marker
   ※ matches[]：strand_id / content / strand_type / hidden / entry_id / marker（entry_id=全哈希供 fixes=/--why；marker null=未筛）
@@ -259,7 +260,7 @@ entry 形状模板：
 8. 进程、模型、worktree、超时与重试由 harness 管理，Core help 不绑定厂商启动命令。
 
 入口：mnema orient --id <CHILD>
-增量读取：mnema timeline --since-offset <N>
+增量读取：mnema timeline --since-offset <N> --under <CHILD>
 查看子树：mnema tree --id <PARENT>；mnema depends --under <PARENT>"#,
     },
     TopicInfo {
@@ -1075,6 +1076,8 @@ mod tests {
             remind: "".to_string(),
             pause: "".to_string(),
             stale_count: 0,
+            stale_command: "mnema list --stale 2h".to_string(),
+            scope: crate::output::OrientScopeOutput::journal(),
         };
         let v = serde_json::to_value(&orient_sample).expect("serialize OrientOutput");
         for key in v.as_object().unwrap().keys() {

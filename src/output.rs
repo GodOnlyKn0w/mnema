@@ -221,6 +221,34 @@ pub struct OrientOutput {
     /// Active, non-hidden strands whose last entry is older than the orient
     /// stale threshold (2h). Pure read projection; use `mnema list --stale 2h`.
     pub stale_count: usize,
+    pub stale_command: String,
+    /// Explicit scope metadata. Added without changing the existing orient
+    /// fields so JournalScope and SubtreeScope share one public schema.
+    pub scope: OrientScopeOutput,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct OrientContextPointer {
+    pub kind: String,
+    pub id: String,
+    pub command: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct OrientScopeOutput {
+    pub kind: String,
+    pub root: Option<OrientStrand>,
+    pub context: Vec<OrientContextPointer>,
+}
+
+impl OrientScopeOutput {
+    pub(crate) fn journal() -> Self {
+        Self {
+            kind: "journal".to_string(),
+            root: None,
+            context: Vec::new(),
+        }
+    }
 }
 
 impl From<(&OrientView, &[ProjectedStrand])> for OrientOutput {
@@ -243,6 +271,8 @@ impl From<(&OrientView, &[ProjectedStrand])> for OrientOutput {
             remind: ORIENT_REMIND.to_string(),
             pause: ORIENT_PAUSE.to_string(),
             stale_count: 0,
+            stale_command: "mnema list --stale 2h".to_string(),
+            scope: OrientScopeOutput::journal(),
         }
     }
 }
@@ -266,6 +296,8 @@ pub struct OrientTreeOutput {
     pub pause: String,
     /// Same meaning as `OrientOutput.stale_count`.
     pub stale_count: usize,
+    pub stale_command: String,
+    pub scope: OrientScopeOutput,
 }
 
 // ── query JSON DTOs ────────────────────────────────────────
