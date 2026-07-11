@@ -360,6 +360,126 @@ pub enum Severity {
 // ── Catalog ─────────────────────────────────────────────────
 
 static CATALOG: &[DiagnosticInfo] = &[
+    DiagnosticInfo {
+        code: "migration-source-invalid",
+        severity: Severity::Error,
+        category: "integrity",
+        title: "v2 source cannot be represented by v3 invariants",
+        finding: "A source record has an invalid chain, identity, timestamp, relation, or payload for strict v3 conversion.",
+        impact: "No activation occurs; the source remains authoritative.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "inspect the reported source offset, repair or explicitly adjudicate it, then rerun: mnema cutover-v3",
+            executable: false,
+            requires_human: true,
+        },
+        producer: "cutover-v3",
+    },
+    DiagnosticInfo {
+        code: "migration-source-changed",
+        severity: Severity::Error,
+        category: "concurrency",
+        title: "v2 source changed after planning",
+        finding: "The exclusive-lock recheck found source bytes different from the prepared plan.",
+        impact: "No activation occurs, preventing an out-of-date plan from committing.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "rerun planning against the current source: mnema cutover-v3",
+            executable: false,
+            requires_human: false,
+        },
+        producer: "cutover-v3",
+    },
+    DiagnosticInfo {
+        code: "migration-map-incomplete",
+        severity: Severity::Error,
+        category: "integrity",
+        title: "migration disposition or projection is incomplete",
+        finding: "Not every source record/identity has one disposition, or the mapped v3 projection differs from v2.",
+        impact: "No activation occurs because the migration proof is incomplete.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "inspect the reported mismatch and repair the converter before retrying",
+            executable: false,
+            requires_human: true,
+        },
+        producer: "cutover-v3",
+    },
+    DiagnosticInfo {
+        code: "migration-id-collision",
+        severity: Severity::Error,
+        category: "integrity",
+        title: "distinct source identities collided",
+        finding: "Two v2 strand identities mapped to the same v3 genesis identity.",
+        impact: "No activation occurs; silently merging histories is forbidden.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "audit canonical identity and deterministic import seed construction",
+            executable: false,
+            requires_human: true,
+        },
+        producer: "cutover-v3",
+    },
+    DiagnosticInfo {
+        code: "migration-artifact-conflict",
+        severity: Severity::Error,
+        category: "integrity",
+        title: "prepared migration artifact conflicts",
+        finding: "A target, history, map, certificate, or manifest path already contains different bytes for this migration.",
+        impact: "No conflicting artifact is overwritten and activation does not advance.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "inspect .mnema/history, .mnema/journals, and active-journal.json before retrying",
+            executable: false,
+            requires_human: true,
+        },
+        producer: "cutover-v3",
+    },
+    DiagnosticInfo {
+        code: "legacy-history-write-forbidden",
+        severity: Severity::Error,
+        category: "resolution",
+        title: "write resolved to frozen legacy history",
+        finding: "A legacy Event append was attempted after the active manifest selected v3.",
+        impact: "The v2 shadow/history is unchanged; only the active v3 journal is writable.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "resolve the v3 strand/entry identity through the migration map and retry the normal command",
+            executable: false,
+            requires_human: false,
+        },
+        producer: "journal-v3",
+    },
+    DiagnosticInfo {
+        code: "atomic-activation-failed",
+        severity: Severity::Error,
+        category: "concurrency",
+        title: "active manifest commit failed",
+        finding: "Prepared and verified v3 artifacts exist, but the no-replace manifest commit did not complete.",
+        impact: "v2 remains authoritative; prepared artifacts are safe resume points.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "inspect the reported filesystem error and rerun: mnema cutover-v3 --apply",
+            executable: false,
+            requires_human: false,
+        },
+        producer: "activation-v3",
+    },
+    DiagnosticInfo {
+        code: "activation-durability-uncertain",
+        severity: Severity::Warning,
+        category: "io",
+        title: "activation committed but directory sync is uncertain",
+        finding: "The active manifest is installed and readable, but the post-commit directory durability sync failed.",
+        impact: "v3 is already authoritative; reporting this as an uncommitted failure would invite a dangerous retry assumption.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "run mnema doctor journal, sync or back up the filesystem, and treat v3 as active",
+            executable: false,
+            requires_human: false,
+        },
+        producer: "activation-v3",
+    },
     // ── Lifecycle: E053/E056 reserved, not removed ──────
     // Completion-pair checks (done↔verified) are parked until the marker
     // vocabulary stabilises — paired markers are coming, and these two
@@ -1042,9 +1162,17 @@ mod tests {
         assert!(codes.contains(&"W074"));
         assert!(codes.contains(&"W075"));
         assert!(codes.contains(&"W076"));
+        assert!(codes.contains(&"migration-source-invalid"));
+        assert!(codes.contains(&"migration-source-changed"));
+        assert!(codes.contains(&"migration-map-incomplete"));
+        assert!(codes.contains(&"migration-id-collision"));
+        assert!(codes.contains(&"migration-artifact-conflict"));
+        assert!(codes.contains(&"legacy-history-write-forbidden"));
+        assert!(codes.contains(&"atomic-activation-failed"));
+        assert!(codes.contains(&"activation-durability-uncertain"));
         assert_eq!(
             codes.len(),
-            7,
+            15,
             "catalog size changed — update this test deliberately"
         );
     }

@@ -213,7 +213,26 @@ pub(crate) fn build_cutover_v3_plan(
     };
 
     for (offset, event) in source {
-        convert_event(&mut state, *offset, event)?;
+        convert_event(&mut state, *offset, event).map_err(|error| {
+            if error.starts_with("migration-") {
+                error
+            } else {
+                format!("migration-source-invalid at offset {offset}: {error}")
+            }
+        })?;
+    }
+    if state.source_records.len() != source.len() {
+        return Err(format!(
+            "migration-map-incomplete: {} source records produced {} dispositions",
+            source.len(),
+            state.source_records.len()
+        ));
+    }
+    let unique_strands: HashSet<&String> = state.strand_map.values().collect();
+    if unique_strands.len() != state.strand_map.len() {
+        return Err(
+            "migration-id-collision: distinct v2 strands mapped to one v3 strand".to_string(),
+        );
     }
 
     let anchor_ts = state
@@ -244,7 +263,7 @@ pub(crate) fn build_cutover_v3_plan(
     let equivalence = check_projection_equivalence(source, &state.records, &map);
     if !equivalence.ok {
         return Err(format!(
-            "projection equivalence failed: {}",
+            "migration-map-incomplete: projection equivalence failed: {}",
             equivalence.mismatches.join("; ")
         ));
     }
@@ -1333,7 +1352,7 @@ pub(crate) fn apply_cutover_v3(
             let expected = encode_records_bytes(&plan.records)?;
             if existing != expected {
                 return Err(format!(
-                    "migration artifact conflict: {} already differs from this plan",
+                    "migration-artifact-conflict: {} already differs from this plan",
                     target_path.display()
                 ));
             }
@@ -1394,7 +1413,7 @@ pub(crate) fn apply_cutover_v3(
                 .map_err(|e| format!("canonicalize existing certificate: {e}"))?;
             if existing != canonical {
                 return Err(format!(
-                    "migration artifact conflict: {} is not canonical JCS",
+                    "migration-artifact-conflict: {} is not canonical JCS",
                     certificate_path.display()
                 ));
             }
@@ -1405,7 +1424,7 @@ pub(crate) fn apply_cutover_v3(
                 || parsed.map_sha256 != certificate.map_sha256
             {
                 return Err(format!(
-                    "migration artifact conflict: {}",
+                    "migration-artifact-conflict: {}",
                     certificate_path.display()
                 ));
             }
@@ -1450,7 +1469,16 @@ pub(crate) fn apply_cutover_v3(
             },
         };
 
-        match activate_initial_v3(journal_dir, &manifest)? {
+        let activation = activate_initial_v3(journal_dir, &manifest).map_err(|error| {
+            if error.contains("artifact conflict")
+                || error.starts_with("migration-artifact-conflict")
+            {
+                format!("migration-artifact-conflict: {error}")
+            } else {
+                format!("atomic-activation-failed: {error}")
+            }
+        })?;
+        match activation {
             ActivationOutcome::Activated => Ok(CutoverV3ApplyOutcome::Applied),
             ActivationOutcome::ActivatedDurabilityUncertain { .. } => {
                 Ok(CutoverV3ApplyOutcome::AppliedDurabilityUncertain)
@@ -1469,7 +1497,7 @@ fn install_bytes_idempotent(path: &Path, bytes: &[u8], label: &str) -> Result<()
             .map_err(|e| format!("read existing {label} {}: {e}", path.display()))?;
         if existing != bytes {
             return Err(format!(
-                "migration artifact conflict: {label} {} already differs",
+                "migration-artifact-conflict: {label} {} already differs",
                 path.display()
             ));
         }
