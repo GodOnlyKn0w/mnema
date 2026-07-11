@@ -161,14 +161,29 @@ pub(crate) fn edge_delta(event: &Event) -> Option<EdgeDelta> {
         _ => None,
     }
 }
-/// Compute canonical lifecycle state from raw events (not log content).
-/// Only legacy StrandClosed/StrandReopened events and v2 close/reopen effects affect state;
-/// the last such event wins. No events → "registered" (open).
+/// Fold the last close/reopen lifecycle effect into canonical strand state.
 ///
 /// Returns (state_str, disposition_or_empty, deciding_offset).
 /// state_str: "registered" (open) or "closed:<disposition>"
 /// disposition_or_empty: the disposition string when closed, empty when open
-/// deciding_offset: journal offset of the deciding event (0 when no event)
+/// deciding_offset: journal offset of the deciding event (0 when open / no event)
+fn fold_lifecycle_state(last: Option<(usize, EntryEffect)>) -> (String, String, usize) {
+    match last {
+        Some((offset, EntryEffect::Close { disposition })) => {
+            (format!("closed:{}", disposition), disposition, offset)
+        }
+        Some((_, EntryEffect::Reopen)) => ("registered".to_string(), String::new(), 0),
+        _ => ("registered".to_string(), String::new(), 0),
+    }
+}
+
+/// Compute canonical lifecycle state from raw events (not log content).
+/// Only legacy StrandClosed/StrandReopened events and v2 close/reopen effects affect state;
+/// the last such event wins. No events → "registered" (open).
+///
+/// Scans the full stream filtering by `strand_id` — fine for single-strand lookups
+/// (write gates). `project_strands` uses [`compute_state_from_strand_events`] on the
+/// already-grouped per-strand slice so full projection stays O(E), not O(S×E).
 pub fn compute_state_from_events(
     raw_events: &[(usize, crate::event::Event)],
     strand_id: &str,
@@ -182,13 +197,20 @@ pub fn compute_state_from_events(
             last = Some((*offset, effect));
         }
     }
-    match last {
-        Some((offset, EntryEffect::Close { disposition })) => {
-            (format!("closed:{}", disposition), disposition, offset)
+    fold_lifecycle_state(last)
+}
+
+/// Same lifecycle fold as [`compute_state_from_events`], but over events already
+/// scoped to one strand (e.g. `project_strands` grouping). Avoids re-scanning the
+/// entire journal once per strand.
+fn compute_state_from_strand_events(node_events: &[(usize, &Event)]) -> (String, String, usize) {
+    let mut last: Option<(usize, EntryEffect)> = None;
+    for (offset, event) in node_events {
+        if let Some(effect) = lifecycle_effect(event) {
+            last = Some((*offset, effect));
         }
-        Some((_, EntryEffect::Reopen)) => ("registered".to_string(), String::new(), 0),
-        _ => ("registered".to_string(), String::new(), 0),
     }
+    fold_lifecycle_state(last)
 }
 
 // ── Projected Strand ───────────────────────────────────────
@@ -1053,7 +1075,9 @@ pub fn project_strands(events: &[(usize, Event)], include_hidden: bool) -> Vec<P
             .strand_id()
             .expect("strand-scoped event")
             .to_string();
-        let (state, state_marker, state_offset) = compute_state_from_events(events, &strand_id_str);
+        // Use the already-grouped per-strand events (O(events_on_strand)), not a
+        // full-journal rescan per strand (would be O(S×E) and superlinear at scale).
+        let (state, state_marker, state_offset) = compute_state_from_strand_events(&node_events);
         if !include_hidden && hidden {
             continue;
         }
