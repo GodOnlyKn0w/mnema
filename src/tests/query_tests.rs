@@ -1018,7 +1018,7 @@ fn show_entry_deref_expands_chain_and_prices_frontier() {
         None,
         None,
         None,
-        Some(&evidence),
+        &[&evidence],
     )
     .unwrap();
     let downstream = create_strand("downstream line");
@@ -1032,7 +1032,7 @@ fn show_entry_deref_expands_chain_and_prices_frontier() {
         None,
         None,
         None,
-        Some(&decision),
+        &[&decision],
     )
     .unwrap();
 
@@ -1147,7 +1147,7 @@ fn list_selection_cache_resolves_and_fails_closed_after_journal_moves() {
         None,
         None,
         None,
-        None,
+        &[],
     )
     .unwrap();
     let moved_events = read_events_lossy(&ensure_journal().unwrap()).0;
@@ -1564,7 +1564,7 @@ fn edges_discipline_lists_open_friction_and_why_less_decision() {
         None,
         None,
         None,
-        Some(&why_target),
+        &[&why_target],
     )
     .unwrap();
 

@@ -130,10 +130,42 @@ fn resolve_rationale_ref(
     }
 }
 
+/// Resolve 0..N authored `--why`/`--from` tokens to entry hashes.
+///
+/// Order is preserved (refs participate in entry identity). Empty tokens and
+/// duplicate resolved targets are rejected so accidental double-cites cannot
+/// silently reshape the hash.
+fn resolve_rationale_refs(
+    events: &[(usize, Event)],
+    all_strands: &[projection::ProjectedStrand],
+    inputs: &[&str],
+    allow_selection: bool,
+    flag: &str,
+) -> Result<Vec<String>, String> {
+    let mut refs = Vec::with_capacity(inputs.len());
+    for raw in inputs {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err(format!("{} cannot be empty", flag));
+        }
+        let resolved = resolve_rationale_ref(events, all_strands, raw, allow_selection)?;
+        if refs.iter().any(|existing| existing == &resolved) {
+            return Err(format!(
+                "duplicate {} target {} (resolved entry {})",
+                flag,
+                raw,
+                shorten(&resolved)
+            ));
+        }
+        refs.push(resolved);
+    }
+    Ok(refs)
+}
+
 pub(crate) fn cmd_add_from_stdin(
     format_json: bool,
     parent: Option<&str>,
-    from: Option<&str>,
+    from: &[&str],
     slug: Option<&str>,
     strand_type: Option<&str>,
     provenance_raw: Option<&str>,
@@ -163,13 +195,14 @@ pub(crate) fn cmd_add_with_parent(
     strand_type: Option<&str>,
     provenance_raw: Option<&str>,
 ) -> Result<(), String> {
+    let from_refs: Vec<&str> = from.into_iter().collect();
     cmd_add_with_parent_and_slug(
         content,
         stdin,
         file,
         format_json,
         parent,
-        from,
+        &from_refs,
         None,
         strand_type,
         provenance_raw,
@@ -183,7 +216,7 @@ pub(crate) fn cmd_add_with_parent_and_slug(
     file: Option<&str>,
     format_json: bool,
     parent: Option<&str>,
-    from: Option<&str>,
+    from: &[&str],
     slug: Option<&str>,
     strand_type: Option<&str>,
     provenance_raw: Option<&str>,
@@ -246,9 +279,10 @@ pub(crate) fn cmd_add_with_parent_and_slug(
     });
 
     let provenance = parse_provenance_arg(provenance_raw)?;
-    // --parent (belongs-to) and --from (source ref) are orthogonal: a child
-    // can carry either, both, or neither (CORPUS §6 归属与来源正交).
-    let needs_events = parent.is_some() || from.is_some() || slug.is_some();
+    // --parent (belongs-to) and --from (source refs) are orthogonal: a child
+    // can carry either, both, or neither (CORPUS §6 归属与来源正交). Refs are
+    // 0..N authored via repeatable --from; order is preserved.
+    let needs_events = parent.is_some() || !from.is_empty() || slug.is_some();
     let events = if needs_events {
         let path = ensure_journal()?;
         read_events_lossy(&path).0
@@ -287,20 +321,11 @@ pub(crate) fn cmd_add_with_parent_and_slug(
     } else {
         None
     };
-    let from_refs = if let Some(from_raw) = from {
-        let from_raw = from_raw.trim();
-        if from_raw.is_empty() {
-            return Err("--from cannot be empty".to_string());
-        }
-        let all_strands = projection::project_strands(&events, true);
-        vec![resolve_rationale_ref(
-            &events,
-            &all_strands,
-            from_raw,
-            !format_json,
-        )?]
-    } else {
+    let from_refs = if from.is_empty() {
         Vec::new()
+    } else {
+        let all_strands = projection::project_strands(&events, true);
+        resolve_rationale_refs(&events, &all_strands, from, !format_json, "--from")?
     };
 
     let (created, appended) = event::make_strand_created_with_refs_and_slug(
@@ -378,7 +403,8 @@ pub(crate) struct AppendRequest<'a> {
     pub(crate) explicit_id: Option<&'a str>,
     pub(crate) provenance_raw: Option<&'a str>,
     pub(crate) seen_offset: Option<usize>,
-    pub(crate) why: Option<&'a str>,
+    /// 0..N rationale refs from repeatable `--why` (authored order).
+    pub(crate) why: &'a [&'a str],
     pub(crate) allow_selection: bool,
 }
 
@@ -433,7 +459,7 @@ pub(crate) fn cmd_append(
         format,
         provenance_raw,
         None,
-        None,
+        &[],
     )
 }
 
@@ -443,7 +469,7 @@ pub(crate) fn cmd_append_from_stdin(
     format: Option<&str>,
     provenance_raw: Option<&str>,
     seen_offset: Option<usize>,
-    why: Option<&str>,
+    why: &[&str],
 ) -> Result<(), String> {
     let raw = read_stdin_content()?;
     cmd_append_with_seen_offset(
@@ -469,7 +495,7 @@ pub(crate) fn cmd_append_with_seen_offset(
     format: Option<&str>,
     provenance_raw: Option<&str>,
     seen_offset: Option<usize>,
-    why: Option<&str>,
+    why: &[&str],
 ) -> Result<(), String> {
     let outcome = execute_append(AppendRequest {
         content,
@@ -544,9 +570,27 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
     let provenance = parse_provenance_arg(req.provenance_raw)?;
 
     if req.new {
-        let (created, appended) = event::make_strand_created_with_provenance(
+        // Resolve --why under the same rules as append-to-existing; 0..N refs
+        // land on the first entry (CORPUS §7.2 append supports 0..N refs).
+        let why_refs = if req.why.is_empty() {
+            Vec::new()
+        } else {
+            let path = ensure_journal()?;
+            let events = read_events_lossy(&path).0;
+            let all_strands = projection::project_strands(&events, true);
+            resolve_rationale_refs(
+                &events,
+                &all_strands,
+                req.why,
+                req.allow_selection,
+                "--why",
+            )?
+        };
+        let (created, appended) = event::make_strand_created_with_refs(
             &stored,
             Some("session"),
+            why_refs,
+            None,
             provenance.clone(),
         );
         let provisional_id = created
@@ -627,15 +671,13 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
             req.seen_offset,
             target_strand.last_offset(),
         );
-        let mut refs = Vec::new();
-        if let Some(w) = req.why {
-            refs.push(resolve_rationale_ref(
-                events,
-                &all_strands,
-                w,
-                req.allow_selection,
-            )?);
-        }
+        let refs = resolve_rationale_refs(
+            events,
+            &all_strands,
+            req.why,
+            req.allow_selection,
+            "--why",
+        )?;
         let request = JournalEntryAppendRequest {
             strand_id: full_id.clone(),
             content: stored.clone(),

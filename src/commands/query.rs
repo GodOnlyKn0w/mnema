@@ -1611,7 +1611,7 @@ pub(crate) fn cmd_pick(
             None,
             None,
             None,
-            None,
+            &[],
         ),
         "close" => {
             crate::commands::write::cmd_close(&selected, None, lifecycle_reason.as_deref(), false)

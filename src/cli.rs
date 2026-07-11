@@ -127,7 +127,8 @@ Rules:
 Examples:
   echo \"start a new line of work\" | mnema add
   echo \"child line of work\" | mnema add --parent <PARENT>
-  echo \"derived matter\" | mnema add --parent <PARENT> --from <REF>")]
+  echo \"derived matter\" | mnema add --parent <PARENT> --from <REF>
+  echo \"derived matter\" | mnema add --parent <PARENT> --from <R1> --from <R2>")]
     Add {
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -137,10 +138,11 @@ Examples:
         parent: Option<String>,
         /// Source record this line derives from: a strand id/prefix (pins its
         /// latest entry) or an entry-hash prefix (pins that exact entry).
-        /// Stored as a ref on the new line's first entry. Orthogonal to
-        /// --parent: derivation may carry either, both, or neither.
-        #[arg(long = "from", value_name = "REF")]
-        from: Option<String>,
+        /// Repeatable 0..N; authored order is preserved and participates in
+        /// the first entry's identity. Orthogonal to --parent: derivation may
+        /// carry either, both, or neither.
+        #[arg(long = "from", value_name = "REF", action = clap::ArgAction::Append)]
+        from: Vec<String>,
         /// Human alias for the new strand. Must be unique and not pure hex.
         #[arg(long = "slug", value_name = "SLUG")]
         slug: Option<String>,
@@ -177,6 +179,7 @@ Examples:
   echo \"long note\" | mnema append --id 0000019dd34b
   echo \"new strand title\" | mnema append --new
   echo \"[metric] win_count=26\" | mnema append --id 0000019dd34b --provenance '{\"producer\":\"pi\",\"model\":\"gpt-5\"}'
+  echo \"[decision] ship it\" | mnema append --id 0000019dd34b --why <R1> --why <R2>
 
 Markers (optional bracket prefix on the first line):
   Marker vocabulary: mnema explain markers
@@ -211,9 +214,10 @@ Provenance:
         seen_offset: Option<usize>,
         /// Pin a rationale. REF is a strand id/prefix (stores that line's
         /// latest entry hash — "its current conclusion") or an entry-hash
-        /// prefix (pins that exact entry).
-        #[arg(long = "why", value_name = "REF")]
-        why: Option<String>,
+        /// prefix (pins that exact entry). Repeatable 0..N; authored order
+        /// is preserved and participates in entry identity.
+        #[arg(long = "why", value_name = "REF", action = clap::ArgAction::Append)]
+        why: Vec<String>,
     },
     /// Record context before an irreversible or state-closing action
     #[command(after_help = "\
@@ -1327,10 +1331,11 @@ fn run(command: &Commands) -> Result<(), String> {
             provenance,
         } => {
             let fmt = format.as_deref() == Some("json");
+            let from_refs: Vec<&str> = from.iter().map(String::as_str).collect();
             cmd_add_from_stdin(
                 fmt,
                 parent.as_deref(),
-                from.as_deref(),
+                &from_refs,
                 slug.as_deref(),
                 strand_type.as_deref(),
                 provenance.as_deref(),
@@ -1344,14 +1349,17 @@ fn run(command: &Commands) -> Result<(), String> {
             provenance,
             seen_offset,
             why,
-        } => cmd_append_from_stdin(
-            *new,
-            explicit_id.as_deref(),
-            format.as_deref(),
-            provenance.as_deref(),
-            *seen_offset,
-            why.as_deref(),
-        ),
+        } => {
+            let why_refs: Vec<&str> = why.iter().map(String::as_str).collect();
+            cmd_append_from_stdin(
+                *new,
+                explicit_id.as_deref(),
+                format.as_deref(),
+                provenance.as_deref(),
+                *seen_offset,
+                &why_refs,
+            )
+        }
         Commands::List {
             all,
             links,

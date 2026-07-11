@@ -87,7 +87,7 @@ fn append_default_multi_active_discloses_resolve() {
         explicit_id: None,
         provenance_raw: None,
         seen_offset: None,
-        why: None,
+        why: &[],
         allow_selection: false,
     })
     .expect("default append with 2 active must succeed");
@@ -130,7 +130,7 @@ fn append_default_multi_active_discloses_resolve() {
         explicit_id: Some(&b),
         provenance_raw: None,
         seen_offset: None,
-        why: None,
+        why: &[],
         allow_selection: false,
     })
     .expect("explicit append must succeed");
@@ -152,7 +152,7 @@ fn append_default_single_active_no_resolve_disclosure() {
         explicit_id: None,
         provenance_raw: None,
         seen_offset: None,
-        why: None,
+        why: &[],
         allow_selection: false,
     })
     .expect("default append with 1 active must succeed");
@@ -196,7 +196,7 @@ fn append_transaction_preserves_v2_physical_offsets_with_blank_lines() {
         explicit_id: Some(&id),
         provenance_raw: None,
         seen_offset: None,
-        why: None,
+        why: &[],
         allow_selection: false,
     })
     .expect("v2 append transaction must accept blank journal lines");
@@ -795,7 +795,7 @@ fn append_seen_offset_stale_still_writes() {
         Some("json"),
         None,
         Some(seen),
-        None,
+        &[],
     );
     assert!(
         result.is_ok(),
@@ -1280,7 +1280,7 @@ fn v2_why_writes_entry_hash_ref_only() {
         None,
         None,
         None,
-        Some(&basis),
+        &[&basis],
     )
     .unwrap();
 
@@ -1350,7 +1350,7 @@ fn v2_why_strand_shorthand_skips_latest_structural_effect() {
         None,
         None,
         None,
-        Some(&basis),
+        &[&basis],
     )
     .unwrap();
 
@@ -1414,7 +1414,7 @@ fn v2_why_pins_exact_entry_by_hash_prefix() {
         None,
         None,
         None,
-        Some(&middle_entry_id[..16]),
+        &[&middle_entry_id[..16]],
     )
     .unwrap();
 
@@ -1533,6 +1533,285 @@ fn add_from_pins_source_and_composes_with_parent() {
         has_belongs_to,
         "--parent still writes the belongs-to link alongside --from"
     );
+}
+
+#[test]
+fn add_from_zero_one_n_order_and_duplicate_rejection() {
+    let _env = setup();
+    let a = create_strand("source a");
+    let b = create_strand("source b");
+    let path = ensure_journal().unwrap();
+    let events = read_events_lossy(&path).0;
+    let strands = projection::project_strands(&events, true);
+    let a_entry = strands
+        .iter()
+        .find(|s| s.id == a)
+        .and_then(|s| s.log.last())
+        .and_then(|e| e.entry_id.clone())
+        .expect("a entry");
+    let b_entry = strands
+        .iter()
+        .find(|s| s.id == b)
+        .and_then(|s| s.log.last())
+        .and_then(|e| e.entry_id.clone())
+        .expect("b entry");
+
+    // 0 refs
+    cmd_add_with_parent_and_slug(
+        Some("zero refs line"),
+        false,
+        None,
+        false,
+        None,
+        &[],
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let zero = find_log_refs(&path, "zero refs line");
+    assert!(zero.is_empty(), "0 --from → empty refs: {zero:?}");
+
+    // 1 ref (compat)
+    cmd_add_with_parent_and_slug(
+        Some("one ref line"),
+        false,
+        None,
+        false,
+        None,
+        &[&a],
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(find_log_refs(&path, "one ref line"), vec![a_entry.clone()]);
+
+    // N refs, authored order preserved
+    cmd_add_with_parent_and_slug(
+        Some("n refs line"),
+        false,
+        None,
+        false,
+        None,
+        &[&b, &a],
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        find_log_refs(&path, "n refs line"),
+        vec![b_entry.clone(), a_entry.clone()],
+        "refs keep authored order"
+    );
+
+    // reverse order is a different identity payload
+    cmd_add_with_parent_and_slug(
+        Some("n refs reverse"),
+        false,
+        None,
+        false,
+        None,
+        &[&a, &b],
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        find_log_refs(&path, "n refs reverse"),
+        vec![a_entry.clone(), b_entry.clone()]
+    );
+
+    // duplicate resolved target rejected
+    let dup = cmd_add_with_parent_and_slug(
+        Some("dup refs"),
+        false,
+        None,
+        false,
+        None,
+        &[&a, &a],
+        None,
+        None,
+        None,
+    );
+    let err = dup.unwrap_err();
+    assert!(err.contains("duplicate"), "{err}");
+    assert!(err.contains("--from"), "{err}");
+}
+
+#[test]
+fn add_parent_plus_multi_from_batch_is_atomic_visible() {
+    let _env = setup();
+    let parent = create_strand("parent line");
+    let evidence = create_strand("evidence line");
+    let path = ensure_journal().unwrap();
+    let events = read_events_lossy(&path).0;
+    let evidence_entry = projection::project_strands(&events, true)
+        .iter()
+        .find(|s| s.id == evidence)
+        .and_then(|s| s.log.last())
+        .and_then(|e| e.entry_id.clone())
+        .expect("evidence entry");
+    let parent_entry = projection::project_strands(&events, true)
+        .iter()
+        .find(|s| s.id == parent)
+        .and_then(|s| s.log.last())
+        .and_then(|e| e.entry_id.clone())
+        .expect("parent entry");
+
+    cmd_add_with_parent_and_slug(
+        Some("child with parent and multi refs"),
+        false,
+        None,
+        false,
+        Some(&parent),
+        &[&evidence, &parent],
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let (after, _) = read_events_lossy(&path);
+    let mut found_first = None;
+    let mut found_link = false;
+    for (_, event) in &after {
+        match event {
+            Event::LogAppended {
+                id,
+                content,
+                refs,
+                effect: None,
+                ..
+            } if content == "child with parent and multi refs" => {
+                assert_eq!(
+                    refs,
+                    &vec![evidence_entry.clone(), parent_entry.clone()],
+                    "first entry carries both refs in order"
+                );
+                found_first = Some(id.clone());
+            }
+            Event::LogAppended {
+                id,
+                effect: Some(event::EntryEffect::Link { target, edge_type }),
+                ..
+            } if found_first.as_ref() == Some(id)
+                && target == &parent
+                && edge_type == "belongs-to" =>
+            {
+                found_link = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(found_first.is_some(), "child first entry visible");
+    assert!(found_link, "belongs-to visible in same successful command");
+}
+
+#[test]
+fn append_why_zero_one_n_and_new() {
+    let _env = setup();
+    let target = create_strand("append target");
+    let r1 = create_strand("rationale one");
+    let r2 = create_strand("rationale two");
+    let path = ensure_journal().unwrap();
+    let events = read_events_lossy(&path).0;
+    let strands = projection::project_strands(&events, true);
+    let r1_entry = strands
+        .iter()
+        .find(|s| s.id == r1)
+        .and_then(|s| s.log.last())
+        .and_then(|e| e.entry_id.clone())
+        .expect("r1");
+    let r2_entry = strands
+        .iter()
+        .find(|s| s.id == r2)
+        .and_then(|s| s.log.last())
+        .and_then(|e| e.entry_id.clone())
+        .expect("r2");
+
+    // 0 why
+    execute_append(AppendRequest {
+        content: Some("plain note"),
+        legacy_id: None,
+        new: false,
+        stdin: false,
+        file: None,
+        explicit_id: Some(&target),
+        provenance_raw: None,
+        seen_offset: None,
+        why: &[],
+        allow_selection: false,
+    })
+    .unwrap();
+    assert!(find_log_refs(&path, "plain note").is_empty());
+
+    // N why on existing
+    execute_append(AppendRequest {
+        content: Some("[decision] multi why"),
+        legacy_id: None,
+        new: false,
+        stdin: false,
+        file: None,
+        explicit_id: Some(&target),
+        provenance_raw: None,
+        seen_offset: None,
+        why: &[&r1, &r2],
+        allow_selection: false,
+    })
+    .unwrap();
+    assert_eq!(
+        find_log_refs(&path, "[decision] multi why"),
+        vec![r1_entry.clone(), r2_entry.clone()]
+    );
+
+    // append --new honors why
+    execute_append(AppendRequest {
+        content: Some("brand new with why"),
+        legacy_id: None,
+        new: true,
+        stdin: false,
+        file: None,
+        explicit_id: None,
+        provenance_raw: None,
+        seen_offset: None,
+        why: &[&r2],
+        allow_selection: false,
+    })
+    .unwrap();
+    assert_eq!(
+        find_log_refs(&path, "brand new with why"),
+        vec![r2_entry.clone()]
+    );
+
+    let dup = execute_append(AppendRequest {
+        content: Some("dup why"),
+        legacy_id: None,
+        new: false,
+        stdin: false,
+        file: None,
+        explicit_id: Some(&target),
+        provenance_raw: None,
+        seen_offset: None,
+        why: &[&r1, &r1],
+        allow_selection: false,
+    });
+    assert!(dup.unwrap_err().contains("duplicate"));
+}
+
+fn find_log_refs(path: &std::path::PathBuf, content: &str) -> Vec<String> {
+    let (events, _) = read_events_lossy(path);
+    events
+        .into_iter()
+        .find_map(|(_, event)| match event {
+            Event::LogAppended {
+                content: c, refs, ..
+            } if c == content => Some(refs),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("log entry with content {content:?} not found"))
 }
 
 #[test]
@@ -1663,7 +1942,7 @@ fn add_slug_persists_and_rejects_hex_or_duplicate() {
         None,
         false,
         None,
-        None,
+        &[],
         Some("human-1"),
         None,
         None,
@@ -1679,7 +1958,7 @@ fn add_slug_persists_and_rejects_hex_or_duplicate() {
         None,
         false,
         None,
-        None,
+        &[],
         Some("deadbeef"),
         None,
         None,
@@ -1692,7 +1971,7 @@ fn add_slug_persists_and_rejects_hex_or_duplicate() {
         None,
         false,
         None,
-        None,
+        &[],
         Some("human-1"),
         None,
         None,
@@ -1751,7 +2030,7 @@ fn rationale_strand_ambiguity_does_not_fallback_to_entry_hash() {
         None,
         false,
         None,
-        Some("aa"),
+        &["aa"],
         None,
         None,
         None,

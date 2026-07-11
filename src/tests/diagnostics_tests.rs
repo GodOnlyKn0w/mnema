@@ -145,7 +145,7 @@ fn append_explicit_closed_strand_succeeds_and_json_carries_w059() {
         explicit_id: Some(&id),
         provenance_raw: None,
         seen_offset: None,
-        why: None,
+        why: &[],
         allow_selection: false,
     })
     .expect("append to explicitly closed strand must still exit 0");
@@ -222,7 +222,7 @@ fn append_open_strand_json_closed_target_is_null() {
         explicit_id: Some(&id),
         provenance_raw: None,
         seen_offset: None,
-        why: None,
+        why: &[],
         allow_selection: false,
     })
     .expect("append to open strand must succeed");
