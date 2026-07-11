@@ -1,0 +1,17 @@
+{
+  "schema": "mnema-v2-v3-compat-fixture/v1",
+  "source_sha256": "333778a5c86369c6112fad4acbd34748377689641ab850f86f6d99979e35efe9",
+  "migration_id": "2a6e4c149ebb949b8048354674bc98cbecaee8ecdceb50b9981b14bd13c4107a",
+  "target_sha256": "a1418ed4f7ef55ec1cb8943c70564228a3e420c5af5a3b3dfbe6346c53055649",
+  "source_event_count": 7,
+  "target_record_count": 6,
+  "strand_count": 2,
+  "entry_count": 5,
+  "unresolved_ref_count": 0,
+  "old_root_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+  "old_child_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2",
+  "new_root_id": "a99c8dffe6568b1f1754f0611f96acb81bd701ae4738a0531e3d86670ca2f894",
+  "new_child_id": "5c763081bb36cbf61bf6cbde94d5e0ea9e2a464f6e29b9abfe57807eab700926",
+  "new_root_entry_id": "a99c8dffe6568b1f1754f0611f96acb81bd701ae4738a0531e3d86670ca2f894",
+  "new_child_decision_id": "3e239efdba143b27516efa4740558a2fdf4d2099e80f525d6abe26ae72c53f81"
+}

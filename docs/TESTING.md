@@ -81,8 +81,8 @@ event plus the test report.
 ## Planned order
 
 1. Extend the executable behavior driver from structural assertions to reviewed snapshots.
-2. Add historical fixture conventions and a first v2-to-v3 compatibility set.
-3. Add reference-model/differential generation for replay and incremental reads.
+2. Extend the first immutable v2→v3 fixture with typed-unlink and retired-why versions when those historical shapes change.
+3. Expand the deterministic scope/replay generator beyond the bounded CI seeds when a nightly lane exists.
 4. Extend the initial multi-process parent+refs case with test-only persistence failpoints.
 5. Vendor or pin `rere.py` only after normalization policy has reviewed examples.
 6. Add scheduled fuzz, large-journal, and async-exec-hosted suites.

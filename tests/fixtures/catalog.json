@@ -1,0 +1,20 @@
+{
+  "schema": "mnema.fixture-catalog/v1",
+  "fixtures": [
+    {
+      "id": "v2-compat-v1",
+      "path": "v2/compat-v1",
+      "source_schema": "v2",
+      "immutable": true,
+      "claims": [
+        "source_sha256",
+        "migration_id",
+        "target_sha256",
+        "strand_identity_map",
+        "belongs_to",
+        "ordered_entry_ref",
+        "closed_done"
+      ]
+    }
+  ]
+}
