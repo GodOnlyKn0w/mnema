@@ -7,8 +7,8 @@
 use crate::diagnostics;
 use crate::event::{self, Event};
 use crate::journal::{
-    EntryTransactionPlan, JournalEntryAppendRequest, append_entry_to_strand_checked, append_events,
-    ensure_journal, read_events_lossy, read_events_strict, transact_entry,
+    EntryTransactionPlan, JournalEntryAppendRequest, append_entry_to_strand_checked,
+    ensure_journal, read_events_strict, transact_entry, transact_events,
 };
 use crate::markers::{
     is_closing_annotation_marker, is_known_marker_str, suggest_marker, validate_lifecycle_marker,
@@ -279,82 +279,70 @@ pub(crate) fn cmd_add_with_parent_and_slug(
     });
 
     let provenance = parse_provenance_arg(provenance_raw)?;
-    // --parent (belongs-to) and --from (source refs) are orthogonal: a child
-    // can carry either, both, or neither (CORPUS §6 归属与来源正交). Refs are
-    // 0..N authored via repeatable --from; order is preserved.
-    let needs_events = parent.is_some() || !from.is_empty() || slug.is_some();
-    let events = if needs_events {
-        let path = ensure_journal()?;
-        read_events_lossy(&path).0
-    } else {
-        Vec::new()
-    };
-    let slug = if let Some(raw_slug) = slug {
-        let trimmed = raw_slug.trim();
-        crate::reference::validate_slug(trimmed)?;
-        let all_strands = projection::project_strands(&events, true);
-        if all_strands
-            .iter()
-            .any(|s| s.slug.as_deref() == Some(trimmed))
-        {
-            return Err(format!("slug {} already exists", trimmed));
-        }
-        Some(trimmed.to_string())
-    } else {
-        None
-    };
-
-    let parent_id = if let Some(parent_raw) = parent {
-        let parent_raw = parent_raw.trim();
-        if parent_raw.is_empty() {
-            return Err("--parent cannot be empty".to_string());
-        }
-        Some(
-            crate::reference::resolve_strand_with_selection(
-                &projection::project_strands(&events, true),
-                parent_raw,
-                !format_json,
-                events.last().map(|(offset, _)| *offset).unwrap_or(0),
+    // Resolve parent, slug and all refs from the same locked snapshot that is
+    // used to append genesis + first entry + belongs-to. Either the whole
+    // creation becomes visible or no record is written.
+    let (appended, (provisional_id, parent_id, from_refs, slug)) = transact_events(|events| {
+        let all_strands = projection::project_strands(events, true);
+        let slug = if let Some(raw_slug) = slug {
+            let trimmed = raw_slug.trim();
+            crate::reference::validate_slug(trimmed)?;
+            if all_strands
+                .iter()
+                .any(|s| s.slug.as_deref() == Some(trimmed))
+            {
+                return Err(format!("slug {} already exists", trimmed));
+            }
+            Some(trimmed.to_string())
+        } else {
+            None
+        };
+        let parent_id = if let Some(parent_raw) = parent {
+            let parent_raw = parent_raw.trim();
+            if parent_raw.is_empty() {
+                return Err("--parent cannot be empty".to_string());
+            }
+            Some(
+                crate::reference::resolve_strand_with_selection(
+                    &all_strands,
+                    parent_raw,
+                    !format_json,
+                    events.last().map(|(offset, _)| *offset).unwrap_or(0),
+                )
+                .map_err(|e| format!("parent {}", e))?,
             )
-            .map_err(|e| format!("parent {}", e))?,
-        )
-    } else {
-        None
-    };
-    let from_refs = if from.is_empty() {
-        Vec::new()
-    } else {
-        let all_strands = projection::project_strands(&events, true);
-        resolve_rationale_refs(&events, &all_strands, from, !format_json, "--from")?
-    };
-
-    let (created, appended) = event::make_strand_created_with_refs_and_slug(
-        &stored,
-        resolved_type,
-        from_refs,
-        None,
-        provenance.clone(),
-        slug.as_deref(),
-    );
-    let provisional_id = created
-        .strand_id()
-        .expect("strand-scoped event")
-        .to_string();
-    let provisional_entry_id = match &appended {
-        Event::LogAppended { entry_id, .. } => entry_id.clone(),
-        _ => None,
-    };
-    let mut events_to_append = vec![created, appended];
-    if let Some(parent_id) = &parent_id {
-        events_to_append.push(event::make_edge_linked(
-            &provisional_id,
-            provisional_entry_id.as_deref(),
-            parent_id,
-            Some("belongs-to"),
+        } else {
+            None
+        };
+        let from_refs = resolve_rationale_refs(events, &all_strands, from, !format_json, "--ref")?;
+        let (created, first_entry) = event::make_strand_created_with_refs_and_slug(
+            &stored,
+            resolved_type,
+            from_refs.clone(),
+            None,
             provenance.clone(),
-        ));
-    }
-    let appended = append_events(&events_to_append)?;
+            slug.as_deref(),
+        );
+        let provisional_id = created
+            .strand_id()
+            .expect("strand-scoped event")
+            .to_string();
+        let provisional_entry_id = match &first_entry {
+            Event::LogAppended { entry_id, .. } => entry_id.clone(),
+            _ => None,
+        };
+        let mut batch = vec![created, first_entry];
+        if let Some(parent_id) = &parent_id {
+            batch.push(event::make_edge_linked(
+                &provisional_id,
+                provisional_entry_id.as_deref(),
+                parent_id,
+                Some("belongs-to"),
+                provenance.clone(),
+            ));
+        }
+        Ok((batch, (provisional_id, parent_id, from_refs, slug)))
+    })?;
     let id = appended
         .strand_ids
         .get(&provisional_id)
@@ -368,6 +356,7 @@ pub(crate) fn cmd_add_with_parent_and_slug(
             slug: slug.clone(),
             parent_id: parent_id.clone(),
             edge_type: parent_id.as_ref().map(|_| "belongs-to"),
+            refs: from_refs.clone(),
             result: strand_card_fresh(&id),
         };
         println!("{}", serde_json::to_string(&output).unwrap());
@@ -426,6 +415,7 @@ pub(crate) struct AppendOutcome {
     pub(crate) strand_id: String,
     pub(crate) entry_id: Option<String>,
     pub(crate) stored_content: String,
+    pub(crate) refs: Vec<String>,
     pub(crate) provenance: Option<serde_json::Value>,
     pub(crate) seen_offset: Option<usize>,
     pub(crate) seen_warning: Option<diagnostics::SeenOffsetWarning>,
@@ -570,38 +560,36 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
     let provenance = parse_provenance_arg(req.provenance_raw)?;
 
     if req.new {
-        // Resolve --why under the same rules as append-to-existing; 0..N refs
-        // land on the first entry (CORPUS §7.2 append supports 0..N refs).
-        let why_refs = if req.why.is_empty() {
-            Vec::new()
-        } else {
-            let path = ensure_journal()?;
-            let events = read_events_lossy(&path).0;
-            let all_strands = projection::project_strands(&events, true);
-            resolve_rationale_refs(
-                &events,
-                &all_strands,
-                req.why,
-                req.allow_selection,
-                "--why",
-            )?
-        };
-        let (created, appended) = event::make_strand_created_with_refs(
-            &stored,
-            Some("session"),
-            why_refs,
-            None,
-            provenance.clone(),
-        );
-        let provisional_id = created
-            .strand_id()
-            .expect("strand-scoped event")
-            .to_string();
-        let provisional_entry_id = match &appended {
-            Event::LogAppended { entry_id, .. } => entry_id.clone(),
-            _ => None,
-        };
-        let appended = append_events(&[created, appended])?;
+        let (appended, (provisional_id, provisional_entry_id, why_refs)) =
+            transact_events(|events| {
+                let all_strands = projection::project_strands(&events, true);
+                let why_refs = resolve_rationale_refs(
+                    events,
+                    &all_strands,
+                    req.why,
+                    req.allow_selection,
+                    "--ref",
+                )?;
+                let (created, first_entry) = event::make_strand_created_with_refs(
+                    &stored,
+                    Some("session"),
+                    why_refs.clone(),
+                    None,
+                    provenance.clone(),
+                );
+                let provisional_id = created
+                    .strand_id()
+                    .expect("strand-scoped event")
+                    .to_string();
+                let provisional_entry_id = match &first_entry {
+                    Event::LogAppended { entry_id, .. } => entry_id.clone(),
+                    _ => None,
+                };
+                Ok((
+                    vec![created, first_entry],
+                    (provisional_id, provisional_entry_id, why_refs),
+                ))
+            })?;
         let new_id = appended
             .strand_ids
             .get(&provisional_id)
@@ -614,6 +602,7 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
             strand_id: new_id.clone(),
             entry_id,
             stored_content: stored,
+            refs: why_refs,
             provenance: provenance.clone(),
             seen_offset: req.seen_offset,
             seen_warning: None,
@@ -671,13 +660,9 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
             req.seen_offset,
             target_strand.last_offset(),
         );
-        let refs = resolve_rationale_refs(
-            events,
-            &all_strands,
-            req.why,
-            req.allow_selection,
-            "--why",
-        )?;
+        let refs =
+            resolve_rationale_refs(events, &all_strands, req.why, req.allow_selection, "--ref")?;
+        let outcome_refs = refs.clone();
         let request = JournalEntryAppendRequest {
             strand_id: full_id.clone(),
             content: stored.clone(),
@@ -696,10 +681,11 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
                 active_count,
                 seen_warning,
                 closed_target_warning,
+                outcome_refs,
             ),
         })
     })?;
-    let (full_id, resolved_by, active_count, seen_warning, closed_target_warning) =
+    let (full_id, resolved_by, active_count, seen_warning, closed_target_warning, outcome_refs) =
         transaction.value;
     let entry_id = transaction
         .append
@@ -715,6 +701,7 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         strand_id: full_id,
         entry_id,
         stored_content: stored,
+        refs: outcome_refs,
         provenance,
         seen_offset: req.seen_offset,
         seen_warning,
@@ -796,6 +783,7 @@ fn render_append_outcome(outcome: &AppendOutcome, format: Option<&str>) {
             entry_id: &outcome.entry_id,
             entry_id_prefix: entry_id_prefix(&outcome.entry_id),
             content_preview: outcome.stored_content.chars().take(120).collect::<String>(),
+            refs: &outcome.refs,
             provenance: &outcome.provenance,
             seen_offset: outcome.seen_offset,
             seen_gap: outcome.seen_warning.as_ref().map(|w| w.seen_gap),

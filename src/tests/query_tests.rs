@@ -2066,7 +2066,7 @@ fn orient_id_scopes_menu_to_subtree() {
     assert_eq!(
         plan.output.since_command,
         format!(
-            "mnema timeline --since-offset {} --under {}",
+            "mnema timeline --since-offset {} --under {} --scope-at-event",
             plan.output.max_offset, parent
         )
     );
@@ -2175,6 +2175,7 @@ fn timeline_under_excludes_out_of_scope_strands() {
             None,
             None,
             Some(&parent),
+            false,
         )
         .is_ok()
     );
@@ -2210,8 +2211,15 @@ fn timeline_under_since_covers_authored_and_effect_events() {
     cmd_reopen(&child, None, false).unwrap();
     cmd_hide(&child, Some("noise"), false, None).unwrap();
     cmd_unhide(&child, false).unwrap();
-    cmd_checkpoint(Some(&child), "pause before next step", None, false, false, None)
-        .expect("checkpoint");
+    cmd_checkpoint(
+        Some(&child),
+        "pause before next step",
+        None,
+        false,
+        false,
+        None,
+    )
+    .expect("checkpoint");
     cmd_link(&grand, &child, Some("belongs-to"), false, None).unwrap();
     cmd_unlink(&grand, &child, Some("belongs-to"), false, None).unwrap();
 
@@ -2225,6 +2233,7 @@ fn timeline_under_since_covers_authored_and_effect_events() {
         None,
         None,
         Some(&parent),
+        true,
         false,
     )
     .expect("timeline --under --since-offset");
@@ -2341,6 +2350,7 @@ fn timeline_under_since_event_time_keeps_leave_window() {
         None,
         None,
         Some(&parent),
+        true,
         false,
     )
     .expect("incremental under+since");
@@ -2355,7 +2365,9 @@ fn timeline_under_since_event_time_keeps_leave_window() {
         })
         .collect();
     assert!(
-        contents.iter().any(|c| c.contains("unlink") || c.contains("Unlink")),
+        contents
+            .iter()
+            .any(|c| c.contains("unlink") || c.contains("Unlink")),
         "leave unlink must appear under event-time scope; got {contents:?}"
     );
     assert!(
@@ -2374,10 +2386,13 @@ fn timeline_under_since_event_time_keeps_leave_window() {
         None,
         Some(&parent),
         false,
+        false,
     )
     .expect("browse under");
     assert!(
-        browse.iter().all(|e| e.strand_id == parent || e.strand_id == child),
+        browse
+            .iter()
+            .all(|e| e.strand_id == parent || e.strand_id == child),
         "browse under may still include historical rows of current members only"
     );
     // Child is no longer a member, so browse must not list child at all.
@@ -2422,6 +2437,7 @@ fn timeline_under_since_event_time_excludes_prejoin() {
         None,
         None,
         Some(&parent),
+        true,
         false,
     )
     .expect("incremental under+since");
@@ -2434,11 +2450,15 @@ fn timeline_under_since_event_time_excludes_prejoin() {
         })
         .collect();
     assert!(
-        !contents.iter().any(|c| c.contains("prejoin secret after N")),
+        !contents
+            .iter()
+            .any(|c| c.contains("prejoin secret after N")),
         "pre-join authored work must not leak via late join; got {contents:?}"
     );
     assert!(
-        contents.iter().any(|c| c.contains("link") || c.contains("belongs-to")),
+        contents
+            .iter()
+            .any(|c| c.contains("link") || c.contains("belongs-to")),
         "join link itself must appear; got {contents:?}"
     );
 }

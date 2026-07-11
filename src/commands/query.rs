@@ -451,6 +451,7 @@ pub(crate) fn timeline_entries(
     strand: Option<&str>,
     links: Option<&str>,
     under: Option<&str>,
+    scope_at_event: bool,
     allow_selection: bool,
 ) -> Result<Vec<projection::TimelineEntry>, String> {
     let mut entries = projection::project_timeline(events);
@@ -499,12 +500,9 @@ pub(crate) fn timeline_entries(
         allow_selection,
         current_max_offset,
     )?;
-    // Incremental catch-up (`--under` + temporal lower bound) uses event-time
-    // SubtreeScope membership so join/leave and in-window facts are not lost
-    // or leaked by folding membership only at query time. Browse-only
-    // `--under` (no since-*) keeps query-time current-member filtering.
-    let use_event_time_scope =
-        !scope.is_journal() && (since_offset.is_some() || since_ts.is_some());
+    // Event-time SubtreeScope is explicit: it captures join/leave and in-scope
+    // facts without silently changing `--under` when a cursor is added.
+    let use_event_time_scope = !scope.is_journal() && scope_at_event;
     if use_event_time_scope {
         let root_id = scope
             .root_id()
@@ -529,6 +527,7 @@ pub(crate) fn cmd_timeline(
     limit: Option<usize>,
     tail: Option<usize>,
     under: Option<&str>,
+    scope_at_event: bool,
 ) -> Result<(), String> {
     let path = ensure_journal()?;
     let (events, _skipped) = read_events_lossy(&path);
@@ -542,6 +541,7 @@ pub(crate) fn cmd_timeline(
         strand,
         links,
         under,
+        scope_at_event,
         allow_selection,
     )?;
 
@@ -734,7 +734,7 @@ pub(crate) fn orient_plan_at(
     let mut output = output::OrientOutput::from((&view, strands.as_slice()));
     if let Some(root_id) = scope.root_id() {
         output.since_command = format!(
-            "mnema timeline --since-offset {} --under {}",
+            "mnema timeline --since-offset {} --under {} --scope-at-event",
             view.max_offset, root_id
         );
         output.stale_command = format!("mnema list --stale 2h --under {}", root_id);

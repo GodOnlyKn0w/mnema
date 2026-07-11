@@ -127,8 +127,8 @@ Rules:
 Examples:
   echo \"start a new line of work\" | mnema add
   echo \"child line of work\" | mnema add --parent <PARENT>
-  echo \"derived matter\" | mnema add --parent <PARENT> --from <REF>
-  echo \"derived matter\" | mnema add --parent <PARENT> --from <R1> --from <R2>")]
+  echo \"derived matter\" | mnema add --parent <PARENT> --ref <REF>
+  echo \"derived matter\" | mnema add --parent <PARENT> --ref <R1> --ref <R2>")]
     Add {
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -141,7 +141,12 @@ Examples:
         /// Repeatable 0..N; authored order is preserved and participates in
         /// the first entry's identity. Orthogonal to --parent: derivation may
         /// carry either, both, or neither.
-        #[arg(long = "from", value_name = "REF", action = clap::ArgAction::Append)]
+        #[arg(
+            long = "ref",
+            visible_alias = "from",
+            value_name = "REF",
+            action = clap::ArgAction::Append
+        )]
         from: Vec<String>,
         /// Human alias for the new strand. Must be unique and not pure hex.
         #[arg(long = "slug", value_name = "SLUG")]
@@ -179,7 +184,7 @@ Examples:
   echo \"long note\" | mnema append --id 0000019dd34b
   echo \"new strand title\" | mnema append --new
   echo \"[metric] win_count=26\" | mnema append --id 0000019dd34b --provenance '{\"producer\":\"pi\",\"model\":\"gpt-5\"}'
-  echo \"[decision] ship it\" | mnema append --id 0000019dd34b --why <R1> --why <R2>
+  echo \"[decision] ship it\" | mnema append --id 0000019dd34b --ref <R1> --ref <R2>
 
 Markers (optional bracket prefix on the first line):
   Marker vocabulary: mnema explain markers
@@ -216,7 +221,12 @@ Provenance:
         /// latest entry hash — "its current conclusion") or an entry-hash
         /// prefix (pins that exact entry). Repeatable 0..N; authored order
         /// is preserved and participates in entry identity.
-        #[arg(long = "why", value_name = "REF", action = clap::ArgAction::Append)]
+        #[arg(
+            long = "ref",
+            visible_alias = "why",
+            value_name = "REF",
+            action = clap::ArgAction::Append
+        )]
         why: Vec<String>,
     },
     /// Record context before an irreversible or state-closing action
@@ -719,6 +729,9 @@ Failure never activates. Repeat --apply is resume/noop when artifacts match.\n\
         /// Restrict to events from strands in SubtreeScope(ID) (belongs-to descendants + root)
         #[arg(long = "under", value_name = "ID", conflicts_with_all = ["strand", "links"])]
         under: Option<String>,
+        /// Evaluate --under membership at each event (captures joins/leaves during incremental reads)
+        #[arg(long, requires = "under")]
+        scope_at_event: bool,
         /// Maximum events to return (from the start of the filtered window)
         #[arg(long, value_name = "N", conflicts_with = "tail")]
         limit: Option<usize>,
@@ -1161,13 +1174,14 @@ fn stdin_command_flag_takes_value(command: &str, flag: &str) -> bool {
                 | "--parent"
                 | "--belongs-to"
                 | "--from"
+                | "--ref"
                 | "--slug"
                 | "--type"
                 | "--provenance"
         ),
         "append" => matches!(
             flag,
-            "--format" | "-f" | "--id" | "--provenance" | "--seen-offset" | "--why"
+            "--format" | "-f" | "--id" | "--provenance" | "--seen-offset" | "--why" | "--ref"
         ),
         _ => false,
     }
@@ -1554,6 +1568,7 @@ fn run(command: &Commands) -> Result<(), String> {
             limit,
             tail,
             under,
+            scope_at_event,
         } => cmd_timeline(
             *since_offset,
             since_ts.as_deref(),
@@ -1565,6 +1580,7 @@ fn run(command: &Commands) -> Result<(), String> {
             *limit,
             *tail,
             under.as_deref(),
+            *scope_at_event,
         ),
         Commands::Explain { code, format, json } => {
             let is_json = *json || format.as_deref() == Some("json");

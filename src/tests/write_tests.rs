@@ -1638,7 +1638,7 @@ fn add_from_zero_one_n_order_and_duplicate_rejection() {
     );
     let err = dup.unwrap_err();
     assert!(err.contains("duplicate"), "{err}");
-    assert!(err.contains("--from"), "{err}");
+    assert!(err.contains("--ref"), "{err}");
 }
 
 #[test]

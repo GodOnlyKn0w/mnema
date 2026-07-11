@@ -408,6 +408,7 @@ pub(crate) struct AddOutput<'a> {
     pub(crate) slug: Option<String>,
     pub(crate) parent_id: Option<String>,
     pub(crate) edge_type: Option<&'static str>,
+    pub(crate) refs: Vec<String>,
     pub(crate) result: Option<OrientStrand>,
 }
 
@@ -461,6 +462,7 @@ pub(crate) struct AppendOutput<'a> {
     pub(crate) entry_id: &'a Option<String>,
     pub(crate) entry_id_prefix: Option<String>,
     pub(crate) content_preview: String,
+    pub(crate) refs: &'a [String],
     pub(crate) provenance: &'a Option<serde_json::Value>,
     pub(crate) seen_offset: Option<usize>,
     pub(crate) seen_gap: Option<usize>,

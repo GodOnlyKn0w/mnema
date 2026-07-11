@@ -484,15 +484,60 @@ pub(crate) struct JournalBatchAppendOutcome {
 }
 
 pub(crate) fn append_events(events: &[Event]) -> Result<JournalBatchAppendOutcome, String> {
+    let (outcome, ()) = transact_events(|_| Ok((events.to_vec(), ())))?;
+    Ok(outcome)
+}
+
+/// Plan and append a batch from one event snapshot under one exclusive lock.
+/// Resolution performed by `plan` and visibility of the resulting records are
+/// therefore one transaction for both v2 and v3 journals.
+pub(crate) fn transact_events<T>(
+    plan: impl FnOnce(&[(usize, Event)]) -> Result<(Vec<Event>, T), String>,
+) -> Result<(JournalBatchAppendOutcome, T), String> {
     if let ActiveJournal::V3 {
         journal_id, path, ..
     } = resolve_active_journal()?
     {
-        return append_events_as_v3(&path, &journal_id, events);
+        let lock_path = journal_lock_path()?;
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| format!("cannot open journal.lock: {e}"))?;
+        fs2::FileExt::lock_exclusive(&lock_file)
+            .map_err(|e| format!("cannot acquire journal lock: {e}"))?;
+        let result = (|| {
+            let validated = crate::journal_v3::read_validated_journal(&path, &journal_id)?;
+            let current: Vec<(usize, Event)> =
+                crate::cutover_v3::records_to_v2_events(&validated.records)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, event)| (index + 1, event))
+                    .collect();
+            let (events, value) = plan(&current)?;
+            let outcome =
+                append_events_to_validated_v3_locked(&path, &journal_id, &events, None, validated)?;
+            Ok((outcome, value))
+        })();
+        let _ = fs2::FileExt::unlock(&lock_file);
+        return result;
     }
     with_journal_write_lock(|journal| {
+        let path = ensure_journal()?;
+        let read = read_journal_lossy(&path);
+        if let Some(error) = read.read_error {
+            return Err(error);
+        }
+        if !read.diagnostics.is_empty() {
+            return Err(format!(
+                "cannot append: journal has {} parse error(s); run doctor first",
+                read.diagnostics.len()
+            ));
+        }
+        let (events, value) = plan(&read.events)?;
         let mut outcome = JournalBatchAppendOutcome::default();
-        for event in events {
+        for event in &events {
             append_event_unlocked(journal, event)?;
             if let Event::StrandCreated { id, .. } = event {
                 outcome.strand_ids.insert(id.clone(), id.clone());
@@ -505,46 +550,14 @@ pub(crate) fn append_events(events: &[Event]) -> Result<JournalBatchAppendOutcom
                 outcome.entry_ids.insert(entry_id.clone(), entry_id.clone());
             }
         }
-        Ok(outcome)
+        Ok((outcome, value))
     })
-}
-
-/// Translate a batch of v2-shaped factory events into v3 records and append
-/// the domain records plus a final anchor under one exclusive lock.
-fn append_events_as_v3(
-    path: &std::path::Path,
-    journal_id: &str,
-    events: &[Event],
-) -> Result<JournalBatchAppendOutcome, String> {
-    let lock_path = journal_lock_path()?;
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|e| format!("cannot open journal.lock: {e}"))?;
-    fs2::FileExt::lock_exclusive(&lock_file)
-        .map_err(|e| format!("cannot acquire journal lock: {e}"))?;
-
-    let result = append_events_as_v3_locked(path, journal_id, events, None);
-    let _ = fs2::FileExt::unlock(&lock_file);
-    result
 }
 
 #[derive(Clone)]
 struct PendingGenesis {
     slug: Option<String>,
     strand_type: Option<String>,
-}
-
-fn append_events_as_v3_locked(
-    path: &std::path::Path,
-    journal_id: &str,
-    events: &[Event],
-    entry_override: Option<(String, serde_json::Value)>,
-) -> Result<JournalBatchAppendOutcome, String> {
-    let validated = crate::journal_v3::read_validated_journal(path, journal_id)?;
-    append_events_to_validated_v3_locked(path, journal_id, events, entry_override, validated)
 }
 
 fn append_events_to_validated_v3_locked(

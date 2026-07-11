@@ -1207,7 +1207,9 @@ struct BelongInst {
     live: bool,
 }
 
-fn belongs_children_map(insts: &[BelongInst]) -> std::collections::HashMap<String, HashSet<String>> {
+fn belongs_children_map(
+    insts: &[BelongInst],
+) -> std::collections::HashMap<String, HashSet<String>> {
     let mut children: std::collections::HashMap<String, HashSet<String>> =
         std::collections::HashMap::new();
     for inst in insts.iter().filter(|i| i.live) {
@@ -1217,42 +1219,6 @@ fn belongs_children_map(insts: &[BelongInst]) -> std::collections::HashMap<Strin
             .insert(inst.source.clone());
     }
     children
-}
-
-fn strand_in_belongs_subtree(
-    id: &str,
-    root_id: &str,
-    created: &HashSet<String>,
-    children: &std::collections::HashMap<String, HashSet<String>>,
-) -> bool {
-    if !created.contains(root_id) {
-        return false;
-    }
-    if id == root_id {
-        return true;
-    }
-    if !created.contains(id) {
-        return false;
-    }
-    let mut stack = vec![root_id.to_string()];
-    let mut seen = HashSet::new();
-    seen.insert(root_id.to_string());
-    while let Some(cur) = stack.pop() {
-        if let Some(kids) = children.get(&cur) {
-            for kid in kids {
-                if !seen.insert(kid.clone()) {
-                    continue;
-                }
-                if kid == id {
-                    return true;
-                }
-                if created.contains(kid) {
-                    stack.push(kid.clone());
-                }
-            }
-        }
-    }
-    false
 }
 
 fn apply_belongs_event(insts: &mut Vec<BelongInst>, created: &mut HashSet<String>, event: &Event) {
@@ -1357,15 +1323,13 @@ fn apply_belongs_event(insts: &mut Vec<BelongInst>, created: &mut HashSet<String
 /// and excludes pre-join / post-leave activity that query-time membership
 /// would incorrectly include or drop when composing `--under` with a cursor.
 ///
-/// Used by `timeline --under X` when a temporal lower bound is also set so
-/// incremental catch-up can express every in-scope fact after offset N.
-pub fn event_time_subtree_offsets(
-    events: &[(usize, Event)],
-    root_id: &str,
-) -> HashSet<usize> {
+/// Used by `timeline --under X --scope-at-event`; a temporal lower bound may
+/// then select the incremental suffix without changing scope semantics.
+pub fn event_time_subtree_offsets(events: &[(usize, Event)], root_id: &str) -> HashSet<usize> {
     let mut created: HashSet<String> = HashSet::new();
     let mut insts: Vec<BelongInst> = Vec::new();
     let mut out: HashSet<usize> = HashSet::new();
+    let mut in_scope: HashSet<String> = HashSet::new();
 
     for (offset, event) in events {
         if matches!(event, Event::JournalAnchored { .. }) {
@@ -1379,14 +1343,54 @@ pub fn event_time_subtree_offsets(
             },
         };
 
-        let children_before = belongs_children_map(&insts);
-        let before =
-            strand_in_belongs_subtree(strand_id, root_id, &created, &children_before);
+        let before = in_scope.contains(strand_id);
+
+        let changes_membership = matches!(event, Event::StrandCreated { .. })
+            || matches!(
+                event,
+                Event::LogAppended {
+                    effect: Some(EntryEffect::Link { edge_type, .. }),
+                    ..
+                } if edge_type == "belongs-to"
+            )
+            || matches!(
+                event,
+                Event::LogAppended {
+                    effect: Some(EntryEffect::Unlink { edge_type, .. }),
+                    ..
+                } if edge_type == "belongs-to"
+            )
+            || matches!(
+                event,
+                Event::EdgeLinked { edge_type: Some(edge_type), .. }
+                    | Event::EdgeUnlinked { edge_type: Some(edge_type), .. }
+                    if edge_type == "belongs-to"
+            )
+            || matches!(
+                event,
+                Event::EdgeUnlinked {
+                    edge_type: None,
+                    ..
+                }
+            );
 
         apply_belongs_event(&mut insts, &mut created, event);
 
-        let children_after = belongs_children_map(&insts);
-        let after = strand_in_belongs_subtree(strand_id, root_id, &created, &children_after);
+        if changes_membership {
+            let children = belongs_children_map(&insts);
+            in_scope.clear();
+            if created.contains(root_id) {
+                let mut stack = vec![root_id.to_string()];
+                while let Some(id) = stack.pop() {
+                    if in_scope.insert(id.clone()) {
+                        if let Some(children) = children.get(&id) {
+                            stack.extend(children.iter().cloned());
+                        }
+                    }
+                }
+            }
+        }
+        let after = in_scope.contains(strand_id);
 
         if before || after {
             out.insert(*offset);

@@ -259,7 +259,7 @@ entry 形状模板：
 8. 进程、模型、worktree、超时与重试由 harness 管理，Core help 不绑定厂商启动命令。
 
 入口：mnema orient --id <CHILD>
-增量读取：mnema timeline --since-offset <N> --under <CHILD>
+增量读取：mnema timeline --since-offset <N> --under <CHILD> --scope-at-event
 查看子树：mnema tree --id <PARENT>；mnema depends --under <PARENT>"#,
     },
     TopicInfo {
@@ -278,7 +278,8 @@ close/reopen 收口动作强制显式指名、禁 --last/缺省；正文只走 s
   mnema orient --id <ID>。委派入口专用写法，候选集同集合查询 --under（不是把 --under 写在 orient 上）
   doctor edges --id <ID>  单线候选集；与 --under 互斥。doctor journal integrity 始终 JournalScope，不可用 scope 隐藏容器损坏
   --edge-type       link 的边类型（--type 是 deprecated 别名）
-  --why / --from    引依据/记来源（可重复 0..N，顺序入身份）：线前缀=其最新条，entry 哈希前缀=精确该条；读取用 mnema show --entry <HASH>（--deref 展开链，--before/--after 邻域）
+  --ref             引依据/记来源（可重复 0..N，顺序入身份；add 的 --from、append 的 --why 为兼容别名）：线前缀=其最新条，entry 哈希前缀=精确该条；读取用 mnema show --entry <HASH>（--deref 展开链，--before/--after 邻域）
+  --scope-at-event  timeline --under 的历史时态成员关系；用于精确回答子树自 offset N 后的 join/leave 与在域事实。默认 --under 仍按当前投影成员过滤
 JSON 命名法：复数名词=数组；计数=count/*_count；自身身份=id；引用他者=<noun>_id；id/strand_id 全宽 64 hex 可 join。
 跨 journal 引用（书写约定，本版不解析、doctor 不校格式）：<journal-id>:<strand>:<entry>
   journal-id=64 hex 存 .mnema/journal-id.json（sidecar，不进哈希链；init 生成/旧仓 doctor 幂等补写，永不变）；strand/entry 为 ≥8 hex 前缀；整线可 <journal-id>:<strand>:；读 id：mnema doctor journal。
