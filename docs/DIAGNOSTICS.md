@@ -162,6 +162,7 @@ Hard error 只覆盖不可执行条件和硬不变量：
 | `migration-artifact-conflict` | integrity | 同一 migration identity 已存在内容不同的 target、map 或 certificate | 未激活；检查 staging 与历史文件 |
 | `active-schema-unsupported` | integrity | manifest 指向 Core 不支持的活动 schema | 拒绝读写；使用支持该 schema 的版本 |
 | `legacy-history-write-forbidden` | resolution | mutation 目标解析到冻结的历史 identity | 未写入；通过 migration map 取得 v3 identity |
+| `legacy-shadow-diverged` | compatibility | manifest 激活后，旧 `journal.jsonl` 与冻结 v2 history 不同，或 fresh v3 下意外出现 shadow；通常表示旧 binary 继续写了不可见事实 | active v3 不受影响；升级 PATH，审阅 shadow delta，把确需保留的事实显式写回 v3 |
 | `atomic-activation-failed` | concurrency | prepared v3 已验证，但原子创建 active manifest 失败 | 未激活；保留 artifacts，允许 resume |
 | `activation-durability-uncertain` | io | active manifest 已原子提交并可重读，但提交后的目录持久化同步失败 | 已激活；退出 0 并明确 warning，调用者可 sync/备份后复查 |
 

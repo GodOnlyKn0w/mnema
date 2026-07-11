@@ -451,6 +451,21 @@ static CATALOG: &[DiagnosticInfo] = &[
         producer: "journal-v3",
     },
     DiagnosticInfo {
+        code: "legacy-shadow-diverged",
+        severity: Severity::Warning,
+        category: "compatibility",
+        title: "ignored legacy shadow diverged after v3 activation",
+        finding: "The legacy journal.jsonl differs from frozen v2 history, or unexpectedly exists under a fresh v3 origin; an old binary may have written facts outside the active journal.",
+        impact: "Active v3 integrity is unchanged, but intended facts in the shadow are invisible to normal reads and writes.",
+        recovery: RecoveryInfo {
+            kind: RecoveryKind::Manual,
+            command_str: "upgrade the PATH binary, inspect the legacy shadow delta, and explicitly append any intended facts to v3",
+            executable: false,
+            requires_human: true,
+        },
+        producer: "doctor-journal-v3",
+    },
+    DiagnosticInfo {
         code: "atomic-activation-failed",
         severity: Severity::Error,
         category: "concurrency",
@@ -1168,11 +1183,12 @@ mod tests {
         assert!(codes.contains(&"migration-id-collision"));
         assert!(codes.contains(&"migration-artifact-conflict"));
         assert!(codes.contains(&"legacy-history-write-forbidden"));
+        assert!(codes.contains(&"legacy-shadow-diverged"));
         assert!(codes.contains(&"atomic-activation-failed"));
         assert!(codes.contains(&"activation-durability-uncertain"));
         assert_eq!(
             codes.len(),
-            15,
+            16,
             "catalog size changed — update this test deliberately"
         );
     }

@@ -167,10 +167,30 @@ fn cmd_doctor_journal_v3(
 
     let legacy_shadow = journal_dir.join("journal.jsonl");
     if legacy_shadow.exists() {
-        warnings.push(format!(
-            "legacy shadow present and ignored by default resolution: {}",
-            legacy_shadow.display()
-        ));
+        match std::fs::read(&legacy_shadow) {
+            Ok(bytes) => {
+                let actual = sha256_bytes(&bytes);
+                let frozen_v2 = manifest.history.iter().find(|item| item.schema == "v2");
+                match frozen_v2 {
+                    Some(history) if history.sha256 == actual => warnings.push(format!(
+                        "legacy shadow present, matches frozen v2 history, and is ignored by default resolution: {}",
+                        legacy_shadow.display()
+                    )),
+                    Some(history) => warnings.push(format!(
+                        "legacy-shadow-diverged: ignored legacy shadow {} differs from frozen history (expected {}, found {}); an old binary may have written facts after v3 activation. Upgrade PATH, inspect the shadow delta, and recover any intended facts into v3 explicitly",
+                        legacy_shadow.display(), history.sha256, actual
+                    )),
+                    None => warnings.push(format!(
+                        "legacy-shadow-diverged: fresh v3 origin has an unexpected ignored legacy shadow at {}; an old binary may have written it after activation. Upgrade PATH and recover any intended facts into v3 explicitly",
+                        legacy_shadow.display()
+                    )),
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "legacy-shadow-diverged: cannot inspect ignored legacy shadow {}: {error}",
+                legacy_shadow.display()
+            )),
+        }
     }
 
     println!("Doctor Journal Report");

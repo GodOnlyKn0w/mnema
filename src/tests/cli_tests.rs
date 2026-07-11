@@ -2,6 +2,16 @@ use super::*;
 use std::ffi::OsString;
 
 #[test]
+fn version_reports_v3_default_and_v2_legacy_support() {
+    use clap::CommandFactory;
+    let command = Cli::command();
+    let version = command.get_version().unwrap();
+    assert!(version.contains("v3 read/write (default)"), "{version}");
+    assert!(version.contains("v2 legacy read/migrate"), "{version}");
+    assert!(!version.contains("journal schema: mnema-journal-v2"));
+}
+
+#[test]
 fn chdir_flag_parses_before_subcommand() {
     use clap::CommandFactory;
     let result = Cli::command().try_get_matches_from(["mnema", "-C", "/some/dir", "orient"]);

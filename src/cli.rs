@@ -12,7 +12,7 @@ use std::path::PathBuf;
 fn version_info() -> &'static str {
     concat!(
         env!("CARGO_PKG_VERSION"),
-        "\njournal schema: mnema-journal-v2",
+        "\njournal schemas: v3 read/write (default), v2 legacy read/migrate",
         "\ncommit: ",
         env!("MNEMA_COMMIT"),
         "\nbuild: ",

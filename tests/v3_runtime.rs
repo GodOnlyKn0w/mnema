@@ -219,3 +219,19 @@ fn v3_checkpoint_writes_a_typed_payload() {
             .contains("entries_before_append=")
     );
 }
+
+#[test]
+fn v3_doctor_warns_when_an_old_binary_creates_a_fresh_origin_shadow() {
+    let dir = tempfile::tempdir().unwrap();
+    success(run(dir.path(), &["init"], None));
+    std::fs::write(
+        dir.path().join(".mnema/journal.jsonl"),
+        b"{\"type\":\"legacy-write\"}\n",
+    )
+    .unwrap();
+    let output = run(dir.path(), &["doctor", "journal"], None);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("legacy-shadow-diverged"), "{stderr}");
+    assert!(stderr.contains("old binary"), "{stderr}");
+}
