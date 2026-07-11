@@ -134,8 +134,7 @@ list（StrandListOutput.strands[]，StrandListItem）：
   state_offset / last_entry_ts / last_entry_offset
 orient（OrientOutput）：
   max_offset / active / closed_count / hidden_count / integrity / notices / since_command / delegation_command / remind / pause / stale_count / stale_command / scope
-  ※ active[] 卡片见 card；scope={kind,root,context[]}，context 只给未展开的 parent/depends-on/ref 身份与读取命令
-  ※ stale_count=scope 内活跃且末条 silent≥2h；stale_command 保留当前 scope
+  ※ active[] 见 card；scope={kind,root,context[]} 只给未展开的 parent/depends-on/ref 与读取命令；stale_command 保留 stale_count 的 scope
 search（SearchOutput）：
   matches / count / query / marker
   ※ matches[]：strand_id / content / strand_type / hidden / entry_id / marker（entry_id=全哈希供 fixes=/--why；marker null=未筛）
