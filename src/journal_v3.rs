@@ -1,14 +1,67 @@
 use crate::canonical::{
     AnchorHeadV3, AnchorRecordV3, JournalRecordV3, RefV3, StrandKeyV3, validate_full_hex,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 const RECORD_SEQUENCE_DOMAIN: &[u8] = b"mnema.journal-sequence.v3\0";
+const REPLAY_CACHE_SCHEMA: &str = "mnema.replay-cache.v1";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayCachePayload {
+    schema: String,
+    journal_id: String,
+    journal_len: u64,
+    journal_sha256: String,
+    covered_anchor: String,
+    records: Vec<JournalRecordV3>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayCacheEnvelope {
+    payload: ReplayCachePayload,
+    checksum: String,
+}
 
 pub(crate) fn read_records_strict(
+    path: &Path,
+    journal_id: &str,
+) -> Result<Vec<JournalRecordV3>, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("read v3 journal {}: {error}", path.display()))?;
+    let journal_sha256 = hex::encode(Sha256::digest(&bytes));
+    let journal_len =
+        u64::try_from(bytes.len()).map_err(|_| "v3 journal length does not fit u64".to_string())?;
+    let journal_anchor = journal_final_anchor(&bytes);
+    if let Some(records) = read_replay_cache(
+        path,
+        journal_id,
+        journal_len,
+        &journal_sha256,
+        journal_anchor.as_deref(),
+    ) {
+        return Ok(records);
+    }
+
+    let validated = read_validated_journal_bytes(&bytes, journal_id)?;
+    let _ = write_replay_cache(
+        path,
+        journal_id,
+        journal_len,
+        &journal_sha256,
+        &validated.records,
+    );
+    Ok(validated.records)
+}
+
+/// Integrity/audit callers use this path so a disposable cache is never
+/// accepted as evidence that the journal itself is valid.
+pub(crate) fn read_records_strict_uncached(
     path: &Path,
     journal_id: &str,
 ) -> Result<Vec<JournalRecordV3>, String> {
@@ -24,10 +77,17 @@ pub(crate) fn read_validated_journal(
     path: &Path,
     journal_id: &str,
 ) -> Result<ValidatedJournalV3, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|error| format!("open v3 journal {}: {error}", path.display()))?;
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("read v3 journal {}: {error}", path.display()))?;
+    read_validated_journal_bytes(&bytes, journal_id)
+}
+
+fn read_validated_journal_bytes(
+    bytes: &[u8],
+    journal_id: &str,
+) -> Result<ValidatedJournalV3, String> {
     let mut records = Vec::new();
-    for (index, line) in BufReader::new(file).lines().enumerate() {
+    for (index, line) in BufReader::new(bytes).lines().enumerate() {
         let line_number = index + 1;
         let line = line.map_err(|error| format!("read v3 journal line {line_number}: {error}"))?;
         if line.is_empty() {
@@ -46,6 +106,118 @@ pub(crate) fn read_validated_journal(
     }
     let replay = replay_records(journal_id, &records, true)?;
     Ok(ValidatedJournalV3 { records, replay })
+}
+
+fn replay_cache_path(path: &Path, journal_id: &str) -> std::path::PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let cache_dir = if parent.file_name().and_then(|name| name.to_str()) == Some("journals") {
+        parent.parent().unwrap_or(parent).join("cache")
+    } else {
+        parent.join(".mnema-cache")
+    };
+    cache_dir.join(format!("replay-v3-{journal_id}.json"))
+}
+
+fn cache_checksum(payload: &ReplayCachePayload) -> Result<String, String> {
+    let bytes = serde_jcs::to_vec(payload)
+        .map_err(|error| format!("canonicalize replay cache: {error}"))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn covered_anchor(records: &[JournalRecordV3]) -> Option<&str> {
+    match records.last() {
+        Some(JournalRecordV3::Anchor(anchor)) => Some(anchor.digest.as_str()),
+        _ => None,
+    }
+}
+
+fn journal_final_anchor(bytes: &[u8]) -> Option<String> {
+    let last = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let start = last
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |i| i + 1);
+    let text = std::str::from_utf8(&last[start..]).ok()?;
+    let record: JournalRecordV3 = crate::strict_json::from_str(text).ok()?;
+    covered_anchor(std::slice::from_ref(&record)).map(str::to_string)
+}
+
+fn read_replay_cache(
+    path: &Path,
+    journal_id: &str,
+    journal_len: u64,
+    journal_sha256: &str,
+    journal_anchor: Option<&str>,
+) -> Option<Vec<JournalRecordV3>> {
+    let bytes = std::fs::read(replay_cache_path(path, journal_id)).ok()?;
+    let text = std::str::from_utf8(&bytes).ok()?;
+    let envelope: ReplayCacheEnvelope = crate::strict_json::from_str(text).ok()?;
+    let payload = &envelope.payload;
+    if payload.schema != REPLAY_CACHE_SCHEMA
+        || payload.journal_id != journal_id
+        || payload.journal_len != journal_len
+        || payload.journal_sha256 != journal_sha256
+        || Some(payload.covered_anchor.as_str()) != journal_anchor
+        || cache_checksum(payload).ok()? != envelope.checksum
+        || covered_anchor(&payload.records)? != payload.covered_anchor
+    {
+        return None;
+    }
+    Some(envelope.payload.records)
+}
+
+fn write_replay_cache(
+    path: &Path,
+    journal_id: &str,
+    journal_len: u64,
+    journal_sha256: &str,
+    records: &[JournalRecordV3],
+) -> Result<(), String> {
+    let anchor = covered_anchor(records)
+        .ok_or_else(|| "cannot cache v3 journal without final anchor".to_string())?;
+    let payload = ReplayCachePayload {
+        schema: REPLAY_CACHE_SCHEMA.to_string(),
+        journal_id: journal_id.to_string(),
+        journal_len,
+        journal_sha256: journal_sha256.to_string(),
+        covered_anchor: anchor.to_string(),
+        records: records.to_vec(),
+    };
+    let envelope = ReplayCacheEnvelope {
+        checksum: cache_checksum(&payload)?,
+        payload,
+    };
+    let cache_path = replay_cache_path(path, journal_id);
+    let parent = cache_path
+        .parent()
+        .ok_or_else(|| "replay cache path has no parent".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("create replay cache directory: {error}"))?;
+    let temporary = cache_path.with_extension(format!("tmp-{}", std::process::id()));
+    let bytes =
+        serde_jcs::to_vec(&envelope).map_err(|error| format!("serialize replay cache: {error}"))?;
+    let publish = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|error| format!("create replay cache temp: {error}"))?;
+        file.write_all(&bytes)
+            .map_err(|error| format!("write replay cache: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync replay cache: {error}"))?;
+        drop(file);
+        if cache_path.exists() {
+            std::fs::remove_file(&cache_path)
+                .map_err(|error| format!("replace replay cache: {error}"))?;
+        }
+        std::fs::rename(&temporary, &cache_path)
+            .map_err(|error| format!("install replay cache: {error}"))
+    })();
+    if publish.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    publish
 }
 
 pub(crate) fn write_records_prepared(
@@ -395,6 +567,118 @@ mod tests {
         let digest = write_records_prepared(&path, &journal_id, &records).unwrap();
         assert_eq!(digest.len(), 64);
         assert_eq!(read_records_strict(&path, &journal_id).unwrap(), records);
+        assert!(replay_cache_path(&path, &journal_id).is_file());
+    }
+
+    #[test]
+    fn corrupt_cache_falls_back_to_strict_replay_and_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.v3.jsonl");
+        let journal_id = "aa".repeat(32);
+        let first = genesis("13");
+        let mut records = vec![first];
+        records.push(make_anchor(&journal_id, &records, CREATED_AT).unwrap());
+        write_records_prepared(&path, &journal_id, &records).unwrap();
+
+        assert_eq!(read_records_strict(&path, &journal_id).unwrap(), records);
+        let cache = replay_cache_path(&path, &journal_id);
+        std::fs::write(&cache, b"not-json").unwrap();
+        assert_eq!(read_records_strict(&path, &journal_id).unwrap(), records);
+        let repaired = std::fs::read_to_string(cache).unwrap();
+        assert!(repaired.contains(REPLAY_CACHE_SCHEMA));
+    }
+
+    #[test]
+    fn journal_change_invalidates_cache_instead_of_masking_damage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.v3.jsonl");
+        let journal_id = "aa".repeat(32);
+        let first = genesis("14");
+        let mut records = vec![first];
+        records.push(make_anchor(&journal_id, &records, CREATED_AT).unwrap());
+        write_records_prepared(&path, &journal_id, &records).unwrap();
+        read_records_strict(&path, &journal_id).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{}\n");
+        std::fs::write(&path, bytes).unwrap();
+        assert!(read_records_strict(&path, &journal_id).is_err());
+    }
+
+    #[test]
+    fn journal_id_mismatch_never_reuses_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.v3.jsonl");
+        let journal_id = "aa".repeat(32);
+        let mut records = vec![genesis("15")];
+        records.push(make_anchor(&journal_id, &records, CREATED_AT).unwrap());
+        write_records_prepared(&path, &journal_id, &records).unwrap();
+        read_records_strict(&path, &journal_id).unwrap();
+
+        let other_id = "bb".repeat(32);
+        assert_eq!(read_records_strict(&path, &other_id).unwrap(), records);
+        let other_cache = std::fs::read_to_string(replay_cache_path(&path, &other_id)).unwrap();
+        assert!(other_cache.contains(&other_id));
+    }
+
+    #[test]
+    fn stale_cache_does_not_mask_a_valid_but_unanchored_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.v3.jsonl");
+        let journal_id = "aa".repeat(32);
+        let mut records = vec![genesis("16")];
+        records.push(make_anchor(&journal_id, &records, CREATED_AT).unwrap());
+        write_records_prepared(&path, &journal_id, &records).unwrap();
+        read_records_strict(&path, &journal_id).unwrap();
+
+        let tail = serde_jcs::to_vec(&genesis("17")).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&tail).unwrap();
+        file.write_all(b"\n").unwrap();
+        assert!(
+            read_records_strict(&path, &journal_id)
+                .unwrap_err()
+                .contains("missing its final anchor")
+        );
+    }
+
+    #[test]
+    fn cache_presence_does_not_change_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.v3.jsonl");
+        let journal_id = "aa".repeat(32);
+        let mut records = vec![genesis("18")];
+        records.push(make_anchor(&journal_id, &records, CREATED_AT).unwrap());
+        write_records_prepared(&path, &journal_id, &records).unwrap();
+
+        let miss = read_records_strict(&path, &journal_id).unwrap();
+        let hit = read_records_strict(&path, &journal_id).unwrap();
+        assert_eq!(miss, hit);
+        std::fs::remove_file(replay_cache_path(&path, &journal_id)).unwrap();
+        assert_eq!(read_records_strict(&path, &journal_id).unwrap(), hit);
+    }
+
+    #[test]
+    fn uncached_integrity_reader_ignores_a_forged_healthy_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.v3.jsonl");
+        let journal_id = "aa".repeat(32);
+        let mut records = vec![genesis("19")];
+        records.push(make_anchor(&journal_id, &records, CREATED_AT).unwrap());
+        write_records_prepared(&path, &journal_id, &records).unwrap();
+
+        let mut damaged = std::fs::read(&path).unwrap();
+        let position = damaged.iter().position(|byte| *byte == b'1').unwrap();
+        damaged[position] = b'2';
+        std::fs::write(&path, &damaged).unwrap();
+        let digest = hex::encode(Sha256::digest(&damaged));
+        write_replay_cache(&path, &journal_id, damaged.len() as u64, &digest, &records).unwrap();
+
+        assert_eq!(read_records_strict(&path, &journal_id).unwrap(), records);
+        assert!(read_records_strict_uncached(&path, &journal_id).is_err());
     }
 
     #[test]

@@ -71,13 +71,14 @@ fn cmd_doctor_journal_v3(
     })?;
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
-    let records = match crate::journal_v3::read_records_strict(&active_path, &manifest.journal_id) {
-        Ok(records) => records,
-        Err(error) => {
-            errors.push(error);
-            Vec::new()
-        }
-    };
+    let records =
+        match crate::journal_v3::read_records_strict_uncached(&active_path, &manifest.journal_id) {
+            Ok(records) => records,
+            Err(error) => {
+                errors.push(error);
+                Vec::new()
+            }
+        };
 
     let activation_record_count = match &manifest.origin {
         ActivationOriginV3::Fresh { .. } => Some(1usize),
