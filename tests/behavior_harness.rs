@@ -489,3 +489,66 @@ fn timeline_json_self_describes_scope_and_advances_empty_cursor() {
     assert_eq!(empty["window"]["observed_through"], journal_tip);
     assert_eq!(empty["window"]["next_since_offset"], journal_tip + 100);
 }
+
+#[test]
+fn canonical_and_legacy_ref_flags_preserve_order_and_fail_without_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    ok(dir.path(), &["init"], None);
+    let parent = id(&add(dir.path(), "[task] ref parent\n", &[]));
+    let a = id(&add(dir.path(), "[evidence] ref a\n", &[]));
+    let b = id(&add(dir.path(), "[evidence] ref b\n", &[]));
+
+    let mixed = add(
+        dir.path(),
+        "[task] mixed refs child\n",
+        &["--parent", &parent, "--ref", &a, "--from", &b],
+    );
+    assert_eq!(mixed["refs"], serde_json::json!([a, b]));
+    let child = mixed["id"].as_str().unwrap();
+    let appended: Value = serde_json::from_str(
+        ok(
+            dir.path(),
+            &[
+                "append", "--id", child, "--ref", &b, "--why", &a, "--format", "json",
+            ],
+            Some("[decision] mixed append refs\n"),
+        )
+        .trim(),
+    )
+    .unwrap();
+    assert_eq!(appended["refs"], serde_json::json!([b, a]));
+
+    let before: Value =
+        serde_json::from_str(ok(dir.path(), &["timeline", "--format", "json"], None).trim())
+            .unwrap();
+    let before_tip = before["window"]["observed_through"].as_u64().unwrap();
+    let bad_add = run(
+        dir.path(),
+        &[
+            "add".to_string(),
+            "--parent".to_string(),
+            parent,
+            "--ref".to_string(),
+            "deadbeef".to_string(),
+        ],
+        Some("[task] must not exist\n"),
+    );
+    assert!(!bad_add.status.success());
+    let bad_append = run(
+        dir.path(),
+        &[
+            "append".to_string(),
+            "--id".to_string(),
+            child.to_string(),
+            "--ref".to_string(),
+            "deadbeef".to_string(),
+        ],
+        Some("[progress] must not append\n"),
+    );
+    assert!(!bad_append.status.success());
+    let after: Value =
+        serde_json::from_str(ok(dir.path(), &["timeline", "--format", "json"], None).trim())
+            .unwrap();
+    assert_eq!(after["window"]["observed_through"], before_tip);
+    assert!(!after.to_string().contains("must not"));
+}
