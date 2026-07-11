@@ -1,11 +1,13 @@
 # journal v1 → v2 迁移指南
 
+> **历史文档。** 当前默认格式是 v3；本文只保存已退役 v1→v2 cutover 的操作与证据，不是当前用户的迁移入口。当前格式边界见 [CORPUS](CORPUS.md#102-活动版本与历史)，文档导航见 [README](README.md)。
+
 本文档说明如何把一份 v1 journal 迁移为纯 v2 形态。迁移由 `mnema
 cutover-v2` 一条命令完成，本仓库自己的 journal 已于 2026-07-03 用同一
 流程完成迁移（`.mnema/journal.v1.jsonl` 与
 `.mnema/migration-v1-to-v2.json` 即当次产物）。
 
-概念模型与迁移清单的设计依据见 [CORPUS.md](../CORPUS.md) 第 10 节；
+概念模型与迁移清单的设计依据见 [CORPUS.md](CORPUS.md) 第 10 节；
 本文只管操作。
 
 ## 1. 迁移改什么

@@ -2,11 +2,13 @@
 
 ## Overview
 
-mnema is a local Rust CLI for durable work memory. All durable changes are appended as events to a journal; every read path obtains views reproducible from that event stream. A disposable verified cache may accelerate replay, but never becomes a second source of truth.
+mnema is the semantic-topology substrate for human/LLM and multi-agent collaboration. It is a local Rust CLI whose append-only journal records durable facts while projections expose stable work units, structural ancestry, attention relations, evidence references, lifecycle, and recursive views. Agents and harnesses may change or disappear; the topology remains replayable and consumable by their successors. A disposable verified cache may accelerate replay, but never becomes a second source of truth.
+
+mnema does not run agents or interpret process completion, authorization, retry policy, resource scheduling, or task success. Those are harness concerns. Its collaboration contract ends at durable semantic facts and deterministic projections.
 
 The target architecture has four modules. Dependencies point outward from durable facts to derived views to public contracts to CLI orchestration.
 
-概念模型与 v2 演化方向（entry 统一实体、哈希链身份、link/ref 两层关系、生命周期折叠、stdin 单通道）见 [CORPUS.md](CORPUS.md)。本文档只管当前代码的模块结构。
+规范领域语义见 [CORPUS.md](CORPUS.md)；文档职责与阅读路径见 [README.md](README.md)。本文档只定义目标模块结构、边界与承重决策，不重复命令教程或诊断注册表。
 
 ```mermaid
 flowchart BT
@@ -77,7 +79,9 @@ Journal Core also owns the replay-cache boundary. A cache may retain validated r
 
 Projection Core owns derived meaning. It folds event streams into read models such as strands, timelines, graphs, trees, context slices, and audit findings. Base Projection mechanically folds events into current read state; Derived Views organize read use cases; Review Projections emit findings and evidence for agent/human review. Projection Core consumes events, does not own the event schema, does not write the journal, and does not decide process exit behavior.
 
-Scope is a Projection Core concept. `JournalScope` addresses the whole journal; `Subtree(root)` addresses the named strand and every descendant reachable through `belongs-to`. The rule is recursive and independent of delegation depth: a first-order worker and a tenth-order worker use the same `Subtree(root)` operation with different roots. Other strands remain discoverable by explicit search or references, but are not expanded into the scoped view by default. Upstream context is exposed as one or more refs/relations plus retrieval commands, never as generated summaries.
+Scope is a Projection Core concept. In projections, Journal is a virtual root whose direct children are all strands with no effective `belongs-to` parent. The virtual root is not a strand, event, hash input, or persisted relation. `JournalScope` is its downward closure; `Subtree(root)` is the named strand and every descendant reachable through `belongs-to`. Any strand may therefore become a local root. The rule is recursive and independent of delegation depth: a first-order worker and a tenth-order worker use the same operation with different roots.
+
+The default view contains only the current root's downward closure. Parent, refs, and `depends-on` are unexpanded boundary pointers; they do not enlarge scope. Other strands remain discoverable only through explicit retrieval or search. Upstream context is never replaced by a generated summary.
 
 Contract Surface owns the public machine-readable contract. It maps projection outputs into JSON DTOs and defines field names, compatibility fields, deprecated-but-preserved fields, and the local contract index exposed to users. DTOs are external contract, not internal projection models.
 
@@ -95,7 +99,7 @@ Journal Core owns the event schema and event construction. Projection Core may c
 
 Projection Core functions take event streams plus explicit request parameters and return projection outputs. They do not read journal paths, write journal events, print, parse CLI grammar, know JSON field names, or return exit codes.
 
-Scoped orientation is built on one generic Scope/Projection API, not separate top-level, worker, and nested-worker implementations. Top-level `orient` requests `JournalScope`; delegated orientation requests `Subtree(root)`. Prompt wording and visible fields may differ by scope, but traversal, lifecycle, visibility, reference, and ambiguity semantics remain shared.
+Scoped orientation is built on one generic Scope/Projection API, not separate top-level, worker, and nested-worker implementations. Top-level `orient` requests the virtual Journal root's `JournalScope`; `orient --id X` requests `Subtree(X)`. Prompt wording may adapt to the selected root, but every count, candidate, recommendation, generated command, lifecycle fact, and incremental cursor must be derived from that scope plus explicitly unexpanded boundary pointers. Nothing from a sibling tree may leak into a delegated orientation merely because it is globally recent.
 
 Only general replay facts may be cached before the Scope API stabilizes. Cached subtree results, scoped counters, or other query-specific indexes are introduced only behind the Projection API after their semantics are fixed; CLI output DTOs are never cache schemas.
 
@@ -125,6 +129,16 @@ Review projections report facts and evidence. They do not decide whether a task 
 
 ## Invariants
 
+Journal is the unpersisted virtual projection root. It has no entry, hash, lifecycle, or durable `belongs-to` edge; every currently parentless strand is its direct projection child.
+
+Any strand can be a local root. All recursive collection semantics reduce to `JournalScope` or `Subtree(root)`; agent role and delegation depth never change their meaning.
+
+Default visibility is the current root's downward closure. Parent, refs, and `depends-on` remain explicit, unexpanded exits and cannot silently add members to scope.
+
+The three relation families remain orthogonal: `belongs-to` defines structural ancestry, `depends-on` marks attention/review relevance, and entry refs preserve evidence/derivation. No relation implies another.
+
+mnema records semantic facts and never interprets execution facts. Process exit, authorization, retries, model routing, worktree management, and task-success decisions remain outside the core.
+
 The journal is append-only: commands record new events rather than mutating or deleting historical events.
 
 Read models are projections: losing a projection must not lose durable information, because the projection can be rebuilt from the journal.
@@ -138,6 +152,10 @@ JSON DTO shape is public contract: changing existing field names or meanings is 
 Inner modules do not depend on outward concerns: Journal Core does not depend on Projection Core, Contract Surface, or CLI Adapter; Projection Core does not depend on Contract Surface or CLI Adapter; Contract Surface does not depend on CLI Adapter.
 
 ## Key decisions
+
+Make semantic topology—not agent execution—the product boundary. Stable strands and append-only entries survive model and process replacement; external harnesses consume and produce facts without becoming journal entities.
+
+Model Journal as a virtual projection root, not a durable parent. This unifies top-level and delegated orientation without adding a synthetic strand, relation event, or hash dependency.
 
 Use append-only journal plus projections as the core architecture. The journal records durable facts; projections let read behavior evolve without rewriting history.
 

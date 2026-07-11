@@ -16,9 +16,12 @@ claim, and a failure must remain attributable to that layer.
 | CLI behavior | Exit status, stdout, and stderr of selected user journeys do not drift accidentally | Normalized record/replay snapshots | Every change touching CLI output |
 | Scale and fuzzing | Valid large journals remain practical; hostile input does not panic or hang | Benchmarks and fuzz targets | Scheduled or explicit |
 
-`cargo build --release && cargo test --release` remains the repository's
-authoritative local gate. Behavior snapshots supplement it; they never replace
-semantic assertions.
+`cargo build --release && cargo test --release` is the minimum repository
+discipline. The registered authoritative local gate is
+`scripts/ci.ps1 -Mode Full`, which includes that release contract plus the
+process, compatibility, crash and performance suites listed in
+`TEST-CATALOG.md`. Behavior snapshots supplement semantic assertions; they
+never replace them.
 
 ## Required invariants
 
@@ -79,12 +82,7 @@ async-exec does not decide whether a semantic test passed, retry a failed suite,
 understand a mnema strand, or become a workflow engine. The PowerShell wrapper
 only aggregates the registered process results into the gate report.
 
-## Planned order
+## Next extensions
 
-1. Extend the executable behavior driver from structural assertions to reviewed snapshots.
-2. Extend the first immutable v2→v3 fixture with typed-unlink and retired-why versions when those historical shapes change.
-3. Expand the deterministic scope/replay generator beyond the bounded CI seeds when a nightly lane exists.
-4. Extend the initial multi-process parent+refs case with test-only persistence failpoints.
-5. Vendor or pin `rere.py` only after normalization policy has reviewed examples.
-6. Add scheduled fuzz, large-journal, and async-exec-hosted suites.
+Implemented and planned suites are registered only in `TEST-CATALOG.md`; this policy document does not maintain a second roadmap. The next architectural extension is a dedicated recursive black-box replay layer covering the virtual Journal root and strand roots at equal semantics. `rere.py` may own record/replay fixtures, while record remains a deliberate maintainer action and automated gates run replay only. AsyncExec may durably host long replay processes but never interprets their semantic result.
 

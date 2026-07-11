@@ -1,6 +1,6 @@
 # mnema Test Catalog
 
-本文件是测试内容注册表：说明每组测试保护什么事实、从哪里运行、属于哪个本地 gate、需要什么隔离，以及产生什么证据。测试原则和新增测试的判据见 `docs/TESTING.md`；自动化入口落地后只认本表登记的 suite 名称。
+本文件是测试内容注册表：说明每组测试保护什么事实、从哪里运行、属于哪个本地 gate、需要什么隔离，以及产生什么证据。测试原则和新增测试的判据见 [TESTING](TESTING.md)；自动化只认本表登记的 suite 名称。
 
 ## Gate vocabulary
 
@@ -27,6 +27,11 @@
 | `v2-v3-compat` | 冻结 v2 bytes 的 source/migration/target identity、raw v3 records、迁移前后投影 | `cargo test --release --test v2_v3_compat` | Full | fixture 只读复制到 temp；fixture 强制 LF | 1 test，<1 秒 | golden hashes + report；`tests/fixtures/*`, `tests/v2_v3_compat.rs` |
 | `v3-runtime` | fresh v3 写入、manifest、doctor、shadow、checkpoint、orient strict read | `cargo test --release --test v3_runtime` | Full | 每 test 独立 temp project | 7 tests，约 3 秒 | test report；`tests/v3_runtime.rs` |
 | `generated-differential-ci` | 独立 scope model 对 current/event-time full replay 与 cursor 增量一致性 | `cargo test --release generated_scope_model_matches_full_and_incremental_replay` | Full | 纯内存、固定 seeds | 包含在 unit，约数秒 | failure seed/cursor；`src/tests/query_tests.rs` |
+| `behavior-snapshots` | reviewed root-help 与 invalid-id 的 stdout/stderr/exit 不发生未审漂移 | `cargo test --release --test behavior_harness reviewed_text_snapshots` | Fast, Full | 每场景 temp；动态值不得被宽泛 scrub | 秒级 | checked-in exact snapshots + diff |
+| `crash-atomicity` | v3 batch 写前 abort 保留完整旧态；完整 write 后 sync 前 abort 暴露完整可验证新态 | `cargo test --release --features test-failpoints --test crash_atomicity` | Full | feature-gated failpoints；独立 temp journal/process | 秒级 | child exit + strict replay/doctor evidence |
+| `performance-smoke` | 25 appends 后 append/timeline/orient 延迟可测且有界完成 | `pwsh -File scripts/benchmark.ps1 -Sizes 25` | Full | 独立 temp journal；机器信息；无硬阈值 | 约数十秒 | `mnema.performance-smoke/v1` JSON |
+| `differential-expanded` | 256 seeds × 240 events 的 current/event-time full+incremental 独立模型差分 | `scripts/ci.ps1 -Mode Nightly` 选择固定 Rust test 并设置 seed/event env | Nightly | 纯内存、固定可复现 seeds | 秒级 | failure seed/cursor |
+| `fuzz-strict-input` | strict JSON reader 对 10,000 个可复现 hostile ASCII inputs 不 panic | `scripts/ci.ps1 -Mode Nightly` 选择固定 Rust test 并设置 cases env | Nightly | 确定性 corpus | 约数分钟 | failure case + Rust report |
 | `doctor-smoke` | 部署后二进制能严格读取本仓 journal | `mnema doctor journal` | Full（部署后） | 明确 `-C <repo>`；只读 | 秒级 | stdout/stderr + TerminalEvent；release wrapper |
 
 ## Planned inventory
@@ -35,19 +40,17 @@
 
 | Suite id | Status | Claim | Planned lane | Required isolation / artifact |
 |---|---|---|---|---|
-| `behavior-snapshots` | current | reviewed root-help 与 invalid-id 的 stdout/stderr/exit 不发生未审漂移 | Fast, Full | 每场景 temp；checked-in exact snapshots + diff；入口 `cargo test --release --test behavior_harness reviewed_text_snapshots` |
-| `crash-atomicity` | current (v3 batch boundary) | v3 batch 写前 abort 保留完整旧态；完整 write 后 sync 前 abort 暴露完整可验证新态 | Full；入口 `cargo test --release --features test-failpoints --test crash_atomicity` | feature-gated failpoints；独立 temp journal/process；后续扩展 anchor/cutover/cache 点 |
 | `concurrent-visibility` | planned | reader 在 parent+refs 与 anchor 批次中途看不到半状态 | Full | 多进程 writer+reader；独立 temp journal；事件时间线 |
-| `performance-smoke` | current observational | 25 appends 后 append p50/p95/max、timeline/orient 与 observed cursor 可测且有界完成 | Full；入口 `pwsh -File scripts/benchmark.ps1 -Sizes 25` | 独立 temp journal；机器信息 + `mnema.performance-smoke/v1` JSON；暂不设硬阈值 |
 | `performance-scale` | planned | 100k/1m events 的 p50/p95/p99、吞吐、冷暖 cache 曲线 | Nightly | 独占机器/target；不与 correctness shard 并发；baseline JSON |
-| `differential-expanded` | current | 256 seeds × 240 events 的 current/event-time full+incremental 独立模型差分 | Nightly；入口由 `ci.ps1` 设置 `MNEMA_DIFF_SEEDS/EVENTS` 后运行固定 test | failure 输出 seed/cursor；后续扩 cache 状态 |
-| `fuzz-strict-input` | current deterministic corpus | strict JSON reader 对 10,000 个可复现 hostile ASCII inputs 不 panic | Nightly；入口由 `ci.ps1` 设置 `MNEMA_FUZZ_CASES` | 失败输出 case；后续可接 libFuzzer corpus |
+| `recursive-rere-smoke` | planned | 虚拟 Journal 根与深度 1/2 strand 根使用同一递归语义，且默认视野不串树 | Fast | `tests/recursive/smoke.list`；rere replay only；每场景隔离 journal |
+| `recursive-rere-full` | planned | 深度 0..10 的 orient/query/add-child、refs 不扩 scope、reparent join/leave 保持递归同构 | Full/Nightly | `tests/recursive/full.list`；固定 rere fixtures；AsyncExec durable replay |
+| `recursive-rere-crash` | planned | 递归 parent+refs 与拓扑变化在 crash/failpoint 后只暴露完整旧态或新态 | Nightly | `tests/recursive/crash.list`；AsyncExec timeout/log facts；record 禁止自动运行 |
 | `fixture-typed-unlink` | planned | typed unlink + legacy tombstone 的 v2→v3 解释冻结 | Full | 新版本 fixture，不修改 compat-v1 |
 | `fixture-retired-why` | planned | legacy why 只迁成 ref、不成为 live edge | Full | 新版本 fixture，不修改 compat-v1 |
 
 ## Local automation contract
 
-统一入口计划为：
+统一入口已经实现为：
 
 ```powershell
 ./scripts/ci.ps1 -Mode Fast    -Executor Direct

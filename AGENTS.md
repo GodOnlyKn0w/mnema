@@ -7,7 +7,8 @@ mnema 的源码仓库（Rust CLI：append-only journal + 投影）。
 本文件是唯一源：codex 直读本文件，claude 经 CLAUDE.md 的
 `@AGENTS.md` 引用读到同一份。
 
-主会话（任务不带 strand ID）开始先跑 `mnema orient`；
+主会话（任务不带 strand ID）从虚拟 Journal 根运行 `mnema orient`；
+任务带 strand ID 时从自己的局部根运行 `mnema orient --id <ID>`。
 能力沿 `mnema --help` → 子命令 `--help` →
 `explain <topic|CODE>` 逐阶发现。
 
@@ -30,9 +31,12 @@ mnema 的源码仓库（Rust CLI：append-only journal + 投影）。
 
 ### 工单纪律（任务带 strand ID）
 
-- 入口是工单本身，不跑 orient（那是主会话的入口）：
-  `mnema show --id <ID> --digest` 起步，要全文去掉 --digest；
-  上游背景 `mnema depends --id <ID>`；主动检索 `search`。
+- 入口是工单自己的递归视野：`mnema orient --id <ID>`。默认只看
+  `<ID>` 的完整向下子树；parent、refs、depends-on 只作为未展开出口。
+  深读本线用 `mnema show --id <ID> --digest|--tail 8`；按需读取上游
+  `mnema depends --id <ID>`，跨树发现必须显式 `search`。
+- 在方案成形、证据改变判断、实现落地、验证完成、委派/交接、阻塞时
+  `append`，不要只在进程结尾补一条完成声明。
 - 进展与结论 `append` 回同一条线；收工
   `close --id <ID> --as done|failed`。
 - entry 开头标明身份（谁派的哪一路），多路并发靠这个区分笔迹。

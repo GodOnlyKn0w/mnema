@@ -6,7 +6,7 @@
 `batch cat agent-roster.md#codex agent-roster.md#grok-45` 拼多条对比；
 `batch paths agent-roster.md` 列全部地址（喂 fzf/脚本）。
 
-通用纪律见根目录 **`AGENTS.md`**（主会话第一步 `mnema orient`；带 strand ID 的 worker 从 `mnema show --id <ID> --digest` 起步）。共性：prompt 落 **`scratch/<agent>/`**、后台跑、stdout/stderr 落同目录、收工以 strand 的 close 状态与 entries 判读（stdout 自报不作数）。这份花名册来自本仓实跑；单次面板只形成待复验画像，不冒充稳定人格。
+通用纪律见根目录 **`AGENTS.md`**（主会话从虚拟 Journal 根运行 `mnema orient`；带 strand ID 的 worker 从自己的局部根运行 `mnema orient --id <ID>`，再按需 `show`/`depends`/`search`）。共性：prompt 落 **`scratch/<agent>/`**、后台跑、stdout/stderr 落同目录、收工以 strand 的 close 状态与 entries 判读（stdout 自报不作数）。这份花名册来自本仓实跑；单次面板只形成待复验画像，不冒充稳定人格。
 
 **无头 worker 是异步协作者，不是同步子程序。** 派发成功后，协调者继续自己的主线工作，
 不靠轮询进程或 strand 等它完成；到真正需要综合、合并或收口时，再一次性读取 worker
