@@ -149,6 +149,10 @@ $report = [ordered]@{
     suites = @($results)
 }
 $reportPath = Join-Path $ArtifactRoot 'gate-report.json'
-$report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $reportPath -Encoding utf8NoBOM
+[System.IO.File]::WriteAllText(
+    $reportPath,
+    ($report | ConvertTo-Json -Depth 12),
+    [System.Text.UTF8Encoding]::new($false)
+)
 $report | ConvertTo-Json -Depth 12
 if (-not $report.passed) { exit 1 }

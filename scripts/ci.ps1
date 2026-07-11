@@ -81,6 +81,10 @@ $report = [ordered]@{
     finished_at = [DateTimeOffset]::UtcNow.ToString('O')
     passed = -not [bool]($results | Where-Object { -not $_.passed }); suites = @($results)
 }
-$report | ConvertTo-Json -Depth 12 | Set-Content (Join-Path $artifactRoot 'gate-report.json') -Encoding utf8NoBOM
+[System.IO.File]::WriteAllText(
+    (Join-Path $artifactRoot 'gate-report.json'),
+    ($report | ConvertTo-Json -Depth 12),
+    [System.Text.UTF8Encoding]::new($false)
+)
 $report | ConvertTo-Json -Depth 12
 if (-not $report.passed) { exit 1 }
