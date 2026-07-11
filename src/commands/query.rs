@@ -657,6 +657,10 @@ pub(crate) fn orient_plan_at(
         max_offset,
     )?;
     let scope_context = scope.context(&strands)?;
+    let scope_root_menu_eligible = scope_context
+        .as_ref()
+        .and_then(|context| strands.iter().find(|strand| strand.id == context.root_id))
+        .is_some_and(|root| root.state() == "registered" && (!root.hidden || req.include_hidden));
     let scope_root_card = scope_context.as_ref().and_then(|context| {
         strands
             .iter()
@@ -671,7 +675,20 @@ pub(crate) fn orient_plan_at(
     let (entry_count, strand_count) = orient_maturity_counts(&strands, req.include_hidden);
     let score = orient_maturity_score(entry_count, strand_count);
     let limit = req.limit.unwrap_or_else(|| adaptive_orient_limit(score));
-    let view = projection::build_orient_view(&strands, req.include_hidden, limit, max_offset);
+    let mut view = projection::build_orient_view(&strands, req.include_hidden, limit, max_offset);
+    // A delegated entry point must not disappear merely because a descendant
+    // is newer. Respect an explicit zero limit; otherwise pin the eligible
+    // root without increasing the requested menu size.
+    if limit > 0 && scope_root_menu_eligible {
+        if let Some(root_id) = scope.root_id() {
+            if !view.active_ids.iter().any(|id| id == root_id) {
+                if view.active_ids.len() == limit {
+                    view.active_ids.pop();
+                }
+                view.active_ids.insert(0, root_id.to_string());
+            }
+        }
+    }
     let mut output = output::OrientOutput::from((&view, strands.as_slice()));
     if let Some(root_id) = scope.root_id() {
         output.since_command = format!(
@@ -714,6 +731,23 @@ fn print_orient_stale(stale_count: usize, stale_command: &str) {
         "stale: {} active silent ≥{} → {}",
         stale_count, ORIENT_STALE_DURATION, stale_command
     );
+}
+
+fn print_orient_scope(scope: &output::OrientScopeOutput) {
+    let Some(root) = &scope.root else {
+        return;
+    };
+    println!("scope root: {} [{}]", shorten(&root.id), root.lifecycle);
+    println!("  task: {}", root.summary);
+    println!("  read: {}", root.catch_up);
+    for pointer in &scope.context {
+        println!(
+            "  context {} {} (not expanded): {}",
+            pointer.kind,
+            shorten(&pointer.id),
+            pointer.command
+        );
+    }
 }
 
 fn orient_maturity_counts(
@@ -996,6 +1030,7 @@ pub(crate) fn cmd_orient(
             );
             if let Some(ref root) = scope_label {
                 println!("scope: under {} (SubtreeScope)", root);
+                print_orient_scope(&out.scope);
             }
             println!("integrity: {}", out.integrity);
             println!("since: {}", out.since_command);
@@ -1022,6 +1057,7 @@ pub(crate) fn cmd_orient(
         );
         if let Some(ref root) = scope_label {
             println!("scope: under {} (SubtreeScope)", root);
+            print_orient_scope(&out.scope);
         }
         println!("integrity: {}", out.integrity);
         println!("since: {}", out.since_command);

@@ -2119,6 +2119,41 @@ fn orient_id_keeps_closed_root_and_upstream_as_unexpanded_scope_context() {
 }
 
 #[test]
+fn orient_id_pins_visible_registered_root_without_exceeding_limit() {
+    let _env = setup();
+    let parent = create_strand("pin root");
+    let child = create_strand("pin child");
+    cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let plan = orient_plan(
+        &events,
+        &OrientRequest {
+            include_hidden: false,
+            limit: Some(1),
+            under: Some(parent.clone()),
+            allow_selection: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(plan.output.active.len(), 1);
+    assert_eq!(plan.output.active[0].id, parent);
+
+    let zero = orient_plan(
+        &events,
+        &OrientRequest {
+            include_hidden: false,
+            limit: Some(0),
+            under: Some(parent.clone()),
+            allow_selection: false,
+        },
+    )
+    .unwrap();
+    assert!(zero.output.active.is_empty());
+    assert_eq!(zero.output.scope.root.unwrap().id, parent);
+}
+
+#[test]
 fn timeline_under_excludes_out_of_scope_strands() {
     let _env = setup();
     let parent = create_strand("tl parent");
