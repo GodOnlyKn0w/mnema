@@ -2643,6 +2643,199 @@ fn depends_under_lists_each_subtree_strand_upstream_facts() {
 }
 
 #[test]
+fn generated_scope_model_matches_full_and_incremental_replay() {
+    use std::collections::{HashMap, HashSet};
+
+    fn next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state
+    }
+    fn ts(offset: usize) -> String {
+        format!(
+            "2026-01-01T00:{:02}:{:02}Z",
+            (offset / 60) % 60,
+            offset % 60
+        )
+    }
+    fn log(id: &str, offset: usize, effect: Option<event::EntryEffect>) -> Event {
+        Event::LogAppended {
+            id: id.to_string(),
+            ts: ts(offset),
+            content: format!("generated-{offset}"),
+            effect,
+            prev_entry_id: None,
+            entry_id: None,
+            refs: Vec::new(),
+            ref_: None,
+            append_id: None,
+            git: None,
+            provenance: None,
+        }
+    }
+    fn subtree(root: &str, children: &HashMap<String, HashSet<String>>) -> HashSet<String> {
+        let mut found = HashSet::new();
+        let mut pending = vec![root.to_string()];
+        while let Some(id) = pending.pop() {
+            if found.insert(id.clone()) {
+                pending.extend(children.get(&id).into_iter().flatten().cloned());
+            }
+        }
+        found
+    }
+
+    for seed in 0..64_u64 {
+        let root = "root";
+        let ids = ["root", "a", "b", "c", "d", "e"];
+        let mut events = Vec::new();
+        let mut children: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut expected_event_time = HashSet::new();
+        for (index, id) in ids.iter().enumerate() {
+            let offset = index + 1;
+            let before = subtree(root, &children).contains(*id);
+            events.push((
+                offset,
+                Event::StrandCreated {
+                    id: (*id).to_string(),
+                    ts: ts(offset),
+                    strand_type: Some("task".to_string()),
+                    slug: None,
+                },
+            ));
+            let after = subtree(root, &children).contains(*id);
+            if before || after {
+                expected_event_time.insert(offset);
+            }
+        }
+
+        let mut rng = seed + 1;
+        for step in 0..80 {
+            let offset = events.len() + 1;
+            let source = ids[(next(&mut rng) as usize) % ids.len()];
+            let target = ids[(next(&mut rng) as usize) % ids.len()];
+            let op = next(&mut rng) % 3;
+            let before = subtree(root, &children).contains(source);
+            let event = match op {
+                0 => log(source, offset, None),
+                1 if source != target => {
+                    children
+                        .entry(target.to_string())
+                        .or_default()
+                        .insert(source.to_string());
+                    log(
+                        source,
+                        offset,
+                        Some(event::EntryEffect::Link {
+                            target: target.to_string(),
+                            edge_type: "belongs-to".to_string(),
+                        }),
+                    )
+                }
+                2 if source != target => {
+                    if let Some(set) = children.get_mut(target) {
+                        set.remove(source);
+                    }
+                    log(
+                        source,
+                        offset,
+                        Some(event::EntryEffect::Unlink {
+                            target: target.to_string(),
+                            edge_type: "belongs-to".to_string(),
+                            link_entry_id: None,
+                        }),
+                    )
+                }
+                _ => log(source, offset, None),
+            };
+            let after = subtree(root, &children).contains(source);
+            if before || after {
+                expected_event_time.insert(offset);
+            }
+            events.push((offset, event));
+            let _ = step;
+        }
+
+        let final_members = subtree(root, &children);
+        let expected_current: HashSet<usize> = events
+            .iter()
+            .filter(|(_, event)| {
+                event
+                    .strand_id()
+                    .is_some_and(|id| final_members.contains(id))
+            })
+            .map(|(offset, _)| *offset)
+            .collect();
+        let current: HashSet<usize> = timeline_entries(
+            &events,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(root),
+            false,
+            false,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.journal_offset)
+        .collect();
+        assert_eq!(current, expected_current, "current scope seed={seed}");
+
+        let full_event_time: HashSet<usize> = timeline_entries(
+            &events,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(root),
+            true,
+            false,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.journal_offset)
+        .collect();
+        assert_eq!(
+            full_event_time, expected_event_time,
+            "event-time scope seed={seed}"
+        );
+
+        for cursor in [0, 7, 29, 61, events.len()] {
+            let incremental: HashSet<usize> = timeline_entries(
+                &events,
+                Some(cursor),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(root),
+                true,
+                false,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.journal_offset)
+            .collect();
+            let expected: HashSet<usize> = expected_event_time
+                .iter()
+                .copied()
+                .filter(|offset| *offset > cursor)
+                .collect();
+            assert_eq!(
+                incremental, expected,
+                "incremental seed={seed} cursor={cursor}"
+            );
+        }
+    }
+}
+
+#[test]
 fn depends_under_json_forbids_selection_handle() {
     let _env = setup();
     let parent = create_strand("depends sel parent");
