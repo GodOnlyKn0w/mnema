@@ -2181,6 +2181,339 @@ fn timeline_under_excludes_out_of_scope_strands() {
     let _ = (child, outsider);
 }
 
+/// Stable membership: --under X --since-offset N covers authored entries and
+/// close/reopen/hide/unhide/link/unlink/checkpoint effects on the live subtree.
+#[test]
+fn timeline_under_since_covers_authored_and_effect_events() {
+    let _env = setup();
+    let parent = create_strand("fx parent stable");
+    let child = create_strand("fx child stable");
+    let grand = create_strand("fx grand stable");
+    cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events_before, _) = read_events_lossy(&path);
+    let n = events_before.last().map(|(o, _)| *o).unwrap_or(0);
+
+    cmd_append(
+        Some("authored after cursor"),
+        None,
+        false,
+        false,
+        None,
+        Some(&child),
+        None,
+        None,
+    )
+    .unwrap();
+    cmd_close(&child, Some("done"), None, false).unwrap();
+    cmd_reopen(&child, None, false).unwrap();
+    cmd_hide(&child, Some("noise"), false, None).unwrap();
+    cmd_unhide(&child, false).unwrap();
+    cmd_checkpoint(Some(&child), "pause before next step", None, false, false, None)
+        .expect("checkpoint");
+    cmd_link(&grand, &child, Some("belongs-to"), false, None).unwrap();
+    cmd_unlink(&grand, &child, Some("belongs-to"), false, None).unwrap();
+
+    let (events, _) = read_events_lossy(&path);
+    let entries = timeline_entries(
+        &events,
+        Some(n),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&parent),
+        false,
+    )
+    .expect("timeline --under --since-offset");
+
+    let mut saw_authored = false;
+    let mut saw_close = false;
+    let mut saw_reopen = false;
+    let mut saw_hide = false;
+    let mut saw_unhide = false;
+    let mut saw_checkpoint = false;
+    let mut saw_link = false;
+    let mut saw_unlink = false;
+    for e in &entries {
+        assert!(
+            e.strand_id == parent || e.strand_id == child || e.strand_id == grand,
+            "stable under-scope must not include outsiders"
+        );
+        match &e.kind {
+            projection::TimelineEventKind::LogAppended { content, effect } => {
+                if content.contains("authored after cursor") {
+                    saw_authored = true;
+                }
+                match effect {
+                    Some(event::EntryEffect::Close { .. }) => saw_close = true,
+                    Some(event::EntryEffect::Reopen) => saw_reopen = true,
+                    Some(event::EntryEffect::Hide) => saw_hide = true,
+                    Some(event::EntryEffect::Unhide) => saw_unhide = true,
+                    Some(event::EntryEffect::Link { edge_type, .. })
+                        if edge_type == "belongs-to" =>
+                    {
+                        saw_link = true;
+                    }
+                    Some(event::EntryEffect::Unlink { edge_type, .. })
+                        if edge_type == "belongs-to" =>
+                    {
+                        saw_unlink = true;
+                    }
+                    _ => {}
+                }
+            }
+            projection::TimelineEventKind::CheckpointCreated { .. } => saw_checkpoint = true,
+            _ => {}
+        }
+    }
+    assert!(saw_authored, "authored entry after N must appear");
+    assert!(saw_close, "close effect after N must appear");
+    assert!(saw_reopen, "reopen effect after N must appear");
+    assert!(saw_hide, "hide effect after N must appear");
+    assert!(saw_unhide, "unhide effect after N must appear");
+    // Checkpoint may surface as CheckpointCreated (legacy/v3 typed) or as a
+    // log_appended content row depending on journal shape; accept either.
+    let saw_checkpoint_or_content = saw_checkpoint
+        || entries.iter().any(|e| match &e.kind {
+            projection::TimelineEventKind::LogAppended { content, .. } => {
+                content.contains("pause before next step") || content.contains("[checkpoint]")
+            }
+            _ => false,
+        });
+    assert!(
+        saw_checkpoint_or_content,
+        "checkpoint after N must appear in scoped incremental timeline"
+    );
+    assert!(saw_link, "in-tree link effect after N must appear");
+    assert!(saw_unlink, "in-tree unlink effect after N must appear");
+}
+
+/// Counterexample (query-time membership) + fix: leave window must still show
+/// the unlink and in-scope work; post-leave work must not.
+#[test]
+fn timeline_under_since_event_time_keeps_leave_window() {
+    let _env = setup();
+    let parent = create_strand("fx parent leave");
+    let child = create_strand("fx child leave");
+    cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+    cmd_append(
+        Some("in-scope work before leave"),
+        None,
+        false,
+        false,
+        None,
+        Some(&child),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events_before, _) = read_events_lossy(&path);
+    let n = events_before.last().map(|(o, _)| *o).unwrap_or(0);
+
+    cmd_unlink(&child, &parent, Some("belongs-to"), false, None).unwrap();
+    cmd_append(
+        Some("post-leave secret"),
+        None,
+        false,
+        false,
+        None,
+        Some(&child),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let (events, _) = read_events_lossy(&path);
+    // Query-time membership (no since) still uses current members only — child
+    // is gone, so a pure current-id filter would drop the leave. Incremental
+    // path must keep the unlink.
+    let incremental = timeline_entries(
+        &events,
+        Some(n),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&parent),
+        false,
+    )
+    .expect("incremental under+since");
+
+    let contents: Vec<String> = incremental
+        .iter()
+        .filter_map(|e| match &e.kind {
+            projection::TimelineEventKind::LogAppended { content, effect } => {
+                Some(format!("{content}|{effect:?}"))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        contents.iter().any(|c| c.contains("unlink") || c.contains("Unlink")),
+        "leave unlink must appear under event-time scope; got {contents:?}"
+    );
+    assert!(
+        !contents.iter().any(|c| c.contains("post-leave secret")),
+        "post-leave authored work must not leak into parent under+since; got {contents:?}"
+    );
+
+    // Pure query-time baseline (no since): current members only → empty child activity.
+    let browse = timeline_entries(
+        &events,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&parent),
+        false,
+    )
+    .expect("browse under");
+    assert!(
+        browse.iter().all(|e| e.strand_id == parent || e.strand_id == child),
+        "browse under may still include historical rows of current members only"
+    );
+    // Child is no longer a member, so browse must not list child at all.
+    assert!(
+        browse.iter().all(|e| e.strand_id == parent),
+        "browse --under (no since) uses query-time membership; departed child excluded"
+    );
+}
+
+/// Counterexample (query-time membership) + fix: pre-join work after N must not
+/// appear under parent merely because the strand later joined the tree.
+#[test]
+fn timeline_under_since_event_time_excludes_prejoin() {
+    let _env = setup();
+    let parent = create_strand("fx parent prejoin");
+    let orphan = create_strand("fx orphan prejoin");
+
+    let path = ensure_journal().unwrap();
+    let (events_before, _) = read_events_lossy(&path);
+    let n = events_before.last().map(|(o, _)| *o).unwrap_or(0);
+
+    cmd_append(
+        Some("prejoin secret after N"),
+        None,
+        false,
+        false,
+        None,
+        Some(&orphan),
+        None,
+        None,
+    )
+    .unwrap();
+    cmd_link(&orphan, &parent, Some("belongs-to"), false, None).unwrap();
+
+    let (events, _) = read_events_lossy(&path);
+    let incremental = timeline_entries(
+        &events,
+        Some(n),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&parent),
+        false,
+    )
+    .expect("incremental under+since");
+
+    let contents: Vec<String> = incremental
+        .iter()
+        .filter_map(|e| match &e.kind {
+            projection::TimelineEventKind::LogAppended { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !contents.iter().any(|c| c.contains("prejoin secret after N")),
+        "pre-join authored work must not leak via late join; got {contents:?}"
+    );
+    assert!(
+        contents.iter().any(|c| c.contains("link") || c.contains("belongs-to")),
+        "join link itself must appear; got {contents:?}"
+    );
+}
+
+/// search has --under but no since-offset: document the incremental gap.
+/// list --under --since-offset is strand-level last_offset, not event-time.
+#[test]
+fn search_lacks_since_offset_list_since_is_strand_level() {
+    let _env = setup();
+    let parent = create_strand("fx parent list");
+    let child = create_strand("fx child list token-zz");
+    cmd_link(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+    let path = ensure_journal().unwrap();
+    let (events_before, _) = read_events_lossy(&path);
+    let n = events_before.last().map(|(o, _)| *o).unwrap_or(0);
+
+    cmd_append(
+        Some("token-zz after N"),
+        None,
+        false,
+        false,
+        None,
+        Some(&child),
+        None,
+        None,
+    )
+    .unwrap();
+    cmd_unlink(&child, &parent, Some("belongs-to"), false, None).unwrap();
+
+    let (events, _) = read_events_lossy(&path);
+    let max = events.last().map(|(o, _)| *o).unwrap_or(0);
+    // search --under still finds historical log rows of current members only;
+    // departed child is out of current SubtreeScope → no hits after leave.
+    let search = search_events(
+        &events,
+        &SearchRequest {
+            query: "token-zz",
+            include_hidden: false,
+            marker: None,
+            under: Some(&parent),
+            allow_selection: false,
+            current_max_offset: max,
+        },
+    )
+    .expect("search --under");
+    assert_eq!(
+        search.output.count, 0,
+        "search uses query-time membership; departed child logs are invisible under parent"
+    );
+
+    // list --under --since-offset: empty because child left and parent did not move.
+    let listed = list_strands(
+        &events,
+        &ListRequest {
+            include_hidden: false,
+            links: None,
+            backlinks: None,
+            state: None,
+            list_type: None,
+            stale: None,
+            stale_offset: None,
+            since_offset: Some(n),
+            under: Some(&parent),
+            allow_selection: false,
+        },
+        chrono::Utc::now(),
+    )
+    .expect("list --under --since-offset");
+    assert!(
+        listed.is_empty(),
+        "list since-offset is query-time last_offset; leave on child does not surface parent"
+    );
+}
+
 #[test]
 fn under_flag_parses_on_collection_commands() {
     use clap::CommandFactory;

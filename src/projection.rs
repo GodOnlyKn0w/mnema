@@ -1196,3 +1196,201 @@ pub fn project_timeline(events: &[(usize, Event)]) -> Vec<TimelineEntry> {
     entries.sort_by_key(|e| e.journal_offset);
     entries
 }
+
+// ── Event-time SubtreeScope for incremental --under ─────────
+
+/// Live belongs-to edge instance used only for event-time scope folds.
+struct BelongInst {
+    source: String,
+    target: String,
+    id: Option<String>,
+    live: bool,
+}
+
+fn belongs_children_map(insts: &[BelongInst]) -> std::collections::HashMap<String, HashSet<String>> {
+    let mut children: std::collections::HashMap<String, HashSet<String>> =
+        std::collections::HashMap::new();
+    for inst in insts.iter().filter(|i| i.live) {
+        children
+            .entry(inst.target.clone())
+            .or_default()
+            .insert(inst.source.clone());
+    }
+    children
+}
+
+fn strand_in_belongs_subtree(
+    id: &str,
+    root_id: &str,
+    created: &HashSet<String>,
+    children: &std::collections::HashMap<String, HashSet<String>>,
+) -> bool {
+    if !created.contains(root_id) {
+        return false;
+    }
+    if id == root_id {
+        return true;
+    }
+    if !created.contains(id) {
+        return false;
+    }
+    let mut stack = vec![root_id.to_string()];
+    let mut seen = HashSet::new();
+    seen.insert(root_id.to_string());
+    while let Some(cur) = stack.pop() {
+        if let Some(kids) = children.get(&cur) {
+            for kid in kids {
+                if !seen.insert(kid.clone()) {
+                    continue;
+                }
+                if kid == id {
+                    return true;
+                }
+                if created.contains(kid) {
+                    stack.push(kid.clone());
+                }
+            }
+        }
+    }
+    false
+}
+
+fn apply_belongs_event(insts: &mut Vec<BelongInst>, created: &mut HashSet<String>, event: &Event) {
+    match event {
+        Event::StrandCreated { id, .. } => {
+            created.insert(id.clone());
+        }
+        Event::LogAppended {
+            id,
+            entry_id,
+            effect: Some(EntryEffect::Link { target, edge_type }),
+            ..
+        } if edge_type == "belongs-to" => {
+            insts.push(BelongInst {
+                source: id.clone(),
+                target: target.clone(),
+                id: entry_id.clone(),
+                live: true,
+            });
+        }
+        Event::EdgeLinked {
+            id,
+            to,
+            edge_type: Some(et),
+            ..
+        } if et == "belongs-to" => {
+            insts.push(BelongInst {
+                source: id.clone(),
+                target: to.clone(),
+                id: None,
+                live: true,
+            });
+        }
+        Event::LogAppended {
+            id,
+            effect:
+                Some(EntryEffect::Unlink {
+                    target,
+                    edge_type,
+                    link_entry_id,
+                }),
+            ..
+        } if edge_type == "belongs-to" => match link_entry_id {
+            Some(cancel) => {
+                if let Some(inst) = insts
+                    .iter_mut()
+                    .find(|i| i.live && i.id.as_deref() == Some(cancel.as_str()))
+                {
+                    inst.live = false;
+                }
+            }
+            None => {
+                // Legacy key tombstone: drop every live belongs-to from source→target.
+                for inst in insts
+                    .iter_mut()
+                    .filter(|i| i.live && i.source == *id && i.target == *target)
+                {
+                    inst.live = false;
+                }
+            }
+        },
+        Event::EdgeUnlinked {
+            id,
+            to,
+            edge_type: Some(et),
+            ..
+        } if et == "belongs-to" => {
+            for inst in insts
+                .iter_mut()
+                .filter(|i| i.live && i.source == *id && i.target == *to)
+            {
+                inst.live = false;
+            }
+        }
+        Event::EdgeUnlinked {
+            id,
+            to,
+            edge_type: None,
+            ..
+        } => {
+            // Untyped legacy unlink: drop matching belongs-to instances.
+            for inst in insts
+                .iter_mut()
+                .filter(|i| i.live && i.source == *id && i.target == *to)
+            {
+                inst.live = false;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Journal offsets whose events fall inside `Subtree(root_id)` under
+/// **event-time** membership.
+///
+/// An event at offset O on strand S is included when S is in the belongs-to
+/// subtree of `root_id` either immediately before applying the event or
+/// immediately after. That captures:
+/// - authored entries and effects while a strand is a member;
+/// - the join link that brings a strand into the tree;
+/// - the leave unlink that removes it;
+/// and excludes pre-join / post-leave activity that query-time membership
+/// would incorrectly include or drop when composing `--under` with a cursor.
+///
+/// Used by `timeline --under X` when a temporal lower bound is also set so
+/// incremental catch-up can express every in-scope fact after offset N.
+pub fn event_time_subtree_offsets(
+    events: &[(usize, Event)],
+    root_id: &str,
+) -> HashSet<usize> {
+    let mut created: HashSet<String> = HashSet::new();
+    let mut insts: Vec<BelongInst> = Vec::new();
+    let mut out: HashSet<usize> = HashSet::new();
+
+    for (offset, event) in events {
+        if matches!(event, Event::JournalAnchored { .. }) {
+            continue;
+        }
+        let strand_id = match event {
+            Event::SubjectBound { strand_id, .. } => strand_id.as_str(),
+            _ => match event.strand_id() {
+                Some(id) => id,
+                None => continue,
+            },
+        };
+
+        let children_before = belongs_children_map(&insts);
+        let before =
+            strand_in_belongs_subtree(strand_id, root_id, &created, &children_before);
+
+        apply_belongs_event(&mut insts, &mut created, event);
+
+        let children_after = belongs_children_map(&insts);
+        let after = strand_in_belongs_subtree(strand_id, root_id, &created, &children_after);
+
+        if before || after {
+            out.insert(*offset);
+        }
+    }
+    out
+}

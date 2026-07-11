@@ -439,21 +439,21 @@ pub(crate) fn filter_timeline_by_ts(
     Ok(())
 }
 
-pub(crate) fn cmd_timeline(
+/// Pure timeline projection + filters (offset/ts/strand/links/under).
+/// Shared by `cmd_timeline` and tests so scoped-incremental fixtures do not
+/// need a live CLI journal walk.
+pub(crate) fn timeline_entries(
+    events: &[(usize, Event)],
     since_offset: Option<usize>,
     since_ts: Option<&str>,
     until_offset: Option<usize>,
     until_ts: Option<&str>,
     strand: Option<&str>,
     links: Option<&str>,
-    format_json: Option<&str>,
-    limit: Option<usize>,
-    tail: Option<usize>,
     under: Option<&str>,
-) -> Result<(), String> {
-    let path = ensure_journal()?;
-    let (events, _skipped) = read_events_lossy(&path);
-    let mut entries = projection::project_timeline(&events);
+    allow_selection: bool,
+) -> Result<Vec<projection::TimelineEntry>, String> {
+    let mut entries = projection::project_timeline(events);
 
     // Filter by offset range
     if let Some(so) = since_offset {
@@ -465,8 +465,7 @@ pub(crate) fn cmd_timeline(
     filter_timeline_by_ts(&mut entries, since_ts, until_ts)?;
 
     // Filter by strand or links
-    let canonical_strands = projection::project_strands(&events, true);
-    let allow_selection = format_json != Some("json");
+    let canonical_strands = projection::project_strands(events, true);
     let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);
     if let Some(sid) = strand {
         let full_id = crate::reference::resolve_strand_with_selection(
@@ -500,8 +499,51 @@ pub(crate) fn cmd_timeline(
         allow_selection,
         current_max_offset,
     )?;
-    let scope_ids = scope.resolve_ids(&canonical_strands)?;
-    entries.retain(|entry| scope_ids.contains(&entry.strand_id));
+    // Incremental catch-up (`--under` + temporal lower bound) uses event-time
+    // SubtreeScope membership so join/leave and in-window facts are not lost
+    // or leaked by folding membership only at query time. Browse-only
+    // `--under` (no since-*) keeps query-time current-member filtering.
+    let use_event_time_scope =
+        !scope.is_journal() && (since_offset.is_some() || since_ts.is_some());
+    if use_event_time_scope {
+        let root_id = scope
+            .root_id()
+            .expect("subtree scope has root when not journal");
+        let in_scope = projection::event_time_subtree_offsets(events, root_id);
+        entries.retain(|entry| in_scope.contains(&entry.journal_offset));
+    } else {
+        let scope_ids = scope.resolve_ids(&canonical_strands)?;
+        entries.retain(|entry| scope_ids.contains(&entry.strand_id));
+    }
+    Ok(entries)
+}
+
+pub(crate) fn cmd_timeline(
+    since_offset: Option<usize>,
+    since_ts: Option<&str>,
+    until_offset: Option<usize>,
+    until_ts: Option<&str>,
+    strand: Option<&str>,
+    links: Option<&str>,
+    format_json: Option<&str>,
+    limit: Option<usize>,
+    tail: Option<usize>,
+    under: Option<&str>,
+) -> Result<(), String> {
+    let path = ensure_journal()?;
+    let (events, _skipped) = read_events_lossy(&path);
+    let allow_selection = format_json != Some("json");
+    let mut entries = timeline_entries(
+        &events,
+        since_offset,
+        since_ts,
+        until_offset,
+        until_ts,
+        strand,
+        links,
+        under,
+        allow_selection,
+    )?;
 
     let truncated = apply_timeline_window_limit(&mut entries, limit, tail);
 
