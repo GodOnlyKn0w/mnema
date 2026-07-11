@@ -120,6 +120,8 @@ pub(crate) fn cmd_link(
         legacy_ref: None,
         effect: Some(effect),
         provenance,
+        kind_override: None,
+        payload_override: None,
     })?;
     if format_json {
         let output = output::LinkOutput {
@@ -208,6 +210,8 @@ pub(crate) fn cmd_unlink(
         legacy_ref: None,
         effect: Some(effect),
         provenance,
+        kind_override: None,
+        payload_override: None,
     })?;
     if format_json {
         let output = output::UnlinkOutput {
@@ -262,6 +266,8 @@ pub(crate) fn cmd_hide(
             legacy_ref: None,
             effect: Some(effect),
             provenance,
+            kind_override: None,
+            payload_override: None,
         },
         |events| {
             if projection::hide_balance(events, &strand_id) > 0 {
@@ -310,6 +316,8 @@ pub(crate) fn cmd_unhide(id: &str, format_json: bool) -> Result<(), String> {
             legacy_ref: None,
             effect: Some(effect),
             provenance: None,
+            kind_override: None,
+            payload_override: None,
         },
         |events| {
             if projection::hide_balance(events, &strand_id) <= 0 {

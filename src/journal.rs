@@ -18,6 +18,8 @@ pub(crate) struct JournalEntryAppendRequest {
     pub(crate) legacy_ref: Option<String>,
     pub(crate) effect: Option<EntryEffect>,
     pub(crate) provenance: Option<serde_json::Value>,
+    pub(crate) kind_override: Option<String>,
+    pub(crate) payload_override: Option<serde_json::Value>,
 }
 
 impl JournalAppendOutcome {
@@ -519,7 +521,7 @@ fn append_events_as_v3(
     fs2::FileExt::lock_exclusive(&lock_file)
         .map_err(|e| format!("cannot acquire journal lock: {e}"))?;
 
-    let result = append_events_as_v3_locked(path, journal_id, events);
+    let result = append_events_as_v3_locked(path, journal_id, events, None);
     let _ = fs2::FileExt::unlock(&lock_file);
     result
 }
@@ -534,6 +536,7 @@ fn append_events_as_v3_locked(
     path: &std::path::Path,
     journal_id: &str,
     events: &[Event],
+    entry_override: Option<(String, serde_json::Value)>,
 ) -> Result<JournalBatchAppendOutcome, String> {
     use crate::canonical::{EntryHashViewV3, JournalRecordV3, StrandKeyV3, random_genesis_seed};
 
@@ -641,12 +644,16 @@ fn append_events_as_v3_locked(
             }
         };
         let prev = heads.get(&resolved_id).cloned();
-        let (kind, payload) = match effect {
-            Some(eff) => (
+        let (kind, payload) = match (effect, entry_override.as_ref()) {
+            (Some(_), Some(_)) => {
+                return Err("typed entry override cannot be combined with an effect".to_string());
+            }
+            (None, Some((kind, payload))) => (kind.clone(), payload.clone()),
+            (Some(eff), None) => (
                 "effect".to_string(),
                 v2_effect_to_payload(eff, &outcome)?.into_value(),
             ),
-            None => (
+            (None, None) => (
                 crate::canonical::kind_from_body(content),
                 serde_json::Value::Null,
             ),
@@ -905,7 +912,13 @@ pub(crate) fn append_entry_to_strand_gated(
                 Event::LogAppended { entry_id, .. } => entry_id.clone(),
                 _ => None,
             };
-            let appended = append_events_as_v3_locked(&path, &journal_id, &[event.clone()])?;
+            let entry_override = match (req.kind_override, req.payload_override) {
+                (Some(kind), Some(payload)) => Some((kind, payload)),
+                (None, None) => None,
+                _ => return Err("typed entry override requires both kind and payload".to_string()),
+            };
+            let appended =
+                append_events_as_v3_locked(&path, &journal_id, &[event.clone()], entry_override)?;
             if let (Some(provisional), Event::LogAppended { entry_id, .. }) =
                 (provisional_entry_id, &mut event)
             {
@@ -1035,6 +1048,22 @@ fn read_journal_lossy_reader<R: BufRead>(reader: R) -> JournalRead {
 }
 
 pub(crate) fn read_events_strict(path: &PathBuf) -> Result<Vec<(usize, Event)>, String> {
+    if let ActiveJournal::V3 {
+        journal_id,
+        path: active_path,
+        ..
+    } = resolve_active_journal()?
+    {
+        if path == &active_path {
+            return Ok(crate::cutover_v3::records_to_v2_events(
+                &crate::journal_v3::read_records_strict(&active_path, &journal_id)?,
+            )
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| (index + 1, event))
+            .collect());
+        }
+    }
     let file = std::fs::File::open(path).map_err(|e| format!("cannot read journal: {}", e))?;
     let reader = std::io::BufReader::new(file);
     let mut events = Vec::new();

@@ -643,6 +643,8 @@ pub(crate) fn execute_append(req: AppendRequest<'_>) -> Result<AppendOutcome, St
         legacy_ref: None,
         effect: None,
         provenance: provenance.clone(),
+        kind_override: None,
+        payload_override: None,
     })?;
     let entry_id = appended.entry_id;
 
@@ -824,6 +826,8 @@ pub(crate) fn cmd_close(
             legacy_ref: None,
             effect: Some(effect),
             provenance: None,
+            kind_override: None,
+            payload_override: None,
         },
         move |events| {
             let (current_state, _, _) = projection::compute_state_from_events(events, &validate_id);
@@ -878,6 +882,8 @@ pub(crate) fn cmd_reopen(id: &str, reason: Option<&str>, format_json: bool) -> R
             legacy_ref: None,
             effect: Some(effect),
             provenance: None,
+            kind_override: None,
+            payload_override: None,
         },
         move |events| {
             let (current_state, _, _) = projection::compute_state_from_events(events, &validate_id);
@@ -1223,6 +1229,17 @@ pub(crate) fn commit_checkpoint(plan: &mut CheckpointPlan) -> Result<(), Checkpo
             legacy_ref: None,
             effect: None,
             provenance: plan.provenance.clone(),
+            kind_override: Some("checkpoint".to_string()),
+            payload_override: Some(
+                crate::canonical::CheckpointPayloadV3 {
+                    observed: format!(
+                        "entries_before_append={} journal_offset={}",
+                        plan.observed_entries_before_append, plan.max_offset_before
+                    ),
+                    action: plan.action.clone(),
+                }
+                .into_value(),
+            ),
         },
         move |events| {
             let current_max_offset = events.last().map(|(offset, _)| *offset).unwrap_or(0);

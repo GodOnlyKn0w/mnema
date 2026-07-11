@@ -317,6 +317,20 @@ fn convert_event(state: &mut ConvertState, offset: usize, event: &Event) -> Resu
             entry_id,
             ..
         } => match effect {
+            Some(EntryEffect::Link { target, edge_type })
+            | Some(EntryEffect::Unlink {
+                target, edge_type, ..
+            }) if edge_type == "why" => convert_legacy_why_relation(
+                state,
+                offset,
+                id,
+                ts,
+                content,
+                target,
+                provenance.as_ref(),
+                entry_id.as_deref(),
+                "log_appended_legacy_why",
+            ),
             Some(EntryEffect::Unlink {
                 target,
                 edge_type,
@@ -353,6 +367,20 @@ fn convert_event(state: &mut ConvertState, offset: usize, event: &Event) -> Resu
             provenance,
         } => {
             let etype = edge_type.as_deref().unwrap_or("depends-on");
+            if etype == "why" {
+                let body = format!("legacy why relation to {to}");
+                return convert_legacy_why_relation(
+                    state,
+                    offset,
+                    id,
+                    ts,
+                    &body,
+                    to,
+                    provenance.as_ref(),
+                    None,
+                    "edge_linked_legacy_why",
+                );
+            }
             // Reject unsupported edge types early (migration-source-invalid).
             parse_edge_type(etype).map_err(|e| {
                 format!("migration-source-invalid at offset {offset}: {e} (event edge_linked)")
@@ -382,6 +410,20 @@ fn convert_event(state: &mut ConvertState, offset: usize, event: &Event) -> Resu
             provenance,
         } => {
             let etype = edge_type.as_deref().unwrap_or("depends-on");
+            if etype == "why" {
+                let body = format!("legacy why relation removed from {to}");
+                return convert_legacy_why_relation(
+                    state,
+                    offset,
+                    id,
+                    ts,
+                    &body,
+                    to,
+                    provenance.as_ref(),
+                    None,
+                    "edge_unlinked_legacy_why",
+                );
+            }
             parse_edge_type(etype).map_err(|e| {
                 format!("migration-source-invalid at offset {offset}: {e} (event edge_unlinked)")
             })?;
@@ -489,6 +531,94 @@ fn convert_event(state: &mut ConvertState, offset: usize, event: &Event) -> Resu
             provenance.as_ref(),
         ),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_legacy_why_relation(
+    state: &mut ConvertState,
+    offset: usize,
+    old_strand_id: &str,
+    ts: &str,
+    body: &str,
+    target_old: &str,
+    provenance: Option<&serde_json::Value>,
+    old_entry_id: Option<&str>,
+    variant: &str,
+) -> Result<(), String> {
+    let target_strand_id = state
+        .strand_map
+        .get(target_old)
+        .cloned()
+        .ok_or_else(|| format!("legacy why target strand {target_old} not yet converted"))?;
+    let created_at = canonicalize_timestamp("created_at", ts)?;
+    note_max_ts(state, &created_at);
+    let provenance_value = provenance.cloned().unwrap_or(serde_json::Value::Null);
+    let is_genesis = !state.heads.contains_key(old_strand_id);
+    let strand_key = if is_genesis {
+        let meta = state.strand_meta.get(old_strand_id);
+        StrandKeyV3::Genesis {
+            seed: deterministic_v2_import_seed(&state.source_journal_id, old_strand_id),
+            slug: meta.and_then(|value| value.slug.clone()),
+            strand_type: meta.and_then(|value| value.strand_type.clone()),
+        }
+    } else {
+        StrandKeyV3::Existing {
+            id: state.strand_map[old_strand_id].clone(),
+        }
+    };
+    let reference = RefV3::Strand {
+        journal_id: state.source_journal_id.clone(),
+        strand_id: target_strand_id,
+    };
+    let view = EntryHashViewV3::new(
+        strand_key,
+        state.heads.get(old_strand_id).cloned(),
+        "legacy_relation",
+        body,
+        vec![reference.clone()],
+        author_from_provenance(&provenance_value),
+        created_at,
+        serde_json::Value::Null,
+        provenance_value,
+    );
+    let record = view.into_record()?;
+    let JournalRecordV3::Entry(entry) = &record else {
+        unreachable!()
+    };
+    if is_genesis {
+        state
+            .strand_map
+            .insert(old_strand_id.to_string(), entry.strand_id.clone());
+    }
+    state
+        .heads
+        .insert(old_strand_id.to_string(), entry.entry_id.clone());
+    if let Some(old_entry_id) = old_entry_id {
+        state
+            .entry_map
+            .insert(old_entry_id.to_string(), entry.entry_id.clone());
+    }
+    state.refs.push(CutoverV3RefMap {
+        source: target_old.to_string(),
+        target: reference,
+    });
+    state.entries.push(CutoverV3EntryMap {
+        old_offset: offset,
+        old_strand_id: old_strand_id.to_string(),
+        old_entry_id: old_entry_id.map(str::to_string),
+        new_strand_id: entry.strand_id.clone(),
+        new_entry_id: entry.entry_id.clone(),
+        kind: "legacy_relation".to_string(),
+    });
+    state.source_records.push(CutoverV3SourceRecord {
+        offset,
+        variant: variant.to_string(),
+        disposition: "converted_to_typed_strand_ref_entry".to_string(),
+        new_entry_ids: vec![entry.entry_id.clone()],
+        new_strand_id: Some(entry.strand_id.clone()),
+    });
+    state.records.push(record);
+    Ok(())
 }
 
 /// Expand a legacy key-tombstone unlink into 0..N typed Unlink entries.
@@ -1030,6 +1160,9 @@ fn check_projection_equivalence(
                 v2_entry_events += 1;
                 match effect {
                     Some(EntryEffect::Link { target, edge_type }) => {
+                        if edge_type == "why" {
+                            continue;
+                        }
                         *live
                             .entry(id.clone())
                             .or_default()
@@ -1042,6 +1175,9 @@ fn check_projection_equivalence(
                         edge_type,
                         link_entry_id: None,
                     }) => {
+                        if edge_type == "why" {
+                            continue;
+                        }
                         if let Some(n) = live
                             .get_mut(id)
                             .and_then(|m| m.remove(&(target.clone(), edge_type.clone())))
@@ -1054,6 +1190,9 @@ fn check_projection_equivalence(
                         edge_type,
                         link_entry_id: Some(_),
                     }) => {
+                        if edge_type == "why" {
+                            continue;
+                        }
                         if let Some(m) = live.get_mut(id) {
                             if let Some(n) = m.get_mut(&(target.clone(), edge_type.clone())) {
                                 *n = n.saturating_sub(1);
@@ -1089,6 +1228,9 @@ fn check_projection_equivalence(
                 let et = edge_type
                     .clone()
                     .unwrap_or_else(|| "depends-on".to_string());
+                if et == "why" {
+                    continue;
+                }
                 *live
                     .entry(id.clone())
                     .or_default()
@@ -1104,6 +1246,9 @@ fn check_projection_equivalence(
                 let et = edge_type
                     .clone()
                     .unwrap_or_else(|| "depends-on".to_string());
+                if et == "why" {
+                    continue;
+                }
                 if let Some(n) = live.get_mut(id).and_then(|m| m.remove(&(to.clone(), et))) {
                     v2_edges = v2_edges.saturating_sub(n);
                 }
@@ -1996,5 +2141,52 @@ mod tests {
         value["future"] = serde_json::json!(true);
         let text = serde_json::to_string(&value).unwrap();
         assert!(crate::strict_json::from_str::<CutoverV3Map>(&text).is_err());
+    }
+
+    #[test]
+    fn retired_why_edge_becomes_typed_strand_ref_evidence() {
+        let journal_id = "aa".repeat(32);
+        let (target_created, target_entry) = event::make_strand_created("target", Some("task"));
+        let target_id = target_created.strand_id().unwrap().to_string();
+        let (source_created, source_entry) = event::make_strand_created("source", Some("task"));
+        let source_id = source_created.strand_id().unwrap().to_string();
+        let why = Event::EdgeLinked {
+            id: source_id,
+            ts: "2026-07-11T00:00:10Z".to_string(),
+            to: target_id,
+            edge_type: Some("why".to_string()),
+            provenance: None,
+        };
+        let source: Vec<_> = vec![
+            target_created,
+            target_entry,
+            source_created,
+            source_entry,
+            why,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| (index + 1, event))
+        .collect();
+        let plan = build_cutover_v3_plan(&journal_id, &"bb".repeat(32), &source).unwrap();
+        let record = plan
+            .records
+            .iter()
+            .find_map(|record| match record {
+                JournalRecordV3::Entry(entry) if entry.entry.kind == "legacy_relation" => {
+                    Some(entry)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(matches!(
+            record.entry.refs.as_slice(),
+            [RefV3::Strand { .. }]
+        ));
+        assert_eq!(
+            "converted_to_typed_strand_ref_entry",
+            plan.map.source_records.last().unwrap().disposition
+        );
+        assert_eq!(0, plan.equivalence.edge_count_v3);
     }
 }

@@ -176,3 +176,46 @@ fn fresh_init_removes_an_empty_legacy_placeholder() {
     assert!(!mnema.join("journal.jsonl").exists());
     success(run(dir.path(), &["doctor", "journal"], None));
 }
+
+#[test]
+fn v3_checkpoint_writes_a_typed_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    success(run(dir.path(), &["init"], None));
+    let add = success(run(
+        dir.path(),
+        &["add", "--format", "json"],
+        Some("checkpoint target\n"),
+    ));
+    let add: serde_json::Value = serde_json::from_str(add.trim()).unwrap();
+    let id = add["id"].as_str().unwrap();
+    success(run(
+        dir.path(),
+        &[
+            "checkpoint",
+            "--id",
+            id,
+            "--action",
+            "continue implementation",
+            "--format",
+            "json",
+        ],
+        None,
+    ));
+    let values = records(&dir.path().join(".mnema/journals/journal.v3.jsonl"));
+    let checkpoint = values
+        .iter()
+        .rev()
+        .find(|value| value["record"] == "entry")
+        .unwrap();
+    assert_eq!(Some("checkpoint"), checkpoint["entry"]["kind"].as_str());
+    assert_eq!(
+        Some("continue implementation"),
+        checkpoint["entry"]["payload"]["action"].as_str()
+    );
+    assert!(
+        checkpoint["entry"]["payload"]["observed"]
+            .as_str()
+            .unwrap()
+            .contains("entries_before_append=")
+    );
+}

@@ -574,9 +574,13 @@ pub(crate) fn author_from_provenance(provenance: &Value) -> Option<String> {
 }
 
 pub(crate) fn kind_from_body(body: &str) -> String {
-    crate::markers::leading_marker(body)
-        .unwrap_or("note")
-        .to_string()
+    match crate::markers::leading_marker(body) {
+        // These kinds have mandatory typed payloads. A bracket marker in
+        // human-authored prose is an annotation, not permission to forge a
+        // structural envelope with payload=null.
+        Some("effect" | "checkpoint" | "subject_binding") | None => "note".to_string(),
+        Some(marker) => marker.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -942,5 +946,7 @@ mod tests {
         assert_eq!(kind_from_body("[decision] choose A"), "decision");
         assert_eq!(kind_from_body("  [friction] blocked"), "friction");
         assert_eq!(kind_from_body("plain note"), "note");
+        assert_eq!(kind_from_body("[checkpoint] legacy annotation"), "note");
+        assert_eq!(kind_from_body("[effect] prose only"), "note");
     }
 }
