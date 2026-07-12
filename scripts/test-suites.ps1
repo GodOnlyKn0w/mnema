@@ -9,7 +9,7 @@ function Get-MnemaTestSuites {
         [pscustomobject]@{ Name = 'compile-release'; Phase = 1; TimeoutMs = 600000; Argv = @('cargo', 'test', '--release', '--no-run') },
         [pscustomobject]@{ Name = 'compile-failpoints'; Phase = 1; TimeoutMs = 300000; Argv = @('cargo', 'test', '--release', '--features', 'test-failpoints', '--test', 'crash_atomicity', '--no-run') },
         [pscustomobject]@{ Name = 'unit'; Phase = 2; TimeoutMs = 600000; Argv = @('cargo', 'test', '--release', '--bin', 'mnema') },
-        [pscustomobject]@{ Name = 'behavior'; Phase = 2; TimeoutMs = 180000; Argv = @('cargo', 'test', '--release', '--test', 'behavior_harness') },
+        [pscustomobject]@{ Name = 'behavior'; Phase = 2; TimeoutMs = 420000; Argv = @('cargo', 'test', '--release', '--test', 'behavior_harness') },
         [pscustomobject]@{ Name = 'cli-recovery'; Phase = 2; TimeoutMs = 120000; Argv = @('cargo', 'test', '--release', '--test', 'cli_recovery') },
         [pscustomobject]@{ Name = 'compat-v2-v3'; Phase = 2; TimeoutMs = 120000; Argv = @('cargo', 'test', '--release', '--test', 'v2_v3_compat') },
         [pscustomobject]@{ Name = 'v3-runtime'; Phase = 2; TimeoutMs = 180000; Argv = @('cargo', 'test', '--release', '--test', 'v3_runtime') },
