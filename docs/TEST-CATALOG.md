@@ -21,8 +21,8 @@
 | `format` | Rust 格式稳定 | `cargo fmt --check` | Fast, Full | repo read-only | 秒级 | exit code；Rust source |
 | `build-release` | 可交付的 release CLI 可构建 | `cargo build --release` | Fast, Full | 独占或独立 `CARGO_TARGET_DIR` | 约 1–3 分钟（冷） | Cargo log + TerminalEvent；`target/release/mnema.exe` |
 | `compile-release` | release profile 可编译；所有 test binaries 可链接 | `cargo test --release --no-run` | Fast, Full | 独占或独立 `CARGO_TARGET_DIR` | 约 1–3 分钟（冷） | Cargo log + TerminalEvent；Cargo.toml |
-| `unit` | event/canonical/activation/v3 codec/projection/CLI/JSON/help/write/read contracts | `cargo test --release --bin mnema` | Full | Rust tests 使用自身 temp/CWD lock；不可触碰 repo `.mnema` | 383 tests，约 203 秒 | Rust test report；`src/**/*` + `src/tests/*` |
-| `behavior` | release CLI 黑盒 scope、cursor、refs、并发完成态、manifest smoke 与 reviewed text snapshots | `cargo test --release --test behavior_harness` | Fast, Full | 每场景独立 temp project；固定 `NO_COLOR`/`TZ` | 7 tests，约 20 秒 | test report；`tests/behavior_harness.rs`, `tests/behavior/*` |
+| `unit` | event/canonical/activation/v3 codec/projection/CLI/JSON/help/write/read contracts | `cargo test --release --bin mnema` | Full | Rust tests 使用自身 temp/CWD lock；不可触碰 repo `.mnema` | 384 tests | Rust test report；`src/**/*` + `src/tests/*` |
+| `behavior` | release CLI 黑盒 scope、cursor、三关系正交、并发完成态、manifest smoke 与 reviewed text snapshots | `cargo test --release --test behavior_harness` | Fast, Full | 每场景独立 temp project；固定 `NO_COLOR`/`TZ` | 8 tests，约 90 秒 | test report；`tests/behavior_harness.rs`, `tests/behavior/*` |
 | `cli-recovery` | 错误 argv 的 exit/stderr 修复提示，不污染正文 | `cargo test --release --test cli_recovery` | Fast, Full | Cargo 提供 release binary；无 repo journal | 3 tests，<1 秒 | test report；`tests/cli_recovery.rs` |
 | `v3-runtime` | fresh v3 写入、manifest、doctor、shadow、checkpoint、orient strict read | `cargo test --release --test v3_runtime` | Full | 每 test 独立 temp project | 7 tests，约 3 秒 | test report；`tests/v3_runtime.rs` |
 | `generated-differential-ci` | 独立 scope model 对 current/event-time full replay 与 cursor 增量一致性 | `cargo test --release generated_scope_model_matches_full_and_incremental_replay` | Full | 纯内存、固定 seeds | 包含在 unit，约数秒 | failure seed/cursor；`src/tests/query_tests.rs` |
@@ -32,6 +32,9 @@
 | `differential-expanded` | 256 seeds × 240 events 的 current/event-time full+incremental 独立模型差分 | `scripts/ci.ps1 -Mode Nightly` 选择固定 Rust test 并设置 seed/event env | Nightly | 纯内存、固定可复现 seeds | 秒级 | failure seed/cursor |
 | `fuzz-strict-input` | strict JSON reader 对 10,000 个可复现 hostile ASCII inputs 不 panic | `scripts/ci.ps1 -Mode Nightly` 选择固定 Rust test 并设置 cases env | Nightly | 确定性 corpus | 约数分钟 | failure case + Rust report |
 | `doctor-smoke` | 部署后二进制能严格读取本仓 journal | `mnema doctor journal` | Full（部署后） | 明确 `-C <repo>`；只读 | 秒级 | stdout/stderr + TerminalEvent；release wrapper |
+| `recursive-rere-smoke` | 虚拟 Journal 根与深度 1/2 strand 根同一递归语义；outsider 不进 subtree；refs 不扩 scope | `python tests/recursive/rere.py replay tests/recursive/smoke.list` | Fast, Full | 每场景独立 temp journal；`MNEMA_RERE_REPLAY_ONLY=1` | 约 30–60 秒 | reviewed `smoke.list.bi` + rere diff |
+| `recursive-rere-full` | 深度 0..10 在任意 mid-root 下祖先不泄漏；reparent join/leave 后 membership 同构 | `python tests/recursive/rere.py replay tests/recursive/full.list` | Full, Nightly | 每场景独立 temp；AsyncExec 可 durable 托管 | 约 30–90 秒 | reviewed `full.list.bi` + rere diff |
+| `recursive-rere-crash` | 完整 parent+refs 批次后 strict read 只见完整态；中途 abort 由 `crash-atomicity` 覆盖 | `python tests/recursive/rere.py replay tests/recursive/crash.list` | Nightly | 独立 temp；record 禁止自动运行 | 约 20–40 秒 | reviewed `crash.list.bi` + rere diff |
 
 ## Historical compatibility inventory
 
@@ -50,9 +53,6 @@
 |---|---|---|---|---|
 | `concurrent-visibility` | planned | reader 在 parent+refs 与 anchor 批次中途看不到半状态 | Full | 多进程 writer+reader；独立 temp journal；事件时间线 |
 | `performance-scale` | planned | 100k/1m events 的 p50/p95/p99、吞吐、冷暖 cache 曲线 | Nightly | 独占机器/target；不与 correctness shard 并发；baseline JSON |
-| `recursive-rere-smoke` | implementation in progress | 虚拟 Journal 根与深度 1/2 strand 根使用同一递归语义，且默认视野不串树 | Fast | `tests/recursive/smoke.list`；rere replay only；每场景隔离 journal |
-| `recursive-rere-full` | implementation in progress | 深度 0..10 的 orient/query/add-child、refs 不扩 scope、reparent join/leave 保持递归同构 | Full/Nightly | `tests/recursive/full.list`；固定 rere fixtures；AsyncExec durable replay |
-| `recursive-rere-crash` | implementation in progress | 递归 parent+refs 与拓扑变化在 crash/failpoint 后只暴露完整旧态或新态 | Nightly | `tests/recursive/crash.list`；AsyncExec timeout/log facts；record 禁止自动运行 |
 | `fixture-typed-unlink` | planned | typed unlink + legacy tombstone 的 v2→v3 解释冻结 | Full | 新版本 fixture，不修改 compat-v1 |
 | `fixture-retired-why` | planned | legacy why 只迁成 ref、不成为 live edge | Full | 新版本 fixture，不修改 compat-v1 |
 
@@ -75,9 +75,17 @@ build-release → compile-release
   ├─ unit
   ├─ behavior
   ├─ cli-recovery
-  ├─ v2-v3-compat
-  └─ v3-runtime
+  ├─ compat-v2-v3
+  ├─ v3-runtime
+  ├─ crash-atomicity
+  ├─ recursive-rere-smoke
+  └─ recursive-rere-full
 ```
+
+Recursive rere suites are replay-only under `MNEMA_RERE_REPLAY_ONLY=1`.
+Recording is a deliberate maintainer action documented in
+`tests/recursive/README.md`; AsyncExec only hosts replay and preserves process
+facts.
 
 每个 async run 的 RequestId 必须包含 repo、commit、lane、suite 和自动化 schema version；不同 worktree 必须使用独立 `CARGO_TARGET_DIR`。日志与 Handle/TerminalEvent 放在 `.artifacts/ci/<commit>/<run>/`，不得写入 `.mnema/`。
 

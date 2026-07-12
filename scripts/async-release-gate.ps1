@@ -20,6 +20,7 @@ New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
 $env:CARGO_TARGET_DIR = $targetDir
 $env:NO_COLOR = '1'
 $env:TZ = 'UTC'
+$env:MNEMA_RERE_REPLAY_ONLY = '1'
 if ($Mode -eq 'Nightly') {
     $env:MNEMA_DIFF_SEEDS = '256'
     $env:MNEMA_DIFF_EVENTS = '240'
@@ -58,10 +59,11 @@ $inherit = @(
     'TEMP', 'TMP', 'PATHEXT', 'ComSpec', 'APPDATA', 'LOCALAPPDATA',
     'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432',
     'CommonProgramFiles', 'CommonProgramFiles(x86)', 'CommonProgramW6432',
-    'PROCESSOR_ARCHITECTURE', 'CARGO_TARGET_DIR', 'NO_COLOR', 'TZ'
+    'PROCESSOR_ARCHITECTURE', 'CARGO_TARGET_DIR', 'NO_COLOR', 'TZ',
+    'MNEMA_RERE_REPLAY_ONLY'
 ) |
     Where-Object { Test-Path "env:$_" }
-foreach ($optional in @('CARGO_HOME', 'RUSTUP_HOME')) {
+foreach ($optional in @('CARGO_HOME', 'RUSTUP_HOME', 'MNEMA_BIN')) {
     if (Test-Path "env:$optional") { $inherit += $optional }
 }
 if (Test-Path env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER) {

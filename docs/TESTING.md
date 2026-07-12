@@ -82,7 +82,20 @@ async-exec does not decide whether a semantic test passed, retry a failed suite,
 understand a mnema strand, or become a workflow engine. The PowerShell wrapper
 only aggregates the registered process results into the gate report.
 
+## Recursive rere layer
+
+The recursive black-box layer lives under `tests/recursive/`. Vendored
+`rere.py` (pinned in `tests/recursive/SOURCE`) owns exact record/replay of shell
+stdout, stderr, and return code. `driver.py` owns isolation, fixed presentation
+environment, and stable structural reports so dynamic IDs and timestamps never
+become the golden surface.
+
+Automated gates run only `python tests/recursive/rere.py replay <list>` with
+`MNEMA_RERE_REPLAY_ONLY=1`. Recording is a deliberate maintainer action and is
+rejected under that environment flag. AsyncExec may durably host replay but
+never interprets mnema task semantics.
+
 ## Next extensions
 
-Implemented and planned suites are registered only in `TEST-CATALOG.md`; this policy document does not maintain a second roadmap. The next architectural extension is a dedicated recursive black-box replay layer covering the virtual Journal root and strand roots at equal semantics. `rere.py` may own record/replay fixtures, while record remains a deliberate maintainer action and automated gates run replay only. AsyncExec may durably host long replay processes but never interprets their semantic result.
+Implemented and planned suites are registered only in `TEST-CATALOG.md`; this policy document does not maintain a second roadmap.
 

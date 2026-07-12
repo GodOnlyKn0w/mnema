@@ -1,86 +1,193 @@
 :i count 6
 :b shell 59
 python tests/recursive/driver.py smoke/fresh-journal-orient
-:i returncode 0
-:b stdout 122
-scenario: smoke/fresh-journal-orient
-scope_kind: journal
-active_count: 0
-closed_count: 0
-hidden_count: 0
-status: ok
+:i returncode 1
+:b stdout 0
 
-:b stderr 0
+:b stderr 1381
+Exception in thread Thread-3 (_readerthread):
+Traceback (most recent call last):
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 1601, in _readerthread
+    buffer.append(fh.read())
+                  ^^^^^^^^^
+UnicodeDecodeError: 'gbk' codec can't decode byte 0xb3 in position 264: illegal multibyte sequence
+Traceback (most recent call last):
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 378, in <module>
+    main(sys.argv[1:])
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 372, in main
+    SCENARIOS[name](project)
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 186, in scenario_smoke_fresh_journal
+    orient = p.orient()
+             ^^^^^^^^^^
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 146, in orient
+    return self.run_json(args)
+           ^^^^^^^^^^^^^^^^^^^
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 98, in run_json
+    text = proc.stdout.strip()
+           ^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'strip'
 
 :b shell 57
 python tests/recursive/driver.py smoke/journal-vs-subtree
-:i returncode 0
-:b stdout 302
-scenario: smoke/journal-vs-subtree
-journal_scope_kind: journal
-subtree_scope_kind: subtree
-journal_member_slugs: child,grandchild,outsider,root
-subtree_member_slugs: child,grandchild,root
-outsider_in_journal: yes
-outsider_in_subtree: no
-child_in_journal: yes
-child_in_subtree: yes
-status: ok
+:i returncode 1
+:b stdout 0
 
-:b stderr 0
+:b stderr 1390
+Exception in thread Thread-11 (_readerthread):
+Traceback (most recent call last):
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 1601, in _readerthread
+    buffer.append(fh.read())
+                  ^^^^^^^^^
+UnicodeDecodeError: 'gbk' codec can't decode byte 0xb3 in position 1529: illegal multibyte sequence
+Traceback (most recent call last):
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 378, in <module>
+    main(sys.argv[1:])
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 372, in main
+    SCENARIOS[name](project)
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 205, in scenario_smoke_journal_vs_subtree
+    journal = p.orient()
+              ^^^^^^^^^^
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 146, in orient
+    return self.run_json(args)
+           ^^^^^^^^^^^^^^^^^^^
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 98, in run_json
+    text = proc.stdout.strip()
+           ^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'strip'
 
 :b shell 63
 python tests/recursive/driver.py smoke/refs-do-not-expand-scope
-:i returncode 0
-:b stdout 113
-scenario: smoke/refs-do-not-expand-scope
-subtree_member_slugs: child,root
-evidence_in_subtree: no
-status: ok
+:i returncode 1
+:b stdout 0
 
-:b stderr 0
+:b stderr 1409
+Exception in thread Thread-11 (_readerthread):
+Traceback (most recent call last):
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 1601, in _readerthread
+    buffer.append(fh.read())
+                  ^^^^^^^^^
+UnicodeDecodeError: 'gbk' codec can't decode byte 0xb3 in position 940: illegal multibyte sequence
+Traceback (most recent call last):
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 378, in <module>
+    main(sys.argv[1:])
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 372, in main
+    SCENARIOS[name](project)
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 239, in scenario_smoke_refs_do_not_expand
+    subtree = p.orient(under=root)
+              ^^^^^^^^^^^^^^^^^^^^
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 146, in orient
+    return self.run_json(args)
+           ^^^^^^^^^^^^^^^^^^^
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 98, in run_json
+    text = proc.stdout.strip()
+           ^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'strip'
 
 :b shell 56
 python tests/recursive/driver.py full/depth-chain-orient
-:i returncode 0
-:b stdout 362
-scenario: full/depth-chain-orient
-chain_depth: 10
-journal_member_slugs: depth-0,depth-1,depth-10,depth-2,depth-3,depth-4,depth-5,depth-6,depth-7,depth-8,depth-9
-mid_depth5_scope_kind: subtree
-mid_depth5_member_slugs: depth-10,depth-5,depth-6,depth-7,depth-8,depth-9
-depth0_in_mid: no
-depth4_in_mid: no
-depth5_in_mid: yes
-depth10_in_mid: yes
-status: ok
+:i returncode 1
+:b stdout 0
 
-:b stderr 0
+:b stderr 1406
+Exception in thread Thread-25 (_readerthread):
+Traceback (most recent call last):
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 1601, in _readerthread
+    buffer.append(fh.read())
+                  ^^^^^^^^^
+UnicodeDecodeError: 'gbk' codec can't decode byte 0xb3 in position 2368: illegal multibyte sequence
+Traceback (most recent call last):
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 378, in <module>
+    main(sys.argv[1:])
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 372, in main
+    SCENARIOS[name](project)
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 267, in scenario_full_depth_chain
+    mid_orient = p.orient(under=mid)
+                 ^^^^^^^^^^^^^^^^^^^
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 146, in orient
+    return self.run_json(args)
+           ^^^^^^^^^^^^^^^^^^^
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 98, in run_json
+    text = proc.stdout.strip()
+           ^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'strip'
 
 :b shell 57
 python tests/recursive/driver.py full/reparent-join-leave
-:i returncode 0
-:b stdout 209
-scenario: full/reparent-join-leave
-before_slugs: child,root
-after_join_slugs: child,joiner,root
-after_leave_slugs: joiner,root
-joiner_before: no
-joiner_after_join: yes
-child_after_leave: no
-status: ok
+:i returncode 1
+:b stdout 0
 
-:b stderr 0
+:b stderr 1433
+Exception in thread Thread-9 (_readerthread):
+Traceback (most recent call last):
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 1601, in _readerthread
+    buffer.append(fh.read())
+                  ^^^^^^^^^
+UnicodeDecodeError: 'gbk' codec can't decode byte 0xb3 in position 951: illegal multibyte sequence
+Traceback (most recent call last):
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 378, in <module>
+    main(sys.argv[1:])
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 372, in main
+    SCENARIOS[name](project)
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 295, in scenario_full_reparent_join_leave
+    before = active_slugs(p.orient(under=root))
+                          ^^^^^^^^^^^^^^^^^^^^
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 146, in orient
+    return self.run_json(args)
+           ^^^^^^^^^^^^^^^^^^^
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 98, in run_json
+    text = proc.stdout.strip()
+           ^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'strip'
 
 :b shell 69
 python tests/recursive/driver.py crash/complete-batch-strict-readable
-:i returncode 0
-:b stdout 135
-scenario: crash/complete-batch-strict-readable
-doctor_exit: 0
-subtree_member_slugs: child,root
-evidence_in_subtree: no
-status: ok
+:i returncode 1
+:b stdout 0
 
-:b stderr 0
+:b stderr 1412
+Exception in thread Thread-13 (_readerthread):
+Traceback (most recent call last):
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 1601, in _readerthread
+    buffer.append(fh.read())
+                  ^^^^^^^^^
+UnicodeDecodeError: 'gbk' codec can't decode byte 0xb3 in position 898: illegal multibyte sequence
+Traceback (most recent call last):
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 378, in <module>
+    main(sys.argv[1:])
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 372, in main
+    SCENARIOS[name](project)
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 330, in scenario_crash_complete_batch_readable
+    orient = p.orient(under=root)
+             ^^^^^^^^^^^^^^^^^^^^
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 146, in orient
+    return self.run_json(args)
+           ^^^^^^^^^^^^^^^^^^^
+  File "D:\forks\tasktree-core\tests\recursive\driver.py", line 98, in run_json
+    text = proc.stdout.strip()
+           ^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'strip'
 

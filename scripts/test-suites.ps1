@@ -14,14 +14,17 @@ function Get-MnemaTestSuites {
         [pscustomobject]@{ Name = 'compat-v2-v3'; Phase = 2; TimeoutMs = 120000; Argv = @('cargo', 'test', '--release', '--test', 'v2_v3_compat') },
         [pscustomobject]@{ Name = 'v3-runtime'; Phase = 2; TimeoutMs = 180000; Argv = @('cargo', 'test', '--release', '--test', 'v3_runtime') },
         [pscustomobject]@{ Name = 'crash-atomicity'; Phase = 2; TimeoutMs = 300000; Argv = @('cargo', 'test', '--release', '--features', 'test-failpoints', '--test', 'crash_atomicity') },
+        [pscustomobject]@{ Name = 'recursive-rere-smoke'; Phase = 2; TimeoutMs = 180000; Argv = @('python', 'tests/recursive/rere.py', 'replay', 'tests/recursive/smoke.list') },
+        [pscustomobject]@{ Name = 'recursive-rere-full'; Phase = 2; TimeoutMs = 300000; Argv = @('python', 'tests/recursive/rere.py', 'replay', 'tests/recursive/full.list') },
         [pscustomobject]@{ Name = 'performance-smoke'; Phase = 3; TimeoutMs = 180000; Argv = @('pwsh.exe', '-NoProfile', '-File', 'scripts/benchmark.ps1', '-Sizes', '25') },
         [pscustomobject]@{ Name = 'differential-expanded'; Phase = 4; TimeoutMs = 600000; Argv = @('cargo', 'test', '--release', 'generated_scope_model_matches_full_and_incremental_replay') },
-        [pscustomobject]@{ Name = 'fuzz-strict-input'; Phase = 4; TimeoutMs = 300000; Argv = @('cargo', 'test', '--release', 'deterministic_hostile_ascii_corpus_never_panics') }
+        [pscustomobject]@{ Name = 'fuzz-strict-input'; Phase = 4; TimeoutMs = 300000; Argv = @('cargo', 'test', '--release', 'deterministic_hostile_ascii_corpus_never_panics') },
+        [pscustomobject]@{ Name = 'recursive-rere-crash'; Phase = 4; TimeoutMs = 180000; Argv = @('python', 'tests/recursive/rere.py', 'replay', 'tests/recursive/crash.list') }
     )
 
     switch ($Mode) {
-        'Fast' { return @($all | Where-Object Name -in @('format', 'build-release', 'compile-release', 'behavior', 'cli-recovery')) }
+        'Fast' { return @($all | Where-Object Name -in @('format', 'build-release', 'compile-release', 'behavior', 'cli-recovery', 'recursive-rere-smoke')) }
         'Full' { return @($all | Where-Object Phase -lt 4) }
-        'Nightly' { return $all } # extended suites are registered before being added here
+        'Nightly' { return $all }
     }
 }

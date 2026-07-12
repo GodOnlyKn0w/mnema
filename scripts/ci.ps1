@@ -13,6 +13,7 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $commit = (& git -C $repo rev-parse HEAD).Trim()
 $artifactRoot = Join-Path $repo ".artifacts\ci\$commit\$($Mode.ToLowerInvariant())"
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+$env:MNEMA_RERE_REPLAY_ONLY = '1'
 if ($Mode -eq 'Nightly') {
     $env:MNEMA_DIFF_SEEDS = '256'
     $env:MNEMA_DIFF_EVENTS = '240'

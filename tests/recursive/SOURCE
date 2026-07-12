@@ -1,9 +1,10 @@
 # Upstream pin for tests/recursive/rere.py
 #
 # Tool: rere.py (Record / Replay) — universal behavior testing tool
-# Canonical upstream: https://github.com/tsoding/rere.py
-# (Task brief referred to this family as GodOnlyKn0w/rere.py; the public
-# self-contained MIT source is tsoding/rere.py.)
+# Requested upstream: https://github.com/GodOnlyKn0w/rere.py
+# Source commit: 03af670a1abc3c8a81a5a63e02d1c514ecf94784
+# This fork and https://github.com/tsoding/rere.py resolved to the same pinned
+# commit when vendored; tests never fetch either repository at runtime.
 #
 # Integration policy for mnema:
 # - Vendor the script under tests/recursive/ (do not fetch at test time).
