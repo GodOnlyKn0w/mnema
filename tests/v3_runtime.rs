@@ -54,7 +54,9 @@ fn fresh_v3_add_and_append_keep_genesis_identity_and_append_only_prefix() {
 
     let add = success(run(
         dir.path(),
-        &["add", "--format", "json", "--slug", "root"],
+        &[
+            "add", "--format", "json", "--slug", "root", "--type", "task",
+        ],
         Some("[task] root\n"),
     ));
     let add: serde_json::Value = serde_json::from_str(add.trim()).unwrap();

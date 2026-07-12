@@ -114,6 +114,41 @@ fn link_rejects_self_loop() {
 }
 
 #[test]
+fn belongs_to_rejects_second_parent_until_explicit_unlink() {
+    let _env = setup();
+    let child = create_strand("single-parent child");
+    let first = create_strand("first parent");
+    let second = create_strand("second parent");
+    cmd_link(&child, &first, Some("belongs-to"), false, None).unwrap();
+    let before = total_events();
+    let error = cmd_link(&child, &second, Some("belongs-to"), false, None).unwrap_err();
+    assert!(error.contains("already belongs to"), "{error}");
+    assert_eq!(total_events(), before, "rejected reparent must not write");
+
+    cmd_unlink(&child, &first, Some("belongs-to"), false, None).unwrap();
+    cmd_link(&child, &second, Some("belongs-to"), false, None).unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let strands = projection::project_strands(&events, true);
+    let projected = strands.iter().find(|strand| strand.id == child).unwrap();
+    assert_eq!(projected.belongs_to_edges, vec![second]);
+}
+
+#[test]
+fn belongs_to_rejects_multi_node_cycle_without_writing() {
+    let _env = setup();
+    let root = create_strand("cycle root");
+    let child = create_strand("cycle child");
+    let grandchild = create_strand("cycle grandchild");
+    cmd_link(&child, &root, Some("belongs-to"), false, None).unwrap();
+    cmd_link(&grandchild, &child, Some("belongs-to"), false, None).unwrap();
+    let before = total_events();
+    let error = cmd_link(&root, &grandchild, Some("belongs-to"), false, None).unwrap_err();
+    assert!(error.contains("belongs-to cycle"), "{error}");
+    assert_eq!(total_events(), before, "rejected cycle must not write");
+}
+
+#[test]
 fn link_json_default_edge_type_is_depends_on() {
     // Verify the link effect carries the default edge_type when none given.
     let _env = setup();

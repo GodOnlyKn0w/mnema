@@ -11,7 +11,7 @@ function Get-MnemaTestSuites {
         [pscustomobject]@{ Name = 'unit'; Phase = 2; TimeoutMs = 600000; Argv = @('cargo', 'test', '--release', '--bin', 'mnema') },
         [pscustomobject]@{ Name = 'behavior'; Phase = 2; TimeoutMs = 180000; Argv = @('cargo', 'test', '--release', '--test', 'behavior_harness') },
         [pscustomobject]@{ Name = 'cli-recovery'; Phase = 2; TimeoutMs = 120000; Argv = @('cargo', 'test', '--release', '--test', 'cli_recovery') },
-        [pscustomobject]@{ Name = 'v2-v3-compat'; Phase = 2; TimeoutMs = 120000; Argv = @('cargo', 'test', '--release', '--test', 'v2_v3_compat') },
+        [pscustomobject]@{ Name = 'compat-v2-v3'; Phase = 2; TimeoutMs = 120000; Argv = @('cargo', 'test', '--release', '--test', 'v2_v3_compat') },
         [pscustomobject]@{ Name = 'v3-runtime'; Phase = 2; TimeoutMs = 180000; Argv = @('cargo', 'test', '--release', '--test', 'v3_runtime') },
         [pscustomobject]@{ Name = 'crash-atomicity'; Phase = 2; TimeoutMs = 300000; Argv = @('cargo', 'test', '--release', '--features', 'test-failpoints', '--test', 'crash_atomicity') },
         [pscustomobject]@{ Name = 'performance-smoke'; Phase = 3; TimeoutMs = 180000; Argv = @('pwsh.exe', '-NoProfile', '-File', 'scripts/benchmark.ps1', '-Sizes', '25') },

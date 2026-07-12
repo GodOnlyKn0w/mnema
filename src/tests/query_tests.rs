@@ -634,108 +634,8 @@ fn orient_exposes_incremental_and_delegation_discovery_commands() {
 }
 
 #[test]
-fn collaboration_forest_discovery_requires_synthesis_after_child_closes() {
-    let _env = setup();
-    let parent = create_strand("parent coordination task");
-    let child_a = create_strand("worker A");
-    let child_b = create_strand("worker B");
-    cmd_link(&child_a, &parent, Some("belongs-to"), false, None).unwrap();
-    cmd_link(&child_b, &parent, Some("belongs-to"), false, None).unwrap();
-    cmd_append(
-        Some("[coordination synthesis] too early"),
-        None,
-        false,
-        false,
-        None,
-        Some(&parent),
-        None,
-        None,
-    )
-    .unwrap();
-    cmd_close(&child_a, Some("done"), None, false).unwrap();
-    cmd_close(&child_b, Some("done"), None, false).unwrap();
-
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    let strands = projection::project_strands(&events, true);
-    assert!(
-        projection::find_recent_collaboration_forest(&strands).is_none(),
-        "synthesis before the last child close must not qualify"
-    );
-
-    cmd_append(
-        Some("[coordination synthesis] after both workers closed"),
-        None,
-        false,
-        false,
-        None,
-        Some(&parent),
-        None,
-        None,
-    )
-    .unwrap();
-    let (events, _) = read_events_lossy(&path);
-    let strands = projection::project_strands(&events, true);
-    let forest = projection::find_recent_collaboration_forest(&strands)
-        .expect("forest should qualify after late synthesis");
-    assert_eq!(forest.root_id, parent);
-}
-
-#[test]
-fn collaboration_forest_discovery_picks_recent_qualified_forest() {
-    let _env = setup();
-    let older = create_strand("older parent");
-    let newer = create_strand("newer parent");
-    for parent in [&older, &newer] {
-        let child_a = create_strand(&format!("worker A for {}", parent));
-        let child_b = create_strand(&format!("worker B for {}", parent));
-        cmd_link(&child_a, parent, Some("belongs-to"), false, None).unwrap();
-        cmd_link(&child_b, parent, Some("belongs-to"), false, None).unwrap();
-        cmd_close(&child_a, Some("done"), None, false).unwrap();
-        cmd_close(&child_b, Some("done"), None, false).unwrap();
-        cmd_append(
-            Some("[coordination synthesis] workers closed done"),
-            None,
-            false,
-            false,
-            None,
-            Some(parent),
-            None,
-            None,
-        )
-        .unwrap();
-    }
-
-    let path = ensure_journal().unwrap();
-    let (events, _) = read_events_lossy(&path);
-    let strands = projection::project_strands(&events, true);
-    let forest =
-        projection::find_recent_collaboration_forest(&strands).expect("one forest should qualify");
-    assert_eq!(forest.root_id, newer);
-}
-
-#[test]
 fn explain_collaboration_is_pure_read_and_points_to_local_tree() {
     let _env = setup();
-    let parent = create_strand("parent coordination task");
-    let child_a = create_strand("worker A");
-    let child_b = create_strand("worker B");
-    cmd_link(&child_a, &parent, Some("belongs-to"), false, None).unwrap();
-    cmd_link(&child_b, &parent, Some("belongs-to"), false, None).unwrap();
-    cmd_close(&child_a, Some("done"), None, false).unwrap();
-    cmd_close(&child_b, Some("done"), None, false).unwrap();
-    cmd_append(
-        Some("[coordination synthesis] workers closed done"),
-        None,
-        false,
-        false,
-        None,
-        Some(&parent),
-        None,
-        None,
-    )
-    .unwrap();
-
     let path = ensure_journal().unwrap();
     let before = std::fs::read(&path).unwrap();
     let output = crate::commands::explain::cmd_explain("collaboration", false);
@@ -746,7 +646,11 @@ fn explain_collaboration_is_pure_read_and_points_to_local_tree() {
         "explain collaboration must not write journal"
     );
     assert!(output.contains("mnema add --parent <母线>"));
-    assert!(output.contains(&format!("mnema tree --id {}", shorten(&parent))));
+    assert!(output.contains("mnema tree --id <母线>"));
+    assert!(
+        !output.contains("本地真实范例"),
+        "help must not infer collaboration semantics from journal prose"
+    );
 }
 
 #[test]
@@ -1316,7 +1220,7 @@ fn orient_latest_closed_line_teaches_successor_not_append_to_closed() {
     .expect("orient_plan closed latest");
 
     assert!(
-        plan.output.remind.contains("mnema add --from"),
+        plan.output.remind.contains("mnema add --ref"),
         "closed latest line should produce a successor command: {}",
         plan.output.remind
     );
@@ -1339,10 +1243,10 @@ fn orient_latest_closed_line_teaches_successor_not_append_to_closed() {
 }
 
 #[test]
-fn orient_two_active_lines_suggests_link_candidate() {
+fn orient_never_infers_depends_on_from_two_active_strands() {
     let _env = setup();
-    let first = create_strand("first active");
-    let second = create_strand("second active");
+    create_strand("unrelated active A");
+    create_strand("unrelated active B");
     let path = ensure_journal().unwrap();
     let (events, _) = read_events_lossy(&path);
     let plan = orient_plan(
@@ -1354,14 +1258,9 @@ fn orient_two_active_lines_suggests_link_candidate() {
             allow_selection: false,
         },
     )
-    .expect("orient_plan two active");
-    assert!(
-        plan.output.remind.contains("mnema link"),
-        "two active lines should produce a link candidate: {}",
-        plan.output.remind
-    );
-    assert!(plan.output.remind.contains("--edge-type depends-on"));
-    let _ = (first, second);
+    .unwrap();
+    assert!(!plan.output.remind.contains("mnema link"));
+    assert!(!plan.output.remind.contains("--edge-type depends-on"));
 }
 
 // ── query-side batch: entry search / --marker / edges / orient stale ──
@@ -2116,6 +2015,19 @@ fn orient_id_keeps_closed_root_and_upstream_as_unexpanded_scope_context() {
         .unwrap();
     assert_eq!(pointer.kind, "depends-on");
     assert!(pointer.command.contains("mnema show --id"));
+    assert!(
+        plan.output
+            .remind
+            .contains(&format!("mnema add --parent {}", shorten(&parent))),
+        "scoped follow-up must stay below the current root: {}",
+        plan.output.remind
+    );
+    assert!(plan.output.remind.contains("--ref"));
+    assert!(
+        !plan.output.remind.contains(&shorten(&upstream)),
+        "unexpanded upstream must not become the suggested work target: {}",
+        plan.output.remind
+    );
 }
 
 #[test]
@@ -2151,6 +2063,63 @@ fn orient_id_pins_visible_registered_root_without_exceeding_limit() {
     .unwrap();
     assert!(zero.output.active.is_empty());
     assert_eq!(zero.output.scope.root.unwrap().id, parent);
+}
+
+#[test]
+fn recursive_orient_scope_is_depth_invariant_and_never_leaks_siblings() {
+    let _env = setup();
+    let mut chain = vec![create_strand("depth-0 root")];
+    for depth in 1..=10 {
+        let child = create_strand(&format!("depth-{depth} child"));
+        cmd_link(
+            &child,
+            chain.last().unwrap(),
+            Some("belongs-to"),
+            false,
+            None,
+        )
+        .unwrap();
+        chain.push(child);
+    }
+    let outsider = create_strand("sibling tree outsider");
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+
+    for (depth, root) in chain.iter().enumerate() {
+        let plan = orient_plan(
+            &events,
+            &OrientRequest {
+                include_hidden: false,
+                limit: Some(32),
+                under: Some(root.clone()),
+                allow_selection: false,
+            },
+        )
+        .unwrap();
+        let actual: std::collections::HashSet<_> =
+            plan.output.active.iter().map(|card| &card.id).collect();
+        let expected: std::collections::HashSet<_> = chain[depth..].iter().collect();
+        assert_eq!(actual, expected, "wrong downward closure at depth {depth}");
+        assert!(!actual.contains(&outsider));
+        assert_eq!(plan.output.scope.kind, "subtree");
+        assert_eq!(plan.output.scope.root.as_ref().unwrap().id, *root);
+        assert!(plan.output.since_command.contains(root));
+        assert!(plan.output.stale_command.contains(root));
+        assert!(!plan.output.remind.contains(&shorten(&outsider)));
+    }
+
+    let journal = orient_plan(
+        &events,
+        &OrientRequest {
+            include_hidden: false,
+            limit: Some(32),
+            under: None,
+            allow_selection: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(journal.output.scope.kind, "journal");
+    assert!(journal.output.active.iter().any(|card| card.id == outsider));
 }
 
 #[test]

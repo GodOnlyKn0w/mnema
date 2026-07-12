@@ -804,7 +804,7 @@ pub(crate) fn orient_plan_at(
     // stream; needs-judgment notices use the scoped strand set.
     output.integrity = integrity_glance(events);
     output.notices = projection::orient_notices(&strands);
-    output.remind = adaptive_orient_remind(&strands, &view, req.include_hidden, score);
+    output.remind = adaptive_orient_remind(&strands, req.include_hidden, score, scope.root_id());
     output.stale_count = count_stale_active(&strands, req.include_hidden, now, ORIENT_STALE_SECS);
     Ok(OrientPlan {
         strands,
@@ -899,27 +899,21 @@ fn latest_active_visible_entry<'a>(
         .max_by_key(|candidate| candidate.entry.offset)
 }
 
-fn active_pair_hint(view: &projection::OrientView) -> Option<String> {
-    if view.active_ids.len() < 2 {
-        return None;
-    }
-    let source = shorten(&view.active_ids[0]);
-    let target = shorten(&view.active_ids[1]);
-    Some(format!(
-        "link candidate → mnema link {} {} --edge-type depends-on",
-        source, target
-    ))
-}
-
 fn adaptive_orient_remind(
     strands: &[projection::ProjectedStrand],
-    view: &projection::OrientView,
     include_hidden: bool,
     score: u8,
+    scope_root: Option<&str>,
 ) -> String {
-    let link_hint = active_pair_hint(view);
     let Some((latest_strand, latest_entry)) = latest_visible_entry(strands, include_hidden) else {
-        return r#"loop: 做一步·看现实变·再想 | write moments: 方案成形 / 判断被现实改变 / 收口或不可逆前 | start → echo "<summary>" | mnema add | writing drill → mnema explain writing | more → mnema --help"#.to_string();
+        let start = scope_root.map_or_else(
+            || r#"echo "<summary>" | mnema add"#.to_string(),
+            |root| format!(r#"echo "<summary>" | mnema add --parent {}"#, shorten(root)),
+        );
+        return format!(
+            "loop: 做一步·看现实变·再想 | write moments: 方案成形 / 判断被现实改变 / 实现或验证落地 / 委派交接 / 阻塞收口 | start → {} | writing drill → mnema explain writing | more → mnema --help",
+            start
+        );
     };
 
     if latest_strand.state() != "registered" {
@@ -929,10 +923,17 @@ fn adaptive_orient_remind(
             .as_deref()
             .map(shorten)
             .unwrap_or_else(|| strand.clone());
-        let next = format!(
-            r#"next: latest entry on closed line {}; continue as successor → echo "<summary>" | mnema add --from {}"#,
-            strand, from
-        );
+        let next = match scope_root {
+            Some(root) => format!(
+                r#"next: scope root is closed; create explicit child/follow-up → echo "<summary>" | mnema add --parent {} --ref {}"#,
+                shorten(root),
+                from
+            ),
+            None => format!(
+                r#"next: latest entry on closed line {}; continue as successor → echo "<summary>" | mnema add --ref {}"#,
+                strand, from
+            ),
+        };
         let teaching = if score < 30 {
             " | write moments: 方案成形 / 判断被现实改变 / 收口或不可逆前 | template: mnema explain writing"
         } else if score < 75 {
@@ -940,13 +941,7 @@ fn adaptive_orient_remind(
         } else {
             " | more: mnema --help"
         };
-        return match link_hint {
-            Some(hint) => format!(
-                "loop: 做一步·看现实变·再想 | {} | {}{}",
-                next, hint, teaching
-            ),
-            None => format!("loop: 做一步·看现实变·再想 | {}{}", next, teaching),
-        };
+        return format!("loop: 做一步·看现实变·再想 | {}{}", next, teaching);
     }
 
     let latest = latest_active_visible_entry(strands, include_hidden)
@@ -992,25 +987,10 @@ fn adaptive_orient_remind(
         " | more: mnema --help"
     };
 
-    match link_hint {
-        Some(hint) => format!(
-            "loop: 做一步·看现实变·再想 | {} | {}{}",
-            next, hint, teaching
-        ),
-        None => format!("loop: 做一步·看现实变·再想 | {}{}", next, teaching),
-    }
+    format!("loop: 做一步·看现实变·再想 | {}{}", next, teaching)
 }
 
 /// Print the needs-judgment block (CORPUS §8, question ③) — nothing when clear.
-
-fn print_collaboration_pull(strands: &[projection::ProjectedStrand]) {
-    if let Some(forest) = projection::find_recent_collaboration_forest(strands) {
-        println!(
-            "collaboration: mnema explain collaboration | mnema tree --id {}",
-            shorten(&forest.root_id)
-        );
-    }
-}
 
 fn print_orient_notices(notices: &[String]) {
     if notices.is_empty() {
@@ -1132,7 +1112,6 @@ pub(crate) fn cmd_orient(
             print_orient_notices(&out.notices);
             println!("remind: {}", out.remind);
             println!("{}", out.pause);
-            print_collaboration_pull(strands);
         }
     } else if format == Some("json") {
         println!("{}", serde_json::to_string(&out).expect("serialize"));
@@ -1183,7 +1162,6 @@ pub(crate) fn cmd_orient(
         print_orient_notices(&out.notices);
         println!("remind: {}", out.remind);
         println!("{}", out.pause);
-        print_collaboration_pull(strands);
     }
 
     if skipped > 0 {

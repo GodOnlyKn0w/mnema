@@ -62,7 +62,6 @@ pub fn audit_journal(
     use std::collections::{HashMap, HashSet};
 
     let mut created_ids: HashSet<String> = HashSet::new();
-    let mut strand_summaries: HashMap<String, String> = HashMap::new();
     let mut strand_entries: HashMap<String, Vec<String>> = HashMap::new();
     for event in events {
         match event {
@@ -70,9 +69,6 @@ pub fn audit_journal(
                 created_ids.insert(id.clone());
             }
             Event::LogAppended { id, content, .. } => {
-                strand_summaries
-                    .entry(id.clone())
-                    .or_insert_with(|| content.clone());
                 strand_entries
                     .entry(id.clone())
                     .or_default()
@@ -91,41 +87,6 @@ pub fn audit_journal(
         let source = event.strand_id()?.to_string();
         Some((source, delta.target, delta.edge_type))
     }
-
-    let mut dag_done = Vec::new();
-    for (id, summary) in &strand_summaries {
-        if summary.starts_with("para group ") {
-            if let Some(entries) = strand_entries.get(id) {
-                if entries.iter().any(|e| e.contains("[done]")) {
-                    dag_done.push(format!(
-                        "DAG strand {} has [done] entry - DAG should only record layer events",
-                        id
-                    ));
-                }
-            }
-        }
-    }
-    sections.push(LintSection {
-        name: "dag-done",
-        summary_label: "dag strands with [done]",
-        findings: dag_done,
-    });
-
-    let mut task_created = Vec::new();
-    for (id, summary) in &strand_summaries {
-        if summary.starts_with('[') {
-            if let Some(entries) = strand_entries.get(id) {
-                if entries.iter().any(|e| e.contains("task_created")) {
-                    task_created.push(format!("Task strand {} has task_created JSON event - task strands should not have DAG events", id));
-                }
-            }
-        }
-    }
-    sections.push(LintSection {
-        name: "task-created",
-        summary_label: "task strands with task_created",
-        findings: task_created,
-    });
 
     let mut orphan_links = Vec::new();
     for event in events {
@@ -168,71 +129,6 @@ pub fn audit_journal(
         name: "touches-format",
         summary_label: "unrecognized touches fields",
         findings: touches_format,
-    });
-
-    let mut link_direction = Vec::new();
-    for event in events {
-        if let Some((source, target, _)) = link_view(event) {
-            let src_summary = strand_summaries
-                .get(&source)
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            let tgt_summary = strand_summaries
-                .get(&target)
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            let src_is_task = src_summary.starts_with('[')
-                && src_summary[1..]
-                    .chars()
-                    .next()
-                    .map_or(false, |c| c.is_ascii_digit());
-            let tgt_is_dag = tgt_summary.starts_with("para group ");
-            if src_is_task && tgt_is_dag {
-                link_direction.push(format!(
-                    "link direction: task {} links to DAG {} - unusual",
-                    source, target
-                ));
-            }
-        }
-    }
-    sections.push(LintSection {
-        name: "link-direction",
-        summary_label: "unusual link directions",
-        findings: link_direction,
-    });
-
-    let mut strand_identity = Vec::new();
-    for (id, summary) in &strand_summaries {
-        let is_dag = summary.starts_with("para group ");
-        let is_task = summary.starts_with('[')
-            && summary.chars().nth(1).map_or(false, |c| c.is_ascii_digit());
-        if let Some(entries) = strand_entries.get(id) {
-            if is_dag {
-                let has_task_marker = entries.iter().any(|e| {
-                    e.starts_with('[') && e.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
-                });
-                if has_task_marker {
-                    strand_identity.push(format!(
-                        "strand identity: DAG strand {} has task-like entries - identity mismatch",
-                        id
-                    ));
-                }
-            }
-            if is_task {
-                let has_para_prefix = entries.iter().any(|e| e.starts_with("para group "));
-                if has_para_prefix {
-                    strand_identity.push(format!(
-                        "strand identity: task strand {} has DAG-like entries - identity mismatch",
-                        id
-                    ));
-                }
-            }
-        }
-    }
-    sections.push(LintSection {
-        name: "strand-identity",
-        summary_label: "identity mismatches",
-        findings: strand_identity,
     });
 
     let indexed: Vec<(usize, Event)> = events.iter().cloned().enumerate().collect();

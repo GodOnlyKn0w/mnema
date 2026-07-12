@@ -1,11 +1,13 @@
 use super::*;
 
 #[test]
-fn add_auto_detects_structural_task_and_session_markers() {
+fn add_requires_explicit_strand_type_and_never_infers_from_body() {
     let _env = setup();
-    for (content, expected_type) in [
-        ("[task] marked task", "task"),
-        ("[session] marked session", "session"),
+    for content in [
+        "[task] marker is prose",
+        "[session] marker is prose",
+        "para group old convention",
+        "[12] old task convention",
     ] {
         cmd_add_with_parent(Some(content), false, None, false, None, None, None, None).unwrap();
 
@@ -15,8 +17,27 @@ fn add_auto_detects_structural_task_and_session_markers() {
             .into_iter()
             .find(|strand| strand.first_summary() == content)
             .expect("new marked strand is projected");
-        assert_eq!(strand.strand_type.as_deref(), Some(expected_type));
+        assert_eq!(strand.strand_type, None);
     }
+
+    cmd_add_with_parent(
+        Some("plain explicit type"),
+        false,
+        None,
+        false,
+        None,
+        None,
+        Some("task"),
+        None,
+    )
+    .unwrap();
+    let path = ensure_journal().unwrap();
+    let (events, _) = read_events_lossy(&path);
+    let explicit = projection::project_strands(&events, true)
+        .into_iter()
+        .find(|strand| strand.first_summary() == "plain explicit type")
+        .unwrap();
+    assert_eq!(explicit.strand_type.as_deref(), Some("task"));
 }
 
 #[test]

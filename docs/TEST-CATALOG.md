@@ -24,7 +24,6 @@
 | `unit` | event/canonical/activation/v3 codec/projection/CLI/JSON/help/write/read contracts | `cargo test --release --bin mnema` | Full | Rust tests 使用自身 temp/CWD lock；不可触碰 repo `.mnema` | 383 tests，约 203 秒 | Rust test report；`src/**/*` + `src/tests/*` |
 | `behavior` | release CLI 黑盒 scope、cursor、refs、并发完成态、manifest smoke 与 reviewed text snapshots | `cargo test --release --test behavior_harness` | Fast, Full | 每场景独立 temp project；固定 `NO_COLOR`/`TZ` | 7 tests，约 20 秒 | test report；`tests/behavior_harness.rs`, `tests/behavior/*` |
 | `cli-recovery` | 错误 argv 的 exit/stderr 修复提示，不污染正文 | `cargo test --release --test cli_recovery` | Fast, Full | Cargo 提供 release binary；无 repo journal | 3 tests，<1 秒 | test report；`tests/cli_recovery.rs` |
-| `v2-v3-compat` | 冻结 v2 bytes 的 source/migration/target identity、raw v3 records、迁移前后投影 | `cargo test --release --test v2_v3_compat` | Full | fixture 只读复制到 temp；fixture 强制 LF | 1 test，<1 秒 | golden hashes + report；`tests/fixtures/*`, `tests/v2_v3_compat.rs` |
 | `v3-runtime` | fresh v3 写入、manifest、doctor、shadow、checkpoint、orient strict read | `cargo test --release --test v3_runtime` | Full | 每 test 独立 temp project | 7 tests，约 3 秒 | test report；`tests/v3_runtime.rs` |
 | `generated-differential-ci` | 独立 scope model 对 current/event-time full replay 与 cursor 增量一致性 | `cargo test --release generated_scope_model_matches_full_and_incremental_replay` | Full | 纯内存、固定 seeds | 包含在 unit，约数秒 | failure seed/cursor；`src/tests/query_tests.rs` |
 | `behavior-snapshots` | reviewed root-help 与 invalid-id 的 stdout/stderr/exit 不发生未审漂移 | `cargo test --release --test behavior_harness reviewed_text_snapshots` | Fast, Full | 每场景 temp；动态值不得被宽泛 scrub | 秒级 | checked-in exact snapshots + diff |
@@ -34,6 +33,15 @@
 | `fuzz-strict-input` | strict JSON reader 对 10,000 个可复现 hostile ASCII inputs 不 panic | `scripts/ci.ps1 -Mode Nightly` 选择固定 Rust test 并设置 cases env | Nightly | 确定性 corpus | 约数分钟 | failure case + Rust report |
 | `doctor-smoke` | 部署后二进制能严格读取本仓 journal | `mnema doctor journal` | Full（部署后） | 明确 `-C <repo>`；只读 | 秒级 | stdout/stderr + TerminalEvent；release wrapper |
 
+## Historical compatibility inventory
+
+历史 suite 只保护已发布 bytes、identity、迁移和投影承诺，不定义新代码应复制的 API 或内部模式。隔离规则见 `tests/compatibility/README.md`。
+
+| Suite id | Historical claim | Exact entrypoint | Lane | Evidence |
+|---|---|---|---|---|
+| `compat-v2-v3` | 冻结 v2 bytes 的 source/migration/target identity、raw v3 records、迁移前后投影不漂移 | `cargo test --release --test v2_v3_compat` | Full | immutable fixture hashes；`tests/fixtures/v2/`, `tests/v2_v3_compat.rs` |
+| `compat-v1-v2-unit` | 退役 v1 reader、certificate 与 cutover translator 仍能解释既有证据 | `cargo test --release cutover_v2_` 及明确 `legacy_`/`old_`/`v2_` 单测 | Full（包含在 unit） | synthetic legacy bytes；禁止引用 current orient UX |
+
 ## Planned inventory
 
 计划项在实现前先登记，落地后必须把状态、入口和证据更新为 Current；不能仅在脚本里暗藏测试。
@@ -42,9 +50,9 @@
 |---|---|---|---|---|
 | `concurrent-visibility` | planned | reader 在 parent+refs 与 anchor 批次中途看不到半状态 | Full | 多进程 writer+reader；独立 temp journal；事件时间线 |
 | `performance-scale` | planned | 100k/1m events 的 p50/p95/p99、吞吐、冷暖 cache 曲线 | Nightly | 独占机器/target；不与 correctness shard 并发；baseline JSON |
-| `recursive-rere-smoke` | planned | 虚拟 Journal 根与深度 1/2 strand 根使用同一递归语义，且默认视野不串树 | Fast | `tests/recursive/smoke.list`；rere replay only；每场景隔离 journal |
-| `recursive-rere-full` | planned | 深度 0..10 的 orient/query/add-child、refs 不扩 scope、reparent join/leave 保持递归同构 | Full/Nightly | `tests/recursive/full.list`；固定 rere fixtures；AsyncExec durable replay |
-| `recursive-rere-crash` | planned | 递归 parent+refs 与拓扑变化在 crash/failpoint 后只暴露完整旧态或新态 | Nightly | `tests/recursive/crash.list`；AsyncExec timeout/log facts；record 禁止自动运行 |
+| `recursive-rere-smoke` | implementation in progress | 虚拟 Journal 根与深度 1/2 strand 根使用同一递归语义，且默认视野不串树 | Fast | `tests/recursive/smoke.list`；rere replay only；每场景隔离 journal |
+| `recursive-rere-full` | implementation in progress | 深度 0..10 的 orient/query/add-child、refs 不扩 scope、reparent join/leave 保持递归同构 | Full/Nightly | `tests/recursive/full.list`；固定 rere fixtures；AsyncExec durable replay |
+| `recursive-rere-crash` | implementation in progress | 递归 parent+refs 与拓扑变化在 crash/failpoint 后只暴露完整旧态或新态 | Nightly | `tests/recursive/crash.list`；AsyncExec timeout/log facts；record 禁止自动运行 |
 | `fixture-typed-unlink` | planned | typed unlink + legacy tombstone 的 v2→v3 解释冻结 | Full | 新版本 fixture，不修改 compat-v1 |
 | `fixture-retired-why` | planned | legacy why 只迁成 ref、不成为 live edge | Full | 新版本 fixture，不修改 compat-v1 |
 

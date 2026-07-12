@@ -113,16 +113,54 @@ pub(crate) fn cmd_link(
     }
     let provenance = parse_provenance_arg(provenance_raw)?;
     let (content, effect) = event::link_entry_parts(&tgt_id, etype);
-    append_entry_to_strand(JournalEntryAppendRequest {
-        strand_id: src_id.clone(),
-        content,
-        refs: Vec::new(),
-        legacy_ref: None,
-        effect: Some(effect),
-        provenance,
-        kind_override: None,
-        payload_override: None,
-    })?;
+    let validate_source = src_id.clone();
+    let validate_target = tgt_id.clone();
+    let validate_type = etype.to_string();
+    append_entry_to_strand_checked(
+        JournalEntryAppendRequest {
+            strand_id: src_id.clone(),
+            content,
+            refs: Vec::new(),
+            legacy_ref: None,
+            effect: Some(effect),
+            provenance,
+            kind_override: None,
+            payload_override: None,
+        },
+        move |events| {
+            if validate_type != "belongs-to" {
+                return Ok(());
+            }
+            let strands = projection::project_strands(events, true);
+            let source = strands
+                .iter()
+                .find(|strand| strand.id == validate_source)
+                .ok_or_else(|| format!("source strand {} disappeared", validate_source))?;
+            if let Some(existing) = source
+                .belongs_to_edges
+                .iter()
+                .find(|parent| parent.as_str() != validate_target)
+            {
+                return Err(format!(
+                    "strand {} already belongs to {}; unlink that belongs-to edge before reparenting to {}",
+                    shorten(&validate_source),
+                    shorten(existing),
+                    shorten(&validate_target)
+                ));
+            }
+            let target_subtree = crate::scope::Scope::subtree(&validate_source)
+                .resolve_ids(&strands)
+                .map_err(|error| format!("cannot validate belongs-to topology: {error}"))?;
+            if target_subtree.contains(&validate_target) {
+                return Err(format!(
+                    "cannot create belongs-to cycle: target {} is already inside subtree {}",
+                    shorten(&validate_target),
+                    shorten(&validate_source)
+                ));
+            }
+            Ok(())
+        },
+    )?;
     if format_json {
         let output = output::LinkOutput {
             source_id: src_id.clone(),

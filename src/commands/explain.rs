@@ -2,20 +2,6 @@
 /// render it. Lives in the command layer so the catalog (diagnostics.rs)
 /// stays pure data and never references the output DTO layer.
 use crate::diagnostics::{Severity, lookup, topic_lookup, topics};
-use crate::journal::{ensure_journal, read_events_lossy};
-use crate::projection;
-use crate::util::shorten;
-
-fn collaboration_exemplar_line() -> Option<String> {
-    let path = ensure_journal().ok()?;
-    let (events, _) = read_events_lossy(&path);
-    let strands = projection::project_strands(&events, true);
-    let forest = projection::find_recent_collaboration_forest(&strands)?;
-    Some(format!(
-        "本地真实范例: mnema tree --id {}",
-        shorten(&forest.root_id)
-    ))
-}
 
 /// Routing order:
 ///   1. Diagnostic code lookup (case-insensitive; W068, w068, etc.)
@@ -65,14 +51,7 @@ pub fn cmd_explain(input: &str, format_json: bool) -> String {
                 )
             })
         } else {
-            let mut body = topic.body.to_string();
-            if topic.name == "collaboration" {
-                if let Some(line) = collaboration_exemplar_line() {
-                    body.push_str("\n\n");
-                    body.push_str(&line);
-                }
-            }
-            format!("{}\n\n{}", topic.title, body)
+            format!("{}\n\n{}", topic.title, topic.body)
         };
     }
 

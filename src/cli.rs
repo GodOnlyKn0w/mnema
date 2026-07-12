@@ -151,7 +151,7 @@ Examples:
         /// Human alias for the new strand. Must be unique and not pure hex.
         #[arg(long = "slug", value_name = "SLUG")]
         slug: Option<String>,
-        /// Strand type: task, dag, why, session (default: auto-detect)
+        /// Explicit strand type: task, dag, why, session (default: unset; body is never classified)
         #[arg(long = "type", value_name = "TYPE")]
         strand_type: Option<String>,
         /// Optional provenance JSON object. Stored on the initial LogAppended entry.

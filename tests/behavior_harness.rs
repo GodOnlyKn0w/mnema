@@ -343,6 +343,82 @@ fn recursive_scope_fixture_agrees_with_independent_current_scope_oracle() {
 }
 
 #[test]
+fn relation_families_are_orthogonal_at_the_public_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    ok(dir.path(), &["init"], None);
+    let root = id(&add(dir.path(), "[task] topology root\n", &[]));
+    let evidence = id(&add(dir.path(), "[evidence] explicit basis\n", &[]));
+    let attention = id(&add(dir.path(), "[review] inspect alongside root\n", &[]));
+    let prose_only = id(&add(
+        dir.path(),
+        "[note] I belong to the root in prose only\n",
+        &[],
+    ));
+    let child = id(&add(
+        dir.path(),
+        "[task] structural child\n",
+        &["--parent", &root],
+    ));
+
+    ok(
+        dir.path(),
+        &["link", &root, &attention, "--edge-type", "depends-on"],
+        None,
+    );
+    ok(
+        dir.path(),
+        &["append", "--id", &root, "--ref", &evidence],
+        Some("[decision] retain explicit evidence\n"),
+    );
+
+    let tree = ok(
+        dir.path(),
+        &["tree", "--id", &root, "--format", "json"],
+        None,
+    );
+    assert!(tree.contains(&child));
+    assert!(!tree.contains(&evidence));
+    assert!(!tree.contains(&attention));
+    assert!(!tree.contains(&prose_only));
+
+    let timeline: Value = serde_json::from_str(
+        ok(
+            dir.path(),
+            &["timeline", "--under", &root, "--format", "json"],
+            None,
+        )
+        .trim(),
+    )
+    .unwrap();
+    let members: HashSet<String> = timeline_rows(&timeline)
+        .iter()
+        .filter_map(|row| row["strand_id"].as_str().map(str::to_string))
+        .collect();
+    assert!(members.contains(&root));
+    assert!(members.contains(&child));
+    assert!(!members.contains(&evidence));
+    assert!(!members.contains(&attention));
+    assert!(!members.contains(&prose_only));
+
+    let orient: Value = serde_json::from_str(
+        ok(
+            dir.path(),
+            &["orient", "--id", &root, "--format", "json"],
+            None,
+        )
+        .trim(),
+    )
+    .unwrap();
+    let context = orient["scope"]["context"].as_array().unwrap();
+    assert!(context.iter().any(|pointer| {
+        pointer["kind"] == "depends-on" && pointer["id"].as_str() == Some(attention.as_str())
+    }));
+    assert!(context.iter().any(|pointer| {
+        pointer["kind"] == "ref" && pointer["id"].as_str() == Some(evidence.as_str())
+    }));
+}
+
+#[test]
 fn event_time_incremental_scope_differs_from_current_scope_at_join_and_leave() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = recursive_scope_v1(dir.path());

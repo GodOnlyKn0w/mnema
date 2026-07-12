@@ -257,26 +257,9 @@ pub(crate) fn cmd_add_with_parent_and_slug(
     // Strip trailing newline (same as append), preserve other whitespace
     let stored = normalize_content(&raw);
 
-    // Auto-detect strand type from content if not provided
-    let resolved_type = strand_type.or_else(|| {
-        if stored.starts_with("para group ") {
-            Some("dag")
-        } else if stored.starts_with("[task]") {
-            Some("task")
-        } else if stored.starts_with("[session]") {
-            Some("session")
-        } else if stored.starts_with('[')
-            && stored.len() > 2
-            && stored[1..]
-                .chars()
-                .next()
-                .map_or(false, |c| c.is_ascii_digit())
-        {
-            Some("task")
-        } else {
-            None
-        }
-    });
+    // Strand type is an explicit creation fact. Natural-language body markers
+    // never manufacture topology/entity semantics.
+    let resolved_type = strand_type;
 
     let provenance = parse_provenance_arg(provenance_raw)?;
     // Resolve parent, slug and all refs from the same locked snapshot that is
