@@ -1,0 +1,17 @@
+# Upstream pin for tests/recursive/rere.py
+#
+# Tool: rere.py (Record / Replay) — universal behavior testing tool
+# Canonical upstream: https://github.com/tsoding/rere.py
+# (Task brief referred to this family as GodOnlyKn0w/rere.py; the public
+# self-contained MIT source is tsoding/rere.py.)
+#
+# Integration policy for mnema:
+# - Vendor the script under tests/recursive/ (do not fetch at test time).
+# - Automated gates may only run:  python tests/recursive/rere.py replay <list>
+# - Record is a deliberate maintainer action:
+#     python tests/recursive/rere.py record <list>
+# - Scenario isolation, env fixing, and dynamic-value neutralization live in
+#   driver.py — rere itself only compares shell / returncode / stdout / stderr.
+#
+# License: MIT (see header of rere.py)
+# Snapshot artifacts: <list-file>.bi beside each .list (binary, reviewed evidence)

@@ -1,0 +1,4 @@
+# recursive-rere-crash — Nightly lane, replay only in CI
+# Mid-write failpoint atomicity remains cargo crash_atomicity; this list freezes
+# recursive post-conditions for completed parent+refs batches under strict read.
+python tests/recursive/driver.py crash/complete-batch-strict-readable

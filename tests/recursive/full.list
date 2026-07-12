@@ -1,0 +1,3 @@
+# recursive-rere-full — Full/Nightly lane, replay only in CI
+python tests/recursive/driver.py full/depth-chain-orient
+python tests/recursive/driver.py full/reparent-join-leave

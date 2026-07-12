@@ -1,0 +1,9 @@
+# Maintainer union index (smoke + full + crash). Record deliberately:
+#   python tests/recursive/rere.py record tests/recursive/tests.list
+# Automated gates use smoke.list / full.list / crash.list replay only.
+python tests/recursive/driver.py smoke/fresh-journal-orient
+python tests/recursive/driver.py smoke/journal-vs-subtree
+python tests/recursive/driver.py smoke/refs-do-not-expand-scope
+python tests/recursive/driver.py full/depth-chain-orient
+python tests/recursive/driver.py full/reparent-join-leave
+python tests/recursive/driver.py crash/complete-batch-strict-readable

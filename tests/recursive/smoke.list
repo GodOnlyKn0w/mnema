@@ -1,0 +1,5 @@
+# recursive-rere-smoke — Fast lane, replay only in CI
+# Each line is a shell command executed by tests/recursive/rere.py
+python tests/recursive/driver.py smoke/fresh-journal-orient
+python tests/recursive/driver.py smoke/journal-vs-subtree
+python tests/recursive/driver.py smoke/refs-do-not-expand-scope
