@@ -2,6 +2,22 @@
 name = "mnema"
 version = "0.3.0"
 edition = "2024"
+rust-version = "1.95"
+description = "Append-only semantic topology for durable human and multi-agent work"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/GodOnlyKn0w/mnema"
+homepage = "https://github.com/GodOnlyKn0w/mnema"
+readme = "README.md"
+keywords = ["agents", "journal", "cli", "coordination", "memory"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = [
+    ".mnema/**",
+    ".artifacts/**",
+    ".claude/**",
+    "scratch/**",
+    "AGENTS.md",
+    "CLAUDE.md",
+]
 
 [features]
 test-failpoints = []
