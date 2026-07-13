@@ -15,6 +15,10 @@ mnema 的源码仓库（Rust CLI：append-only journal + 投影）。
 工程纪律：
 
 - `cargo build --release && cargo test --release` 全绿才算完。
+- 仓库完整门禁默认由最新版 AsyncExec 耐久托管：`scripts/ci.ps1 -Mode Full`。
+  短命令、即时串行诊断继续使用调用方的直接前台执行；需要跨调用存活、
+  可与其他工作重叠、输出较大或可能超时的构建/测试/无头 agent 才交给
+  AsyncExec。显式对照可用 `-Executor Direct`。
 - 参数与输出契约：`mnema explain grammar`。新命令、新旗标、
   新 JSON 字段先读契约再动手——一致性 CI 会咬人。
 - help 文本里的示例命令被 CI 真解析——改 help 必须保证示例可解析。
@@ -56,8 +60,10 @@ mnema 的源码仓库（Rust CLI：append-only journal + 投影）。
   - codex：`codex exec --sandbox workspace-write -m gpt-5.5 -c model_reasoning_effort=high - < prompt.md`
   - claude：`claude -p --model sonnet --permission-mode bypassPermissions < prompt.md`
   - grok：`grok --prompt-file prompt.md -m grok-4.5 --permission-mode bypassPermissions --cwd <dir>`
-- 长任务后台跑、stdout 落日志；超时杀进程是调用方的责任
-  （三个 CLI 都没有 timeout 旗标）。
+- 长任务与无头 agent 用 AsyncExec 托管，保留完整 Handle，并把
+  RequestId/RunId 写入对应 strand；启动后继续其他工作，不轮询，在自然
+  汇合点一次收取。目标 CLI 没有 timeout 旗标不再重要：wall timeout、
+  日志与进程树回收由 AsyncExec 提供，任务是否完成仍以 strand 证据判定。
 - **谁·怎么派·适合什么·有什么坑 → 模型花名册 `docs/agent-roster.md`**（batch 标题树）：
   `batch tree docs/agent-roster.md` 看全貌；`batch get docs/agent-roster.md#<模型>/无头调用`
   取启动命令；`#<模型>/适合`、`#<模型>/坑` 看适配与雷区。速记：长活主力 codex（稳、

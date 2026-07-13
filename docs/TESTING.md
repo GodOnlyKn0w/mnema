@@ -72,11 +72,22 @@ changes must be reviewed like public API changes.
 
 ## async-exec boundary
 
-`scripts/ci.ps1` is the local entrypoint. `-Executor Direct` and
-`-Executor AsyncExec` select execution mechanics without changing suite
-semantics; both emit `mnema.ci-report/v1`. The async adapter supplies explicit
-suite, cwd, environment allowlist, timeout and output budget, then preserves the
-canonical Handle, TerminalEvent and logs under `.artifacts/ci/`.
+`scripts/ci.ps1` is the local entrypoint and defaults to `-Executor AsyncExec`.
+Use `-Executor Direct` only for an explicit foreground comparison or a short,
+tightly serial diagnosis. Both mechanics preserve suite semantics and emit
+`mnema.ci-report/v1`.
+
+The durable path uses the installed consumer surfaces rather than Store layout:
+`async-exec-adapter exec --ensure-host` submits structured argv with explicit
+cwd, environment allowlist, wall timeout, stdin EOF, and separate canonical
+capture/response budgets; Core `await` supplies the TerminalEvent; lossless
+adapter `observe` supplies exact base64 log bytes for `.artifacts/ci/`. The gate
+never discovers `runs/` or copies private Store files.
+
+By default Cargo uses the current worktree's `target/`, preserving its usable
+incremental toolchain state. Concurrent callers that share a worktree must set
+an explicit distinct `CARGO_TARGET_DIR`; the gate preserves and allowlists it
+instead of inventing a global or per-commit cold cache.
 
 async-exec does not decide whether a semantic test passed, retry a failed suite,
 understand a mnema strand, or become a workflow engine. The PowerShell wrapper

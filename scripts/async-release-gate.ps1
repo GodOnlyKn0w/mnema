@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory)][string]$RepoRoot,
     [Parameter(Mandatory)][string]$Store,
     [Parameter(Mandatory)][string]$ArtifactRoot,
-    [string]$AsyncExec = 'async-exec.exe'
+    [string]$AsyncExec = 'async-exec.exe',
+    [string]$AsyncExecAdapter = 'async-exec-adapter.cmd'
 )
 
 Set-StrictMode -Version Latest
@@ -14,8 +15,12 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 New-Item -ItemType Directory -Force -Path $Store, $ArtifactRoot | Out-Null
 $commit = (& git -C $RepoRoot rev-parse HEAD).Trim()
-$automationVersion = 'ci-v4'
-$targetDir = Join-Path $ArtifactRoot 'cargo-target'
+$automationVersion = 'ci-v6'
+$targetDir = if ($env:CARGO_TARGET_DIR) {
+    [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $RepoRoot)
+} else {
+    Join-Path $RepoRoot 'target'
+}
 New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
 $env:CARGO_TARGET_DIR = $targetDir
 $env:NO_COLOR = '1'
@@ -26,34 +31,6 @@ if ($Mode -eq 'Nightly') {
     $env:MNEMA_DIFF_EVENTS = '240'
     $env:MNEMA_FUZZ_CASES = '10000'
 }
-$runningOnWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
-if ($runningOnWindows -and -not $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER) {
-    $linker = Get-ChildItem 'C:\Program Files (x86)\Microsoft Visual Studio' -Recurse `
-        -Filter link.exe -ErrorAction SilentlyContinue |
-        Where-Object FullName -Like '*\bin\Hostx64\x64\link.exe' |
-        Sort-Object FullName -Descending | Select-Object -First 1
-    if (-not $linker) { throw 'MSVC x64 linker not found; install Visual Studio C++ Build Tools' }
-    $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = $linker.FullName
-    $msvcRoot = Split-Path (Split-Path (Split-Path (Split-Path $linker.FullName)))
-    $sdkLib = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Lib' -Directory `
-        -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
-    $sdkInclude = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Directory `
-        -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
-    if (-not $sdkLib -or -not $sdkInclude) { throw 'Windows 10 SDK not found' }
-    $env:LIB = @(
-        (Join-Path $msvcRoot 'lib\x64'),
-        (Join-Path $sdkLib.FullName 'ucrt\x64'),
-        (Join-Path $sdkLib.FullName 'um\x64')
-    ) -join ';'
-    $env:INCLUDE = @(
-        (Join-Path $msvcRoot 'include'),
-        (Join-Path $sdkInclude.FullName 'ucrt'),
-        (Join-Path $sdkInclude.FullName 'shared'),
-        (Join-Path $sdkInclude.FullName 'um'),
-        (Join-Path $sdkInclude.FullName 'winrt')
-    ) -join ';'
-}
-
 $inherit = @(
     'PATH', 'SystemRoot', 'windir', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
     'TEMP', 'TMP', 'PATHEXT', 'ComSpec', 'APPDATA', 'LOCALAPPDATA',
@@ -78,20 +55,29 @@ foreach ($buildVariable in @('LIB', 'INCLUDE', 'LIBPATH')) {
 
 function Start-Suite([object]$Suite) {
     $requestId = "mnema:${commit}:$($Mode.ToLowerInvariant()):$($Suite.Name):$automationVersion"
-    $args = @('start', '--store', $Store, '--request-id', $requestId,
-        '--timeout-ms', [string]$Suite.TimeoutMs, '--cwd', $RepoRoot,
-        '--stdout-limit', '16777216', '--stderr-limit', '16777216')
+    $args = @('exec', '--store', $Store, '--request-id', $requestId,
+        '--wall-timeout-ms', [string]$Suite.TimeoutMs, '--inline-wait-ms', '1',
+        '--ensure-host', '--cwd', $RepoRoot,
+        '--stdout-capture-max-bytes', '16777216',
+        '--stderr-capture-max-bytes', '16777216',
+        '--stdout-response-read-max-bytes', '1',
+        '--stderr-response-read-max-bytes', '1')
     foreach ($name in $inherit) { $args += @('--env', $name) }
     $args += '--'
     $args += $Suite.Argv
-    $raw = & $AsyncExec @args
-    if ($LASTEXITCODE -ne 0) { throw "async-exec start failed for $($Suite.Name)" }
-    [pscustomobject]@{ Suite = $Suite; Handle = ($raw | ConvertFrom-Json) }
+    $raw = & $AsyncExecAdapter @args
+    if ($LASTEXITCODE -ne 0) { throw "async-exec-adapter exec failed for $($Suite.Name)" }
+    $result = $raw | ConvertFrom-Json
+    [pscustomobject]@{ Suite = $Suite; Handle = $result.handle }
 }
 
-function Find-RunDirectory([string]$RunId) {
-    Get-ChildItem (Join-Path $Store 'runs') -Directory -Recurse -Filter $RunId |
-        Select-Object -First 1 -ExpandProperty FullName
+function Read-SuiteStream([object]$Handle, [string]$Stream, [string]$CursorDir, [string]$Destination) {
+    $handleJson = $Handle | ConvertTo-Json -Depth 8 -Compress
+    $raw = $handleJson | & $AsyncExecAdapter observe --handle - --cursor-dir $CursorDir `
+        --stream $Stream --max-bytes 16777216
+    if ($LASTEXITCODE -ne 0) { throw "async-exec-adapter observe failed for $Stream" }
+    $observation = $raw | ConvertFrom-Json
+    [IO.File]::WriteAllBytes($Destination, [Convert]::FromBase64String($observation.bytes_base64))
 }
 
 function Await-Suite([object]$Started) {
@@ -100,13 +86,11 @@ function Await-Suite([object]$Started) {
     $terminal = $raw | ConvertFrom-Json
     $suiteDir = Join-Path $ArtifactRoot $Started.Suite.Name
     New-Item -ItemType Directory -Force -Path $suiteDir | Out-Null
-    $runDir = Find-RunDirectory $Started.Handle.run_id
     $stdout = Join-Path $suiteDir 'stdout.log'
     $stderr = Join-Path $suiteDir 'stderr.log'
-    if ($runDir) {
-        Copy-Item (Join-Path $runDir 'stdout.log') $stdout -Force -ErrorAction SilentlyContinue
-        Copy-Item (Join-Path $runDir 'stderr.log') $stderr -Force -ErrorAction SilentlyContinue
-    }
+    $cursorDir = Join-Path $suiteDir 'cursors'
+    Read-SuiteStream $Started.Handle 'stdout' $cursorDir $stdout
+    Read-SuiteStream $Started.Handle 'stderr' $cursorDir $stderr
     [pscustomobject]@{
         name = $Started.Suite.Name
         argv = $Started.Suite.Argv

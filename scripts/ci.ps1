@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Fast', 'Full', 'Nightly')][string]$Mode = 'Fast',
-    [ValidateSet('Direct', 'AsyncExec')][string]$Executor = 'Direct',
+    [ValidateSet('Direct', 'AsyncExec')][string]$Executor = 'AsyncExec',
     [string]$Store = 'D:\harness\async-exec-runs\tasktree-core'
 )
 

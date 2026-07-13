@@ -61,12 +61,13 @@
 统一入口已经实现为：
 
 ```powershell
-./scripts/ci.ps1 -Mode Fast    -Executor Direct
-./scripts/ci.ps1 -Mode Full    -Executor AsyncExec
-./scripts/ci.ps1 -Mode Nightly -Executor AsyncExec
+./scripts/ci.ps1 -Mode Fast
+./scripts/ci.ps1 -Mode Full
+./scripts/ci.ps1 -Mode Nightly
+# 仅作前台对照或短串行诊断：追加 -Executor Direct
 ```
 
-`scripts/ci.ps1` 负责选择本表 suite、组合结果和产出 `mnema.ci-report/v1`；`scripts/async-release-gate.ps1` 只把 suite 映射为 durable run。AsyncExec 记录进程事实，不解释测试成功，不重试，不理解 strand。
+三种模式默认使用 AsyncExec。`scripts/ci.ps1` 负责选择本表 suite、组合结果和产出 `mnema.ci-report/v1`；`scripts/async-release-gate.ps1` 只把 suite 映射为 durable run。AsyncExec 记录进程事实，不解释测试成功，不重试，不理解 strand。
 
 Full lane 固定先单路 `build-release`、`compile-release`，再并发 correctness shards，避免多个 Cargo 编译争夺 artifact lock：
 
