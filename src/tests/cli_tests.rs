@@ -425,6 +425,25 @@ fn root_help_prioritizes_session_work_before_maintenance() {
     }
     assert!(help.contains("mnema <command> --help"));
     assert!(help.contains("mnema explain <topic|CODE>"));
+    assert!(help.contains("Coordinator or unscoped session entry (journal-wide):"));
+    assert!(help.contains("Delegated worker entry at any depth (local subtree):"));
+    assert!(help.contains("mnema orient --id <ID>"));
+}
+
+#[test]
+fn show_help_redirects_first_scoped_read_to_orient() {
+    let command = <Cli as clap::CommandFactory>::command();
+    let show = command
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "show")
+        .expect("show command");
+    let help = show
+        .get_after_help()
+        .expect("show point-of-use guidance")
+        .to_string();
+    assert!(help.contains("first scoped read"));
+    assert!(help.contains("mnema orient --id <ID>"));
+    assert!(help.contains("show is a deliberate deep read"));
 }
 
 #[test]

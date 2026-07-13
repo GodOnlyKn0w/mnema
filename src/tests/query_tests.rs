@@ -2015,6 +2015,9 @@ fn orient_id_keeps_closed_root_and_upstream_as_unexpanded_scope_context() {
         .unwrap();
     assert_eq!(pointer.kind, "depends-on");
     assert!(pointer.command.contains("mnema show --id"));
+    let pointer_line = format_orient_context_pointer(pointer);
+    assert!(pointer_line.contains("not expanded; read only if needed"));
+    assert!(pointer_line.contains(&pointer.command));
     assert!(
         plan.output
             .remind

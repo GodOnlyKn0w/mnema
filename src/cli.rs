@@ -27,9 +27,9 @@ fn version_info() -> &'static str {
     version = version_info(),
     after_help = "\
 Start here:
-  Journal-wide session entry:
+  Coordinator or unscoped session entry (journal-wide):
     mnema orient
-  Delegated worker entry (local subtree):
+  Delegated worker entry at any depth (local subtree):
     mnema orient --id <ID>
   Create a strand (entry text always uses stdin):
     echo \"[task] ...\" | mnema add
@@ -353,7 +353,11 @@ Examples:
 Examples:
   mnema show 0000019dd34b --tail 8
   mnema show --entry 3dfc13241d55 --deref 2
-  mnema show --entry 3dfc13241d55 --after 3")]
+  mnema show --entry 3dfc13241d55 --after 3
+
+Entry-point reminder:
+  For a delegated strand's first scoped read, use mnema orient --id <ID>.
+  show is a deliberate deep read after orientation, not the session entry point.")]
     #[command(display_order = 4)]
     Show {
         #[command(flatten)]

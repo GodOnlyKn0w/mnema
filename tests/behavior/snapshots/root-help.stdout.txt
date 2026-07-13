@@ -35,9 +35,9 @@ Options:
   -V, --version      Print version
 
 Start here:
-  Journal-wide session entry:
+  Coordinator or unscoped session entry (journal-wide):
     mnema orient
-  Delegated worker entry (local subtree):
+  Delegated worker entry at any depth (local subtree):
     mnema orient --id <ID>
   Create a strand (entry text always uses stdin):
     echo "[task] ..." | mnema add

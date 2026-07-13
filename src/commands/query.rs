@@ -830,13 +830,17 @@ fn print_orient_scope(scope: &output::OrientScopeOutput) {
     println!("  task: {}", root.summary);
     println!("  read: {}", root.catch_up);
     for pointer in &scope.context {
-        println!(
-            "  context {} {} (not expanded): {}",
-            pointer.kind,
-            shorten(&pointer.id),
-            pointer.command
-        );
+        println!("{}", format_orient_context_pointer(pointer));
     }
+}
+
+pub(crate) fn format_orient_context_pointer(pointer: &output::OrientContextPointer) -> String {
+    format!(
+        "  context {} {} (not expanded; read only if needed): {}",
+        pointer.kind,
+        shorten(&pointer.id),
+        pointer.command
+    )
 }
 
 fn orient_maturity_counts(
