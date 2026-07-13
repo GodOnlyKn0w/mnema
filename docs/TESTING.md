@@ -72,10 +72,29 @@ changes must be reviewed like public API changes.
 
 ## async-exec boundary
 
-`scripts/ci.ps1` is the local entrypoint and defaults to `-Executor AsyncExec`.
-Use `-Executor Direct` only for an explicit foreground comparison or a short,
-tightly serial diagnosis. Both mechanics preserve suite semantics and emit
-`mnema.ci-report/v1`.
+`scripts/ci.ps1` is the portable local entrypoint and defaults to
+`-Executor Direct`, so a contributor needs only the repository toolchain.
+Maintainers may opt into durable execution with `-Executor AsyncExec`; both
+mechanics preserve suite semantics and emit `mnema.ci-report/v1`.
+
+On Windows, the entrypoint uses Visual Studio's installed `vswhere` metadata
+to import the x64 MSVC developer environment when available. This avoids a
+common PATH collision with Git for Windows' unrelated `link.exe`. Unix-like
+hosts skip this step.
+
+AsyncExec Store resolution is explicit `-Store`, then
+`MNEMA_ASYNC_EXEC_STORE`, then the current user's local application-data
+directory (`mnema/async-exec`). The repository carries no machine-specific
+Store path. Existing durable history can remain in place by setting the
+environment variable to that Store.
+
+Examples:
+
+```powershell
+pwsh scripts/ci.ps1 -Mode Fast
+pwsh scripts/ci.ps1 -Mode Full -Executor AsyncExec
+pwsh scripts/ci.ps1 -Mode Full -Executor AsyncExec -Store D:\path\to\runs
+```
 
 The durable path uses the installed consumer surfaces rather than Store layout:
 `async-exec-adapter exec --ensure-host` submits structured argv with explicit

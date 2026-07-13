@@ -1,13 +1,41 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Fast', 'Full', 'Nightly')][string]$Mode = 'Fast',
-    [ValidateSet('Direct', 'AsyncExec')][string]$Executor = 'AsyncExec',
-    [string]$Store = 'D:\harness\async-exec-runs\tasktree-core'
+    [ValidateSet('Direct', 'AsyncExec')][string]$Executor = 'Direct',
+    [string]$Store
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'test-suites.ps1')
+
+function Initialize-WindowsMsvcEnvironment {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
+
+    $installerRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+    $vswhere = Join-Path $installerRoot 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path -LiteralPath $vswhere)) { return }
+
+    $installPath = & $vswhere -latest -products '*' `
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        -property installationPath | Select-Object -First 1
+    if (-not $installPath) { return }
+    $installPath = $installPath.Trim()
+
+    $vcvars = Join-Path $installPath 'VC\Auxiliary\Build\vcvars64.bat'
+    if (-not (Test-Path -LiteralPath $vcvars)) { return }
+
+    $developerEnvironment = '"{0}" >nul && set' -f $vcvars
+    foreach ($line in & cmd.exe /d /s /c $developerEnvironment) {
+        $separator = $line.IndexOf('=')
+        if ($separator -le 0) { continue }
+        $name = $line.Substring(0, $separator)
+        $value = $line.Substring($separator + 1)
+        Set-Item -LiteralPath "env:$name" -Value $value
+    }
+}
+
+Initialize-WindowsMsvcEnvironment
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $commit = (& git -C $repo rev-parse HEAD).Trim()
@@ -21,6 +49,12 @@ if ($Mode -eq 'Nightly') {
 }
 
 if ($Executor -eq 'AsyncExec') {
+    if (-not $Store) { $Store = $env:MNEMA_ASYNC_EXEC_STORE }
+    if (-not $Store) {
+        $localData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        if (-not $localData) { $localData = [IO.Path]::GetTempPath() }
+        $Store = Join-Path $localData 'mnema\async-exec'
+    }
     & (Join-Path $PSScriptRoot 'async-release-gate.ps1') -Mode $Mode -RepoRoot $repo `
         -Store $Store -ArtifactRoot $artifactRoot
     exit $LASTEXITCODE

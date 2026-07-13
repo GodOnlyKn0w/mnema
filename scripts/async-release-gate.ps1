@@ -4,8 +4,8 @@ param(
     [Parameter(Mandatory)][string]$RepoRoot,
     [Parameter(Mandatory)][string]$Store,
     [Parameter(Mandatory)][string]$ArtifactRoot,
-    [string]$AsyncExec = 'async-exec.exe',
-    [string]$AsyncExecAdapter = 'async-exec-adapter.cmd'
+    [string]$AsyncExec = 'async-exec',
+    [string]$AsyncExecAdapter = 'async-exec-adapter'
 )
 
 Set-StrictMode -Version Latest
