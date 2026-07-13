@@ -911,7 +911,7 @@ fn adaptive_orient_remind(
             |root| format!(r#"echo "<summary>" | mnema add --parent {}"#, shorten(root)),
         );
         return format!(
-            "loop: 做一步·看现实变·再想 | write moments: 方案成形 / 判断被现实改变 / 实现或验证落地 / 委派交接 / 阻塞收口 | start → {} | writing drill → mnema explain writing | more → mnema --help",
+            "loop: act once · observe reality · decide again | write when: a plan forms / evidence changes judgment / implementation or verification lands / delegation or handoff occurs / work blocks or closes | start → {} | writing drill → mnema explain writing | more → mnema --help",
             start
         );
     };
@@ -935,13 +935,16 @@ fn adaptive_orient_remind(
             ),
         };
         let teaching = if score < 30 {
-            " | write moments: 方案成形 / 判断被现实改变 / 收口或不可逆前 | template: mnema explain writing"
+            " | write when: a plan forms / evidence changes judgment / before closure or an irreversible action | template: mnema explain writing"
         } else if score < 75 {
             " | writing template: mnema explain writing"
         } else {
             " | more: mnema --help"
         };
-        return format!("loop: 做一步·看现实变·再想 | {}{}", next, teaching);
+        return format!(
+            "loop: act once · observe reality · decide again | {}{}",
+            next, teaching
+        );
     }
 
     let latest = latest_active_visible_entry(strands, include_hidden)
@@ -980,14 +983,17 @@ fn adaptive_orient_remind(
     };
 
     let teaching = if score < 30 {
-        " | write moments: 方案成形 / 判断被现实改变 / 收口或不可逆前 | template: mnema explain writing"
+        " | write when: a plan forms / evidence changes judgment / before closure or an irreversible action | template: mnema explain writing"
     } else if score < 75 {
         " | writing template: mnema explain writing"
     } else {
         " | more: mnema --help"
     };
 
-    format!("loop: 做一步·看现实变·再想 | {}{}", next, teaching)
+    format!(
+        "loop: act once · observe reality · decide again | {}{}",
+        next, teaching
+    )
 }
 
 /// Print the needs-judgment block (CORPUS §8, question ③) — nothing when clear.
@@ -1759,7 +1765,7 @@ fn pick_row(
         .map(|s| format!("({}) ", s))
         .unwrap_or_default();
     let mark = if extra_parents > 0 {
-        format!("  [+{}父]", extra_parents)
+        format!("  [+{} parents]", extra_parents)
     } else {
         String::new()
     };

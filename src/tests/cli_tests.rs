@@ -384,6 +384,105 @@ fn is_mnema_subcommand(word: &str) -> bool {
     )
 }
 
+fn contains_han(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF))
+}
+
+#[test]
+fn default_cli_discovery_surface_is_english() {
+    let mut command = <Cli as clap::CommandFactory>::command();
+    let mut surfaces = vec![command.render_long_help().to_string()];
+    for subcommand in command.get_subcommands_mut() {
+        surfaces.push(subcommand.render_long_help().to_string());
+    }
+    surfaces.extend(
+        crate::diagnostics::topics()
+            .iter()
+            .flat_map(|topic| [topic.title.to_string(), topic.body.to_string()]),
+    );
+    surfaces.push(crate::output::ORIENT_REMIND.to_string());
+    surfaces.push(crate::output::ORIENT_PAUSE.to_string());
+
+    let offenders: Vec<&String> = surfaces.iter().filter(|text| contains_han(text)).collect();
+    assert!(
+        offenders.is_empty(),
+        "default CLI discovery contains non-English Han text: {offenders:#?}"
+    );
+}
+
+#[test]
+fn root_help_prioritizes_session_work_before_maintenance() {
+    let mut command = <Cli as clap::CommandFactory>::command();
+    let help = command.render_long_help().to_string();
+    for important in ["orient", "add", "append", "show", "list"] {
+        for maintenance in ["cutover-v2", "cutover-v3", "export"] {
+            assert!(
+                help.find(important) < help.find(maintenance),
+                "{important} must appear before {maintenance} in root help"
+            );
+        }
+    }
+    assert!(help.contains("mnema <command> --help"));
+    assert!(help.contains("mnema explain <topic|CODE>"));
+}
+
+#[test]
+fn explain_help_indexes_every_catalog_key() {
+    let command = <Cli as clap::CommandFactory>::command();
+    let explain = command
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "explain")
+        .expect("explain command");
+    let help = explain
+        .get_after_help()
+        .expect("explain discovery index")
+        .to_string();
+    for diagnostic in crate::diagnostics::catalog() {
+        assert!(
+            help.contains(diagnostic.code),
+            "explain help omits catalog key {}",
+            diagnostic.code
+        );
+    }
+    for topic in crate::diagnostics::topics() {
+        assert!(
+            help.contains(topic.name),
+            "explain help omits topic {}",
+            topic.name
+        );
+    }
+}
+
+#[test]
+fn critical_leaf_help_is_self_contained() {
+    let command = <Cli as clap::CommandFactory>::command();
+    for name in ["init", "find", "tree", "export"] {
+        let sub = command
+            .get_subcommands()
+            .find(|candidate| candidate.get_name() == name)
+            .unwrap_or_else(|| panic!("missing command {name}"));
+        let help = sub.get_after_help().unwrap_or_default().to_string();
+        assert!(help.contains("Example"), "{name} needs a copyable example");
+    }
+    let doctor = command
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "doctor")
+        .expect("doctor command");
+    let journal = doctor
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "journal")
+        .expect("doctor journal command");
+    assert!(
+        journal
+            .get_after_help()
+            .unwrap_or_default()
+            .to_string()
+            .contains("Exit 0"),
+        "doctor journal must state its exit contract"
+    );
+}
+
 fn clean_taught_command(raw: &str) -> String {
     let mut tokens: Vec<String> = Vec::new();
     for token in raw.split_whitespace() {

@@ -645,8 +645,8 @@ fn explain_collaboration_is_pure_read_and_points_to_local_tree() {
         before, after,
         "explain collaboration must not write journal"
     );
-    assert!(output.contains("mnema add --parent <母线>"));
-    assert!(output.contains("mnema tree --id <母线>"));
+    assert!(output.contains("mnema add --parent <PARENT>"));
+    assert!(output.contains("mnema tree --id <PARENT>"));
     assert!(
         !output.contains("本地真实范例"),
         "help must not infer collaboration semantics from journal prose"

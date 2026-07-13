@@ -124,12 +124,12 @@ impl<'a> ExplainUnknownOutput<'a> {
 // ── orient --format json ───────────────────────────────────
 
 /// Orient remind line: the operating loop surfaced by orient outputs.
-pub(crate) const ORIENT_REMIND: &str = "loop: 做一步·看现实变·再想 | continue → echo \"[decision] ...\" | mnema append --id <ID> | new matter → echo \"<summary>\" | mnema add | matter concluded → mnema close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → mnema checkpoint --id <ID> --action \"<why>\" | writing example → mnema explain writing | read/extract → --format json | jq（id/offset/status，非文本切割）| more → mnema --help";
+pub(crate) const ORIENT_REMIND: &str = "loop: act once · observe reality · decide again | continue → echo \"[decision] ...\" | mnema append --id <ID> | new matter → echo \"<summary>\" | mnema add | matter concluded → mnema close --id <ID> [--as done|failed|cancelled|merged|verified] | before irreversible → mnema checkpoint --id <ID> --action \"<why>\" | writing example → mnema explain writing | read/extract → --format json | jq (use structured id/offset/status; do not scrape text) | more → mnema --help";
 
 /// Pause guidance — the one place it can live (CORPUS §8): the tool can't stop
 /// the irreversible moment and a cold-start LLM won't go looking for it, so its
 /// full text rides on orient. Pause is discipline, not a gate.
-pub(crate) const ORIENT_PAUSE: &str = "pause（动手前停一下，是纪律不是关卡）：不可逆或收口状态的动作前，先 mnema checkpoint --id <ID> --action \"<为什么>\" 留一条自省痕——工具拦不住动作本身，只让『停一下』留下痕迹。判据：这一步撤得回吗？撤不回，先 pause。";
+pub(crate) const ORIENT_PAUSE: &str = "pause (a discipline, not a gate): before an irreversible or state-closing action, run mnema checkpoint --id <ID> --action \"<why>\". The tool cannot block the action; it records that you stopped to reconsider. Test: can this step be undone? If not, checkpoint first.";
 
 /// One active strand in the orient menu.
 #[derive(Debug, Serialize, Clone)]

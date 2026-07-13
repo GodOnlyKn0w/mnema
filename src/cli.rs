@@ -23,42 +23,28 @@ fn version_info() -> &'static str {
 #[derive(Parser)]
 #[command(
     name = "mnema",
+    about = "Append-only semantic topology for durable human and multi-agent work",
     version = version_info(),
     after_help = "\
-loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
+Start here:
+  Journal-wide session entry:
+    mnema orient
+  Delegated worker entry (local subtree):
+    mnema orient --id <ID>
+  Create a strand (entry text always uses stdin):
+    echo \"[task] ...\" | mnema add
 
-  orient        Session entry: active strand menu + catch-up commands
+Discovery:
+  Command syntax, rules, and examples:
+    mnema <command> --help
+  Cross-command argument contract:
+    mnema explain grammar
+  Concepts and diagnostic recovery:
+    mnema explain <topic|CODE>
 
-看 / read:
-  list          List strands
-  show          Show one strand (--digest one-glance, --tail N recent)
-  timeline      Chronological entries across strands (+linked)
-  search        Full-text search (entry hashes; --marker filter)
-  find          Resolve a strand id
-  pick          Pick a strand from an arrow-key menu; append reads body from stdin
-  tree          Strand forest (belongs-to nesting)
-  depends       depends-on upstream review context
-
-做 / change:
-  add           Create a new strand
-  append        Append an entry to a strand
-  close         Close a strand (close effect entry)
-  reopen        Reopen a closed strand (reopen effect entry)
-  checkpoint    Record context before an irreversible action
-  link          Link strands (belongs-to / depends-on)
-  unlink        Remove a link (unlink effect entry; projection drops the edge)
-
-管 / manage:
-  init          Initialize .mnema/ journal
-  hide          Hide a strand from active orient (parked, revivable)
-  unhide        Unhide a strand
-  doctor        Diagnose journal integrity (journal | edges)
-  export        Export journal as standalone audit artifact
-  cutover-v2    Rewrite/import current journal into pure v2 form
-  cutover-v3    Migrate pure v2 journal into activated v3 (manifest commit)
-  explain       Explain a diagnostic code or topic (markers, json, grammar, writing, ...)
-
-Run:  mnema <command> --help"
+Journal discovery walks upward from the current directory, like Git.
+Use -C <DIR> to choose a different starting directory. Machine consumers
+should request --format json where offered; JSON fields are a public contract."
 )]
 pub(crate) struct Cli {
     /// Operate as if started in DIR (journal walk-up and relative paths use DIR)
@@ -114,6 +100,17 @@ fn resolve_read_target(target: &IdTarget) -> Result<String, String> {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize .mnema/ directory and journal
+    #[command(after_help = "\
+Creates a fresh activated v3 journal in .mnema/. Discovery for later commands
+walks upward from the working directory, like Git. Existing initialized
+journals are preserved; init is idempotent.
+
+If a non-empty legacy journal.jsonl exists without an active manifest, init
+preserves it and points to mnema cutover-v3 --apply.
+
+Example:
+  mnema init")]
+    #[command(display_order = 6)]
     Init,
     /// Create a new strand with first log entry from stdin
     #[command(after_help = "\
@@ -129,6 +126,7 @@ Examples:
   echo \"child line of work\" | mnema add --parent <PARENT>
   echo \"derived matter\" | mnema add --parent <PARENT> --ref <REF>
   echo \"derived matter\" | mnema add --parent <PARENT> --ref <R1> --ref <R2>")]
+    #[command(display_order = 2)]
     Add {
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -195,6 +193,7 @@ Provenance:
                        the entry text. Older journals ignore it.
   --seen-offset <N>    Caller-declared last observed offset for the target
                        strand. If stale, emits W076 but still writes.")]
+    #[command(display_order = 3)]
     Append {
         /// Create a new strand from stdin content
         #[arg(short, long)]
@@ -272,6 +271,7 @@ Rules:
   --tail does not change observed_entries_before_append.
   checkpoint failed means hard stop.
 JSON shape: mnema explain json")]
+    #[command(display_order = 7)]
     Checkpoint {
         /// Strand ID (prefix match). Prefer explicit --id for commits and destructive actions.
         #[arg(long = "id", value_name = "STRAND_ID")]
@@ -313,6 +313,7 @@ Examples:
 
 --under X: same fields/schema as journal list; candidate set is SubtreeScope(X)
 (X plus belongs-to descendants). Collection queries share this flag.")]
+    #[command(display_order = 5)]
     List {
         /// Include hidden strands
         #[arg(long)]
@@ -353,6 +354,7 @@ Examples:
   mnema show 0000019dd34b --tail 8
   mnema show --entry 3dfc13241d55 --deref 2
   mnema show --entry 3dfc13241d55 --after 3")]
+    #[command(display_order = 4)]
     Show {
         #[command(flatten)]
         target: IdTarget,
@@ -428,6 +430,13 @@ Use the hash for fixes=<hash> / --why <hash>. Filter with --marker
         format: Option<String>,
     },
     /// Resolve a prefix to full strand ID
+    #[command(after_help = "\
+Resolves an id prefix, slug, selection handle, or --last to one full 64-hex
+strand id. Ambiguous prefixes fail with candidates; this command never writes.
+
+Examples:
+  mnema find d53f4ce2
+  mnema find --last --format json")]
     Find {
         #[command(flatten)]
         target: IdTarget,
@@ -609,24 +618,31 @@ Examples:
 
     /// Explain a diagnostic code or encyclopaedia topic
     ///
-    /// Namespace rule: diagnostic codes begin with an uppercase letter
-    /// (W068, E053); topics are all-lowercase (card, markers, retry, json, jq, grammar, writing, collaboration, delegation).
-    /// The two namespaces are mechanically disjoint.
+    /// KEY may be a concept topic, a W-code, or a named migration diagnostic.
     #[command(after_help = "\
-Namespaces:
-  Diagnostic codes   uppercase-initial: W068, E053, w068 (case-insensitive)
-  Topics             all-lowercase:     card, markers, retry, json, jq, grammar, writing, collaboration, delegation
+Keys are case-insensitive. They may be concept topics, W-codes, or named
+migration/activation diagnostics.
 
 Topics:
-  card      卡片：统一输出文法单元（格式、字段、回显语义）
-  markers   Marker 词表（[decision]、[done] 等前缀规范）
-  retry     重试语义：哪些命令可盲目重试
-  json      JSON 形态索引：各读命令 --format json 的顶层字段
-  jq        jq 整型：把 --format json 输出切成你要的形
-  grammar   文法契约：全 CLI 一致的参数与命名规则
-  writing   写入时机、entry 模板、临时 journal 演练脚本
-  collaboration  协作 forest：多路工作在 journal 里的形状
-  delegation     递归异步委派：child strand、refs、显式 id 与验收时机
+  card      Shared output card: format, fields, and write acknowledgement
+  markers   Marker vocabulary and annotation semantics
+  retry     Which commands are safe to retry without inspection
+  json      Top-level JSON shapes for machine consumers
+  jq        Reliable jq projections over public JSON
+  grammar   Cross-command arguments, names, and exit codes
+  writing   When and how to write useful entries
+  collaboration  Multi-worker forest shape and review discipline
+  delegation     Recursive asynchronous delegation and acceptance timing
+
+W-codes:
+  W059 W068 W071 W073 W074 W075 W076
+
+Named diagnostics:
+  migration-source-invalid       migration-source-changed
+  migration-map-incomplete       migration-id-collision
+  migration-artifact-conflict    legacy-history-write-forbidden
+  legacy-shadow-diverged         atomic-activation-failed
+  activation-durability-uncertain
 
 Examples:
   mnema explain W068
@@ -641,7 +657,8 @@ Examples:
   mnema explain W068 --format json
   mnema explain card --json")]
     Explain {
-        /// Diagnostic code (e.g. W068) or topic name (e.g. card)
+        /// Topic, W-code, or named diagnostic (case-insensitive)
+        #[arg(value_name = "KEY")]
         code: String,
         /// Output format: text (default) or json
         #[arg(long, value_name = "FORMAT")]
@@ -656,6 +673,13 @@ Examples:
         target: DoctorTarget,
     },
     /// Export journal to a standalone audit artifact
+    #[command(after_help = "\
+Reads the active journal and writes a standalone audit artifact to --out.
+The journal is not mutated. Parent directories are created as needed; an
+existing destination file is replaced.
+
+Example:
+  mnema export --out mnema-audit.jsonl")]
     Export {
         /// Output path for the exported journal
         #[arg(long, value_name = "PATH")]
@@ -778,6 +802,7 @@ Exit codes:
   0 ok
   1 journal missing or unreadable
 JSON shape: mnema explain json")]
+    #[command(display_order = 1)]
     Orient {
         /// Scope menu to belongs-to subtree rooted at ID (SubtreeScope; dedicated entry)
         #[arg(long, value_name = "ID")]
@@ -796,6 +821,15 @@ JSON shape: mnema explain json")]
         tree: bool,
     },
     /// Build nested tree projection from strand edges
+    #[command(after_help = "\
+Shows the belongs-to forest rooted at ID. Children are indented beneath their
+parents; refs and depends-on edges do not expand membership. --format json
+returns the same recursive node structure for machine consumers.
+
+Examples:
+  mnema tree --id <ID>
+  mnema tree --last
+  mnema tree --id <ID> --format json")]
     Tree {
         #[command(flatten)]
         target: IdTarget,
@@ -842,6 +876,13 @@ enum DoctorTarget {
     /// Check journal integrity (always JournalScope — parse/hash/anchor
     /// integrity cannot be narrowed by --under/--id; scope must not hide
     /// container damage)
+    #[command(after_help = "\
+Verifies the complete JournalScope: parseability, hash chain, anchors, active
+manifest, and journal identity. It is read-only and cannot be narrowed to a
+subtree. Exit 0 means no integrity issue; exit 2 means unreadable or corrupt.
+
+Run the recovery command printed with a diagnostic, then rerun:
+  mnema doctor journal")]
     Journal,
     /// Edge-discipline self-check: open unfixed [friction] + [decision] without --why
     #[command(after_help = "\

@@ -23,9 +23,9 @@
 // ── Topic catalog (L3 encyclopaedia layer) ──────────────────
 
 /// One encyclopaedia topic reachable via `mnema explain <name>`.
-/// Namespace rule: topic names are all-lowercase; diagnostic codes begin
-/// with an uppercase letter (W/E). The two namespaces are mechanically
-/// disjoint — no case-folding is applied to topics.
+/// Topic names are lowercase. Diagnostics include W-codes and lowercase named
+/// migration/activation keys. Lookup checks diagnostics before topics; catalog
+/// closure tests prevent duplicate keys. Topic lookup itself is exact.
 pub struct TopicInfo {
     pub name: &'static str,
     pub title: &'static str,
@@ -35,176 +35,172 @@ pub struct TopicInfo {
 static TOPICS: &[TopicInfo] = &[
     TopicInfo {
         name: "card",
-        title: "卡片——统一输出文法单元",
-        body: r#"卡片是所有写命令写后回显、orient 菜单、--format json result 字段共享的形态。
+        title: "Card — the shared output unit",
+        body: r#"The same card shape appears after writes, in orient, and in JSON result fields.
 
-文本格式（四行结构）：
-  把手行   <id> [type] | <n> entries | <state>
-  首条     <summary>（第一条日志，概述这条线的主题）
-  last:    <last_entry>（最近一条日志；entries>1 时出现）
-  疤痕行   仅当命令产生 W 码时追加（如 W071、W076）
-           （W 码=写时瞬态诊断：骑写回显，不入账/不成疤/show 不复显，须当场捕证。ADR-0003）
+Text shape:
+  handle   <id> [type] | <n> entries | <state>
+  summary  first entry, describing the strand's subject
+  last:    latest entry (only when entry_count > 1)
+  scar     transient W-code diagnostics produced by this write, when any
 
-把手行中的 <state> 显示生命周期（lifecycle），格式：
-  open:   registered（未关闭）
-  closed: closed:<disposition>（如 closed:done、closed:failed）
-  生命周期由 mnema close / reopen 命令改变，append 的 marker 是注解。
+The state is registered or closed:<disposition>. Only close/reopen changes
+lifecycle; append markers are annotations.
 
-语义：
-  回显即预付的验证——写后输出卡片，调用方无需再跑 show/orient 确认。
-  所有写命令（append/add/checkpoint/hide/unhide/link/close/reopen）
-  都在写后回显受影响线的卡片。
+A write card is prepaid verification: add, append, checkpoint, hide, unhide,
+link, close, and reopen acknowledge the affected strand without requiring an
+immediate show/orient round trip.
 
-JSON 形态（OrientStrand，写命令 result 字段 / orient active[]）：
-  - id / slug:    全宽 strand id；slug 为人类别名，可为 null，机器 join 仍用 id
-  - strand_type:  线的类型，可为 null（task/dag/why/session）
-  - entry_count:  日志条目计数
-  - summary:      第一条日志截断到 70 字符
-  - last_entry:   最近一条日志截断到 70 字符
-  - last_offset:  该线最近事件的 journal offset
-  - catch_up:     就绪的近内容窗口命令（mnema show --id <ID> --tail 8）
-  - lifecycle:    生命周期（"registered" 或 "closed:<disposition>"）
+JSON card fields (OrientStrand, write result, orient active[]):
+  id / slug       full strand id and optional human alias
+  strand_type     optional task/dag/why/session type
+  entry_count     number of log entries
+  summary         first entry, truncated to 70 characters
+  last_entry      latest entry, truncated to 70 characters
+  last_offset     journal offset of the strand's latest event
+  catch_up        ready command for a bounded recent window
+  lifecycle       registered or closed:<disposition>
 
-JSON shape 索引见 mnema explain json"#,
+See mnema explain json: complete JSON shape index."#,
     },
     TopicInfo {
         name: "markers",
-        title: "Marker 词表——append 条目前缀规范",
-        body: r#"Marker 是 append 条目首行的方括号前缀，机器可解析。
-Marker 是注解（annotation），不改变线的生命周期。
-生命周期由 close / reopen 命令控制，不由 marker 控制。
+        title: "Markers — structured entry annotations",
+        body: r#"A marker is a machine-readable bracketed prefix on an entry's first line.
+Markers annotate content; they never change strand lifecycle. Use close/reopen
+for lifecycle transitions.
 
 judgment:    [decision] [constraint] [friction] [fixed] [lesson] [insight]
 observation: [observed] [check] [progress] [deliverable] [metric]
-planning:    [deadline] <text> by=YYYY-MM-DD  （或 by=<RFC3339>）
+planning:    [deadline] <text> by=YYYY-MM-DD  (or by=<RFC3339>)
 structure:   [covers] [guide] [skill] [task] [session]
 annotation:  [done] [verified] [cancelled] [failed] [merged] [ended]
              [dispatched] [registered]
 system:      [checkpoint] [hidden] [waiting:human] [grill]
 
-Marker 语义（一行一条）：
-  [decision]    已做的决定
-  [constraint]  必须遵守的约束
-  [friction]    阻力 / 未解决的问题
-  [fixed]       已修复；可用 fixes=<entry哈希前缀≥8位> 指定目标 friction
-  [lesson]      学到的教训
-  [insight]     洞见
-  [observed]    观察到的事实
-  [progress]    进展 / [deliverable] 交付物
-  [metric]      落账的测量值；约定写 name=val（如 [metric] win_count=26）
-                可被 jq capture 抽成序列，见 mnema explain jq
-  [deadline]    截止日期（by= 字段必须是日期或 RFC3339）
-  [done]        完成注解（仅注解，不关闭线；关闭用 mnema close --id <ID>）
-  [checkpoint]  由 mnema checkpoint 命令写入，勿手动添加
+Common meanings:
+  [decision]    a decision made
+  [constraint]  a constraint that must hold
+  [friction]    an unresolved problem
+  [fixed]       a repair; fixes=<entry-prefix> identifies its friction
+  [observed]    an observed fact
+  [progress]    progress; [deliverable] a delivered artifact
+  [metric]      a recorded measurement, conventionally name=value
+  [deadline]    a deadline with by=<date-or-RFC3339>
+  [done]        completion annotation only; use mnema close: lifecycle command
+  [checkpoint]  written by mnema checkpoint --action <TEXT>; do not add manually
 
-未知方括号前缀一律透传（不拒写）；拼错收 W073；
-追加关闭类 marker 后收 W074 提醒改用 close 命令。"#,
+Unknown bracketed prefixes pass through. W073 flags likely misspellings; W074
+redirects lifecycle-like annotations to mnema close."#,
     },
     TopicInfo {
         name: "retry",
-        title: "重试语义——哪些命令可盲目重试",
-        body: r#"命令重试安全性（基于源码核实）：
+        title: "Retry semantics — inspect before repeating writes",
+        body: r#"Safe blind retries (idempotent):
+  hide     already hidden is an explicit no-op
+  unhide   already visible is an explicit no-op
+  init     preserves an existing journal and journal id
 
-可盲目重试（幂等）：
-  hide     已隐藏时显式 no-op（不写事件，输出"already hidden"）
-  unhide   已可见时显式 no-op（不写事件，输出"already visible"）
-  init     已存在时跳过文件创建与 journal-id 覆写；总是打印初始化消息；目录幂等
+Do not retry blindly:
+  append      writes another LogAppended event
+  add         creates another strand
+  checkpoint  writes another checkpoint entry
+  link        writes another link effect entry
+  unlink      writes another unlink effect entry
+  close       writes another close effect entry
+  reopen      writes another reopen effect entry
 
-不可盲目重试（有副作用）：
-  append   重复写入新的 LogAppended 事件；
-           超时后先 show/orient 查账再决定
-  add      每次创建新 strand；不检查内容重复
-  checkpoint  重复写入新的 checkpoint 条目；
-              超时后先 timeline 查账再决定
-  link     重复写入新的 link effect entry；legacy EdgeLinked 仍按投影折叠
+Inspect command-specific state before repeating cutover-v2/cutover-v3 --apply.
+Their default dry runs are read-only. export writes an external path: inspect
+the destination before retrying. Read commands, explain, doctor, and dry-run
+cutovers do not mutate the journal.
 
-通用原则：超时后先查账（show/orient/timeline），
-确认事件是否已写入，再决定是否重试。"#,
+After a timeout, inspect show, orient, or timeline to determine whether the
+event was recorded before deciding to retry."#,
     },
     TopicInfo {
         name: "json",
-        title: "JSON 形态索引——各读命令 --format json 的顶层字段",
-        body: r#"show（StrandDetailOutput）：
-  id / slug / hidden / summary / entry_count / status / state_marker / state_offset / last_entry_offset /
-  edges / belongs_to_edges / depends_on_edges / strand_branch / events
-  ※ events[].entry=日志行；last_entry_offset=下次 --seen-offset；belongs_to_edges=父 / depends_on_edges=上游(F3)
-list（StrandListOutput.strands[]，StrandListItem）：
-  id / slug / entry_count / first_summary / last_summary / hidden / strand_type /
+        title: "JSON shape index — public top-level fields",
+        body: r#"show (StrandDetailOutput): id / slug / hidden / summary / entry_count / status / state_marker / state_offset / last_entry_offset /
+  edges / belongs_to_edges / depends_on_edges / strand_branch / events; events[].entry is content; last_entry_offset feeds --seen-offset
+list (StrandListOutput.strands[], StrandListItem): id / slug / entry_count / first_summary / last_summary / hidden / strand_type /
   edges / belongs_to_edges / depends_on_edges / status / state_marker /
   state_offset / last_entry_ts / last_entry_offset
-orient（OrientOutput）：
-  max_offset / active / closed_count / hidden_count / integrity / notices / since_command / delegation_command / remind / pause / stale_count / stale_command / scope
-  ※ active[] 见 card；scope={kind,root,context[]} 只给未展开的 parent/depends-on/ref 与读取命令；stale_command 保留 stale_count 的 scope
-search（SearchOutput）：
-  matches / count / query / marker
-  ※ matches[]：strand_id / content / strand_type / hidden / entry_id / marker（entry_id=全哈希供 fixes=/--why；marker null=未筛）
-doctor edges（EdgesOutput）：
-  open_frictions / decisions_without_why / open_friction_count / open_friction_active_count / decision_without_why_count
-  ※ 项：entry_id / strand_id / marker / content / offset；under/id 仅缩候选集；fixes= 仍扫全 journal
-  ※ unfixed friction=无 fixes= 指它（不按 home strand 开闭过滤）；active_count=其中 registered 线上
-  ※ decision 无 --why；--since N 只跳过 offset<=N 的存量 decision；doctor journal integrity 始终 JournalScope
-timeline（TimelineOutput）：
-  timeline / truncated / count / max_offset / scope / window
-  ※ timeline[]：journal_offset / ts / strand_id / strand_type / kind / ts_skew；scope={kind,root,membership(current|event-time|not-applicable)}；window={since_offset,since_ts,until_offset,until_ts,observed_through,next_since_offset}，空命中也可安全续读
-append: seen_offset / seen_gap / warnings / closed_target / result / resolved_by / active_count；checkpoint: seen_offset / seen_gap / warnings / result
-add: id / status / provenance / slug / parent_id / edge_type / result；find: id
-hide / unhide: strand_id / status / noop / active_count / closed_count / hidden_count / result（卡片）
-link: source_id / target_id / edge_type / status / result.source / result.target（卡片）
-cutover-v2: applied / source_journal / archive_journal / map+certificate / source_event_count / imported_event_count / strand_count / entry_count / anchor_count / unresolved_ref_count；cutover-v3: applied / outcome / migration_id / source|history|target / map+certificate / counts / projection_ok
-depends（DependsOutput）：id / summary / upstream_count / registered_upstream_count / upstreams[]
-  ※ upstreams[]：id / lifecycle / summary / last_entry / show_command；under-scope（DependsScopeOutput）：root_id / count / strands[]
-卡片/result 形态见 mnema explain card；jq 整型见 mnema explain jq"#,
+orient (OrientOutput): max_offset / active / closed_count / hidden_count / integrity / notices / since_command / delegation_command / remind / pause / stale_count / stale_command / scope
+  active[] uses the card shape; scope context lists unexpanded parent/depends-on/ref exits and read commands
+search (SearchOutput): matches / count / query / marker; matches[]: strand_id / content / strand_type / hidden / entry_id / marker
+doctor edges (EdgesOutput): open_frictions / decisions_without_why / open_friction_count / open_friction_active_count / decision_without_why_count
+  items: entry_id / strand_id / marker / content / offset; under/id only narrows candidates; fixes= resolution remains journal-wide
+  --since N skips existing decisions at offset <= N; doctor journal integrity always uses JournalScope
+timeline (TimelineOutput): timeline / truncated / count / max_offset / scope / window
+  timeline[]: journal_offset / ts / strand_id / strand_type / kind / ts_skew; scope={kind,root,membership}; window supports safe continuation even with no hits
+append: seen_offset / seen_gap / warnings / closed_target / result / resolved_by / active_count
+checkpoint: seen_offset / seen_gap / warnings / result
+add: id / status / provenance / slug / parent_id / edge_type / result
+find: id
+hide / unhide: strand_id / status / noop / active_count / closed_count / hidden_count / result (card)
+link: source_id / target_id / edge_type / status / result.source / result.target (cards)
+unlink: source_id / target_id / edge_type / status / result.source / result.target (cards)
+close / reopen: strand_id / status / disposition / result (card)
+tree: recursive TreeOutput node with id / summary / children
+pick: delegates to the selected command; --print-id emits text only
+export: text acknowledgement only; writes the requested audit artifact
+doctor journal: text integrity report only; exit 2 means unreadable/corrupt journal
+cutover-v2: applied / source_journal / archive_journal / map+certificate / source_event_count / imported_event_count / strand_count / entry_count / anchor_count / unresolved_ref_count
+cutover-v3: applied / outcome / migration_id / source|history|target / map+certificate / counts / projection_ok
+depends (DependsOutput): id / summary / upstream_count / registered_upstream_count / upstreams[]
+  upstreams[]: id / lifecycle / summary / last_entry / show_command; scoped DependsScopeOutput: root_id / count / strands[]
+See mnema explain card: result cards. See mnema explain jq: projections."#,
     },
     TopicInfo {
         name: "jq",
-        title: "jq 整型——把 JSON 投影切成你要的形",
-        body: r#"JSON 是空间(tree)/时间(timeline)两视角投影，jq 是塑形层。
-边界：jq 只塑形结构够的内容——埋在散文里的数/状态它抓不动，
-故"写得可解析"是前提（marker 前缀、name=val），不是 mnema 多建命令。
-（orient 开场 remind 的 read/extract 段即指向此页。）
-顶层字段见 mnema explain json。常用：
+        title: "jq projections — consume public JSON without scraping text",
+        body: r#"JSON exposes spatial (tree) and temporal (timeline) projections; jq
+shapes them. It cannot recover structure buried in prose, so write parseable
+markers and name=value metrics when later extraction matters. See
+mnema explain json: top-level fields.
 
-取 strand id（免脆弱解析，取代手搓字符串切割）：
+Get a strand id:
   echo "..." | mnema add --format json | jq -r .id
 
-取日志行：
+Get entry content:
   mnema show --id <ID> --format json | jq -r '.events[].entry'
 
-按 marker 聚条目（marker 是 .entry 前缀，取代 show 文字墙 + grep）：
+Select entries by marker:
   mnema show --id <ID> --format json | jq -r '.events[] | select(.entry | startswith("[friction]")) | .entry'
-  坑：用 startswith；勿用 test("^\[...")——shell 里反斜杠转义会炸。
+  Prefer startswith; regex backslash quoting is fragile across shells.
 
-抽数字轨迹（先按约定写 [metric] name=val，再 capture 出序列）：
+Extract a numeric metric series:
   echo "[metric] win_count=26" | mnema append --id <ID>
   mnema show --id <ID> --format json | jq '[.events[].entry | capture("win_count=(?<v>[0-9]+)") | .v | tonumber]'
 
-数值筛选（offset / count / entry_count 是数，可比较）：
+Filter numeric fields:
   mnema list --format json | jq '.strands[] | select(.entry_count > 10) | .id'
 
-中途现状合成（"我在哪"：活线 + 各自 last_offset 即下次 --seen-offset 的 N）：
+Build a compact current-state view (last_offset feeds the next --seen-offset):
   mnema orient --format json | jq -r '.active[] | "\(.id[0:12]) n=\(.last_offset) :: \(.last_entry)"'
 
-时间线切成精简视图：
+Project a compact timeline:
   mnema timeline --format json | jq '.timeline[] | {ts, strand_id, kind}'"#,
     },
     TopicInfo {
         name: "writing",
-        title: "写入范例——时机、形状、临时演练",
-        body: r#"这是合成示例，不描述宿主项目事实；具体内容只用占位符。
+        title: "Writing — timing, entry shapes, and a disposable drill",
+        body: r#"These are synthetic examples, not facts about the host project.
 
-什么时候写：
-  方案成形时：写决定、依据、验证锚点。
-  判断被现实改变时：写新观察和被推翻的假设。
-  收口或不可逆动作前：先 checkpoint，再 close 或执行动作。
+Write when:
+  a plan forms: record the decision, evidence, and verification anchor;
+  evidence changes judgment: record the observation and displaced assumption;
+  work closes or an irreversible action approaches: checkpoint first.
 
-entry 形状模板：
+Entry templates:
   [decision] <claim>; anchor=<file>:<line>; verify=<command>
   [observed] <fact>; source=<command>; changes=<assumption>
   [friction] <blocked thing>; at=<file>:<line>; tried=<command>
   [fixed] fixes=<entry-hash> <what changed>; verified=<command>
   [deliverable] <files changed>; build=<command>; test=<command>
 
-临时 journal 演练（把 <tmp>/<ID>/<entry-hash> 换成上一步输出）：
+Disposable journal drill (replace placeholders with prior output):
   tmp=<tmp>
   mnema -C <tmp> init
   printf '%s\n' '[task] synthetic writing drill; not host facts' | mnema -C <tmp> add --format json
@@ -219,78 +215,83 @@ entry 形状模板：
     },
     TopicInfo {
         name: "collaboration",
-        title: "协作 forest——多路工作在 journal 里的形状",
-        body: r#"协作只记录 journal 侧结构；怎么启动执行者属于外层约定。
+        title: "Collaboration forest — representing parallel work",
+        body: r#"Mnema records journal-side collaboration structure; launching workers belongs
+to the surrounding harness.
 
-结构：
-  每路工作一条 strand；派生工作用 mnema add --parent <母线>，建 belongs-to 子线。
-  子线 entry 首行自报身份：谁派的哪一路；不要把外层启动细节写成工具规范。
-  belongs-to 方向是子指父：CHILD belongs-to PARENT，tree 把 CHILD 缩进到 PARENT 下。
-  depends-on 方向是任务指上游：TASK depends-on UPSTREAM，供追溯 review context。
+Structure:
+  Use one strand per work lane. Create derived work with
+  mnema add --parent <PARENT>, producing CHILD belongs-to PARENT.
+  Identify the worker/lane in its first entry; keep vendor launch details out
+  of Core semantics. TASK depends-on UPSTREAM records review context, not a gate.
 
-纪律：
-  交付物落在自己的 strand；外层 stdout 只留一个可追的 strand 指针。
-  worker 收工用 mnema close --id <ID> --as done|failed，不用 [done] 改生命周期。
-  协调者收工先读子线 entries 和 close 状态，不信外层 stdout 自报成功。
-  母线最后写综合/收束 entry，把子线结论合并成可审计结果。
+Discipline:
+  Deliverables land on the worker's strand; outer stdout may point to it.
+  Workers close with mnema close --id <ID> --as done|failed; [done] is only an annotation.
+  Coordinators inspect child entries and close state instead of trusting stdout.
+  The parent receives the final synthesis entry.
 
-派发判据：
-  能并行摊开的审查、扫描、交叉验证才拆成多条子线。
-  串行实现、一次只能一路推进的改码，留在当前线自己做。
+Delegate parallel reviews, scans, and independent cross-checks. Keep inherently
+serial implementation on the current strand.
 
-常用读法：
-  mnema tree --id <母线>
-  mnema depends --id <任务线>
-  mnema depends --under <母线>
-  mnema doctor edges --under <母线>"#,
+Reads:
+  mnema tree --id <PARENT>
+  mnema depends --id <TASK>
+  mnema depends --under <PARENT>
+  mnema doctor edges --under <PARENT>"#,
     },
     TopicInfo {
         name: "delegation",
-        title: "递归委派——strand 是异步交接面",
-        body: r#"委派在任意深度使用同一套 strand 语义，不存在特殊的顶层/二阶 worker 类型。
+        title: "Delegation — strands as recursive asynchronous handoff",
+        body: r#"The same strand semantics apply at every depth; there is no special top-level
+or second-order worker type.
 
-1. 每一路先创建一个 child：echo "<task-specific instruction>" | mnema add --parent <PARENT>。
-2. body 只写任务专属指令；背景通过 0..N refs 连接，refs 默认不展开。
-3. worker 从自己的 strand 读取任务，把进展、证据与结论 append 回该线，收工用 close。
-4. 委派是异步的：协调者启动 worker 后继续其他工作，不轮询；到综合/验收点再读 close、entries、diff 与 tests。
-5. 任意深度继续委派时仍是 add --parent + refs；是否允许下派由任务/harness 授权。
-6. 并发写显式使用完整 strand id，不把 --last 当多 agent 默认。
-7. 进程退出和 stdout 自报不等于工单成败；journal 中的事实才是交接依据。
-8. 进程、模型、worktree、超时与重试由 harness 管理，Core help 不绑定厂商启动命令。
+1. Create one child per lane:
+   echo "<task-specific instruction>" | mnema add --parent <PARENT>
+2. Keep the body task-specific. Attach 0..N refs for context; refs do not expand by default.
+3. The worker enters from its strand, appends progress/evidence/conclusions, then closes it.
+4. Delegation is asynchronous: continue useful work without polling; inspect close,
+   entries, diff, and tests at a natural synthesis or acceptance point.
+5. Further delegation still uses add --parent plus refs; the task/harness authorizes fan-out.
+6. Concurrent writers use explicit full strand ids, not --last.
+7. Process exit and stdout claims are not task verdicts; journal evidence is the handoff.
+8. The harness owns processes, models, worktrees, timeouts, and retries.
 
-入口：mnema orient --id <CHILD>
-增量读取：mnema timeline --since-offset <N> --under <CHILD> --scope-at-event
-查看子树：mnema tree --id <PARENT>；mnema depends --under <PARENT>"#,
+Entry:       mnema orient --id <CHILD>
+Incremental: mnema timeline --since-offset <N> --under <CHILD> --scope-at-event
+Subtree:     mnema tree --id <PARENT>; mnema depends --under <PARENT>"#,
     },
     TopicInfo {
         name: "grammar",
-        title: "文法契约——全 CLI 一致的参数与命名规则",
-        body: r#"目标线：单 id 命令两种写法等价（位置 <ID> 与 --id <ID>）；"最近活跃线"统一用 --last。
-读+追加命令（show/find/hide/unhide/tree/depends/append/checkpoint）缺省即 --last；
-close/reopen 收口动作强制显式指名、禁 --last/缺省；正文只走 stdin，故 add/append 无位置参数；timeline 的 --id 等价 --strand。
-旗标词表（同一概念只有一个名字）：
-  --include-hidden  含隐藏线（checkpoint/pick 主名；--all 为兼容别名）
-  mnema list --all  （list 的隐藏线开关例外：只认 --all）
-  --format json     机器输出唯一正典（explain --json 是兼容快捷）
-  --provenance / --seen-offset <N>  写命令出处 / 上次看到的目标线 offset
-  --tail <N>        只限显示、不改账，对任何目标可用
-  --under <ID>      集合查询的 SubtreeScope（list/search/timeline/pick/depends；doctor edges 同）
-  mnema orient --id <ID>。委派入口专用写法，候选集同集合查询 --under（不是把 --under 写在 orient 上）
-  doctor edges --id <ID>  单线候选集；与 --under 互斥。doctor journal integrity 始终 JournalScope，不可用 scope 隐藏容器损坏
-  --edge-type       link 的边类型（--type 是 deprecated 别名）
-  --ref             引依据/记来源（可重复 0..N，顺序入身份；add 的 --from、append 的 --why 为兼容别名）：线前缀=其最新条，entry 哈希前缀=精确该条；读取用 mnema show --entry <HASH>（--deref 展开链，--before/--after 邻域）
-  --scope-at-event  timeline --under 的历史时态成员关系；用于精确回答子树自 offset N 后的 join/leave 与在域事实。默认 --under 仍按当前投影成员过滤
-JSON 命名法：复数名词=数组；计数=count/*_count；自身身份=id；引用他者=<noun>_id；id/strand_id 全宽 64 hex 可 join。
-跨 journal 引用（书写约定，本版不解析、doctor 不校格式）：<journal-id>:<strand>:<entry>
-  journal-id=64 hex 存 .mnema/journal-id.json（sidecar，不进哈希链；init 生成/旧仓 doctor 幂等补写，永不变）；strand/entry 为 ≥8 hex 前缀；整线可 <journal-id>:<strand>:；读 id：mnema doctor journal。
-写命令三件套：写 journal 必收 --provenance、必有 --format json 孪生、写后回显卡片（见 mnema explain card）。
-（孪生与 provenance 的覆盖缺口见一致性 CI 豁免表，按批清偿。）
-全局旗标：-C <DIR> / --chdir  如同在 DIR 启动；journal 解析与相对路径随之；DIR 不存在 → exit 3。
-exit code：0 成功 / 1 命令执行失败 / 2 journal 不可读或损坏 / 3 解析或参数非法。
-永久豁免（点名豁免，防"看起来漏了"的二次猜测）：
-  doctor 子命令风格（mnema doctor journal）；pick（交互选择器；机器入口用显式 --id 或 mnema pick --print-id）
-  add/append 正文位置参数、--stdin、--file 已在 v2 迁移中移除
-  mnema export --out <PATH>（主对象用旗标）；mnema cutover-v2 --apply（journal maintenance）"#,
+        title: "Grammar — cross-command arguments and naming",
+        body: r#"Single-strand targets accept positional <ID> or --id <ID>; --last names the
+most recent active strand. show/find/hide/unhide/tree/depends/append/checkpoint
+default to --last; close/reopen require a target. timeline --id aliases --strand.
+add/append content always comes from stdin.
+
+Canonical flags:
+  --include-hidden   include hidden strands; mnema list --all: compatibility alias
+  --format json      canonical machine output; explain --json is a shortcut
+  --provenance       structured writer metadata
+  --seen-offset <N>  caller's last observed target offset
+  --tail <N>         display bound only; never changes journal facts
+  --under <ID>       SubtreeScope for collection queries and doctor edges
+  mnema orient --id <ID>: delegated entry with that subtree candidate set
+  --edge-type        link relation; --type is deprecated
+  --ref <REF>        repeatable evidence/source refs in authored order
+  --scope-at-event   event-time membership for scoped timeline queries
+
+REF accepts a strand prefix (latest entry) or entry-hash prefix (exact entry).
+Read it with mnema show --entry <HASH>; optional --deref/--before/--after expand it.
+JSON: plural nouns are arrays; counts use count/*_count; own identity is id;
+foreign identities use <noun>_id. id and strand_id are full 64-hex values.
+Cross-journal writing convention (not parsed): <journal-id>:<strand>:<entry>.
+mnema doctor journal: journal id is 64 hex; strand/entry components are >=8 hex.
+Writes accept --provenance and, where offered, --format json; see mnema explain card.
+Global -C <DIR>/--chdir changes journal discovery and the relative-path base.
+Exit codes: 0 success; 1 command failure; 2 corrupt journal; 3 invalid arguments.
+Exceptions: doctor nests subcommands; pick is interactive; add/append have no
+content positional/--stdin/--file; export uses --out; cutover uses --apply."#,
     },
 ];
 
@@ -936,7 +937,7 @@ mod tests {
     #[test]
     fn delegation_topic_teaches_async_core_boundary_without_vendor_commands() {
         let topic = topic_lookup("delegation").expect("delegation topic");
-        assert!(topic.body.contains("不轮询"));
+        assert!(topic.body.contains("without polling"));
         assert!(topic.body.contains("0..N refs"));
         assert!(topic.body.contains("harness"));
         for vendor in ["grok --", "codex exec", "claude -p"] {

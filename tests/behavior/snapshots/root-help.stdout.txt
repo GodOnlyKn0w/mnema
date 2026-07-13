@@ -1,12 +1,15 @@
+Append-only semantic topology for durable human and multi-agent work
+
 Usage: mnema.exe [OPTIONS] <COMMAND>
 
 Commands:
-  init        Initialize .mnema/ directory and journal
+  orient      Session-start orientation: menu of active strands with catch-up commands
   add         Create a new strand with first log entry from stdin
   append      Append stdin content to a strand, or create a new strand from stdin
-  checkpoint  Record context before an irreversible or state-closing action
-  list        List all strands (reverse chronological, most recent last)
   show        Show full details of one strand
+  list        List all strands (reverse chronological, most recent last)
+  init        Initialize .mnema/ directory and journal
+  checkpoint  Record context before an irreversible or state-closing action
   search      Full-text search across all log content (entry-level hits with hashes)
   find        Resolve a prefix to full strand ID
   pick        Pick a strand, then run a read/manage command on it
@@ -22,7 +25,6 @@ Commands:
   cutover-v2  Rewrite/import the current journal into pure v2 form
   cutover-v3  Migrate pure v2 journal into activated v3 form
   timeline    Show entry events in journal append order (timeline projection)
-  orient      Session-start orientation: menu of active strands with catch-up commands
   tree        Build nested tree projection from strand edges
   depends     Inspect depends-on upstreams as review context
   help        Print this message or the help of the given subcommand(s)
@@ -32,37 +34,22 @@ Options:
   -h, --help         Print help
   -V, --version      Print version
 
-loop: 做一步 -> 看现实变 -> 再想。命令按 loop 阶分组：
+Start here:
+  Journal-wide session entry:
+    mnema orient
+  Delegated worker entry (local subtree):
+    mnema orient --id <ID>
+  Create a strand (entry text always uses stdin):
+    echo "[task] ..." | mnema add
 
-  orient        Session entry: active strand menu + catch-up commands
+Discovery:
+  Command syntax, rules, and examples:
+    mnema <command> --help
+  Cross-command argument contract:
+    mnema explain grammar
+  Concepts and diagnostic recovery:
+    mnema explain <topic|CODE>
 
-看 / read:
-  list          List strands
-  show          Show one strand (--digest one-glance, --tail N recent)
-  timeline      Chronological entries across strands (+linked)
-  search        Full-text search (entry hashes; --marker filter)
-  find          Resolve a strand id
-  pick          Pick a strand from an arrow-key menu; append reads body from stdin
-  tree          Strand forest (belongs-to nesting)
-  depends       depends-on upstream review context
-
-做 / change:
-  add           Create a new strand
-  append        Append an entry to a strand
-  close         Close a strand (close effect entry)
-  reopen        Reopen a closed strand (reopen effect entry)
-  checkpoint    Record context before an irreversible action
-  link          Link strands (belongs-to / depends-on)
-  unlink        Remove a link (unlink effect entry; projection drops the edge)
-
-管 / manage:
-  init          Initialize .mnema/ journal
-  hide          Hide a strand from active orient (parked, revivable)
-  unhide        Unhide a strand
-  doctor        Diagnose journal integrity (journal | edges)
-  export        Export journal as standalone audit artifact
-  cutover-v2    Rewrite/import current journal into pure v2 form
-  cutover-v3    Migrate pure v2 journal into activated v3 (manifest commit)
-  explain       Explain a diagnostic code or topic (markers, json, grammar, writing, ...)
-
-Run:  mnema <command> --help
+Journal discovery walks upward from the current directory, like Git.
+Use -C <DIR> to choose a different starting directory. Machine consumers
+should request --format json where offered; JSON fields are a public contract.
