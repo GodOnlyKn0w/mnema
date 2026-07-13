@@ -71,16 +71,9 @@ function Start-Suite([object]$Suite) {
     $raw = & $AsyncExecAdapter @args
     if ($LASTEXITCODE -ne 0) { throw "async-exec-adapter exec failed for $($Suite.Name)" }
     $result = $raw | ConvertFrom-Json
-    $record = [ordered]@{
-        schema = 'mnema.ci-run/v1'
-        name = $Suite.Name
-        phase = $Suite.Phase
-        parallel_safe = $Suite.ParallelSafe
-        handle = $result.handle
-    }
     [IO.File]::AppendAllText(
         $runManifest,
-        (($record | ConvertTo-Json -Depth 8 -Compress) + [Environment]::NewLine),
+        (($result.handle | ConvertTo-Json -Depth 8 -Compress) + [Environment]::NewLine),
         [Text.UTF8Encoding]::new($false)
     )
     [pscustomobject]@{ Suite = $Suite; Handle = $result.handle }
