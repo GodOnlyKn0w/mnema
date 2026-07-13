@@ -17,6 +17,8 @@ $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 New-Item -ItemType Directory -Force -Path $Store, $ArtifactRoot | Out-Null
 $commit = (& git -C $RepoRoot rev-parse HEAD).Trim()
 $automationVersion = 'ci-v6'
+$runManifest = Join-Path $ArtifactRoot 'runs.jsonl'
+[IO.File]::WriteAllText($runManifest, '', [Text.UTF8Encoding]::new($false))
 $targetDir = if ($env:CARGO_TARGET_DIR) {
     [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $RepoRoot)
 } else {
@@ -69,6 +71,18 @@ function Start-Suite([object]$Suite) {
     $raw = & $AsyncExecAdapter @args
     if ($LASTEXITCODE -ne 0) { throw "async-exec-adapter exec failed for $($Suite.Name)" }
     $result = $raw | ConvertFrom-Json
+    $record = [ordered]@{
+        schema = 'mnema.ci-run/v1'
+        name = $Suite.Name
+        phase = $Suite.Phase
+        parallel_safe = $Suite.ParallelSafe
+        handle = $result.handle
+    }
+    [IO.File]::AppendAllText(
+        $runManifest,
+        (($record | ConvertTo-Json -Depth 8 -Compress) + [Environment]::NewLine),
+        [Text.UTF8Encoding]::new($false)
+    )
     [pscustomobject]@{ Suite = $Suite; Handle = $result.handle }
 }
 
@@ -136,6 +150,7 @@ $report = [ordered]@{
     mode = $Mode
     invocation_id = $InvocationId
     executor = 'AsyncExec'
+    run_manifest = $runManifest
     started_at = $startedAt.ToString('O')
     finished_at = [DateTimeOffset]::UtcNow.ToString('O')
     passed = -not [bool]($results | Where-Object { -not $_.passed })
