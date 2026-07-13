@@ -53,22 +53,27 @@ mnema 的源码仓库（Rust CLI：append-only journal + 投影）。
 
 - 先过判据：能并行摊开（多题审查、多文件扫描、双审交叉验证）才派；
   串行实现类（一次只能一路推进的改码）自己干，派了只多转述开销。
+- **派发默认是异步的。** worker 成功启动并取得可追踪句柄后，协调者立即
+  继续本线可独立推进的工作；禁止用循环查询、固定间隔 sleep 或反复读取
+  stdout 等待完成。只在自然汇合点（需要其证据作决定、准备验收或交接）
+  做一次有界收取。异步不改变验收标准：进程结束不是任务完成。
 - 每路一条 strand（`mnema add`）。prompt 只需三样：strand ID、
   身份标识、任务专属指令——协议本身不必复述，被派方启动时会
   自动读到本文件。
-- 入口命令（prompt 落文件，stdin/--prompt-file 喂入）：
-  - codex：`codex exec --sandbox workspace-write -m gpt-5.5 -c model_reasoning_effort=high - < prompt.md`
-  - claude：`claude -p --model sonnet --permission-mode bypassPermissions < prompt.md`
-  - grok：`grok --prompt-file prompt.md -m grok-4.5 --permission-mode bypassPermissions --cwd <dir>`
-- 长任务与无头 agent 用 AsyncExec 托管，保留完整 Handle，并把
-  RequestId/RunId 写入对应 strand；启动后继续其他工作，不轮询，在自然
-  汇合点一次收取。目标 CLI 没有 timeout 旗标不再重要：wall timeout、
-  日志与进程树回收由 AsyncExec 提供，任务是否完成仍以 strand 证据判定。
-- **谁·怎么派·适合什么·有什么坑 → 模型花名册 `docs/agent-roster.md`**（batch 标题树）：
-  `batch tree docs/agent-roster.md` 看全貌；`batch get docs/agent-roster.md#<模型>/无头调用`
-  取启动命令；`#<模型>/适合`、`#<模型>/坑` 看适配与雷区。速记：长活主力 codex（稳、
-  自留痕），利落设计/收尾插 grok（须喂饱额度），评审裁决插 opus，简单点缀 sonnet；
-  脆点——claude 无头撞 5h、grok 免费撞额度、codex 偶发网络断。
+- 模型、供应商和能力档位由调用方在运行时选择；不要把模型 ID 写入本协议、
+  strand 语义或通用 prompt。模型更名、额度和可用性变化不应要求修改协作协议。
+- 入口命令（prompt 落文件，stdin/--prompt-file 喂入；使用调用方当前配置）：
+  - codex：`codex exec --sandbox workspace-write - < prompt.md`
+  - claude：`claude -p --permission-mode bypassPermissions < prompt.md`
+  - grok：`grok --prompt-file prompt.md --permission-mode bypassPermissions --cwd <dir>`
+- 长任务与无头 agent 交给环境提供的耐久异步执行器托管。若 AsyncExec 可用，
+  保留完整 Handle，把 RequestId/RunId 写入对应 strand；否则使用调用 harness
+  提供的等价后台句柄、日志、wall timeout 与进程树回收能力。不要为“异步”
+  临时拼一个不可恢复、不可取消、无日志边界的后台进程。
+- **谁·怎么派·当前适配与雷区 → 动态花名册 `docs/agent-roster.md`**：
+  `batch tree docs/agent-roster.md` 看全貌；按当前环境读取对应条目的无头调用、
+  适合与坑。花名册是可更新的运行时经验，不是 Core 协议或固定路由表；不可用
+  或不合适时换路，不限厂商。
 - 收工判读顺序：先看 strand 的 close 状态与 entries；退出码只说明
   进程死活，stdout 的自报成功不作数。
 - worker 阵亡（非零退出/超时）→ strand 上的半途痕迹即接手点，
