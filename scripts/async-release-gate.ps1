@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)][string]$RepoRoot,
     [Parameter(Mandatory)][string]$Store,
     [Parameter(Mandatory)][string]$ArtifactRoot,
+    [Parameter(Mandatory)][string]$InvocationId,
     [string]$AsyncExec = 'async-exec',
     [string]$AsyncExecAdapter = 'async-exec-adapter'
 )
@@ -54,7 +55,7 @@ foreach ($buildVariable in @('LIB', 'INCLUDE', 'LIBPATH')) {
 }
 
 function Start-Suite([object]$Suite) {
-    $requestId = "mnema:${commit}:$($Mode.ToLowerInvariant()):$($Suite.Name):$automationVersion"
+    $requestId = "mnema:${commit}:$($Mode.ToLowerInvariant()):$($Suite.Name):${automationVersion}:${InvocationId}"
     $args = @('exec', '--store', $Store, '--request-id', $requestId,
         '--wall-timeout-ms', [string]$Suite.TimeoutMs, '--inline-wait-ms', '1',
         '--ensure-host', '--cwd', $RepoRoot,
@@ -94,6 +95,7 @@ function Await-Suite([object]$Started) {
     [pscustomobject]@{
         name = $Started.Suite.Name
         argv = $Started.Suite.Argv
+        parallel_safe = $Started.Suite.ParallelSafe
         passed = ($terminal.outcome -eq 'exited' -and $terminal.exit_code -eq 0)
         handle = $Started.Handle
         terminal = $terminal
@@ -113,7 +115,11 @@ foreach ($suite in @($suites | Where-Object Phase -lt 2 | Sort-Object Phase)) {
 }
 
 if (-not ($results | Where-Object { -not $_.passed })) {
-    $parallel = @($suites | Where-Object Phase -eq 2 | ForEach-Object { Start-Suite $_ })
+    $phaseTwo = @($suites | Where-Object Phase -eq 2)
+    $parallel = @($phaseTwo | Where-Object ParallelSafe | ForEach-Object { Start-Suite $_ })
+    foreach ($suite in @($phaseTwo | Where-Object { -not $_.ParallelSafe })) {
+        $results.Add((Await-Suite (Start-Suite $suite)))
+    }
     foreach ($started in $parallel) { $results.Add((Await-Suite $started)) }
 }
 if (-not ($results | Where-Object { -not $_.passed })) {
@@ -128,6 +134,7 @@ $report = [ordered]@{
     repo = $RepoRoot
     commit = $commit
     mode = $Mode
+    invocation_id = $InvocationId
     executor = 'AsyncExec'
     started_at = $startedAt.ToString('O')
     finished_at = [DateTimeOffset]::UtcNow.ToString('O')

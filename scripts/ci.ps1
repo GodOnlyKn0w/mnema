@@ -39,6 +39,7 @@ Initialize-WindowsMsvcEnvironment
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $commit = (& git -C $repo rev-parse HEAD).Trim()
+$invocationId = [Guid]::NewGuid().ToString('N')
 $artifactRoot = Join-Path $repo ".artifacts\ci\$commit\$($Mode.ToLowerInvariant())"
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
 $env:MNEMA_RERE_REPLAY_ONLY = '1'
@@ -56,7 +57,7 @@ if ($Executor -eq 'AsyncExec') {
         $Store = Join-Path $localData 'mnema\async-exec'
     }
     & (Join-Path $PSScriptRoot 'async-release-gate.ps1') -Mode $Mode -RepoRoot $repo `
-        -Store $Store -ArtifactRoot $artifactRoot
+        -Store $Store -ArtifactRoot $artifactRoot -InvocationId $invocationId
     exit $LASTEXITCODE
 }
 
@@ -103,7 +104,8 @@ foreach ($suite in @(Get-MnemaTestSuites $Mode | Sort-Object Phase)) {
     $watch.Stop()
     $passed = $process.outcome -eq 'exited' -and $process.exit_code -eq 0
     $results.Add([pscustomobject]@{
-        name = $suite.Name; argv = $suite.Argv; passed = $passed
+        name = $suite.Name; argv = $suite.Argv; parallel_safe = $suite.ParallelSafe
+        passed = $passed
         process = [ordered]@{ outcome = $process.outcome; exit_code = $process.exit_code; duration_ms = $watch.ElapsedMilliseconds }
         stdout = $stdout; stderr = $stderr
     })
@@ -112,6 +114,7 @@ foreach ($suite in @(Get-MnemaTestSuites $Mode | Sort-Object Phase)) {
 
 $report = [ordered]@{
     schema = 'mnema.ci-report/v1'; repo = $repo; commit = $commit; mode = $Mode
+    invocation_id = $invocationId
     executor = 'Direct'; started_at = $startedAt.ToString('O')
     finished_at = [DateTimeOffset]::UtcNow.ToString('O')
     passed = -not [bool]($results | Where-Object { -not $_.passed }); suites = @($results)

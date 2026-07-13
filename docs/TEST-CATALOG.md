@@ -69,18 +69,20 @@
 
 三种模式默认使用 AsyncExec。`scripts/ci.ps1` 负责选择本表 suite、组合结果和产出 `mnema.ci-report/v1`；`scripts/async-release-gate.ps1` 只把 suite 映射为 durable run。AsyncExec 记录进程事实，不解释测试成功，不重试，不理解 strand。
 
-Full lane 固定先单路 `build-release`、`compile-release`，再并发 correctness shards，避免多个 Cargo 编译争夺 artifact lock：
+Full lane 固定先单路 `build-release`、`compile-release`。普通测试完成后才切换
+failpoint feature，并让 `compile-failpoints` 紧邻 `crash-atomicity`，避免 Cargo
+在普通与 failpoint feature 状态之间反复重编译。Phase 2 只并发显式标记为
+`ParallelSafe`、且不占用 Cargo artifact lock 的 replay suites；所有共享同一
+`CARGO_TARGET_DIR` 的 Cargo suites 串行运行。`mnema.ci-report/v1` 在每个 suite
+上回显这一 `parallel_safe` 调度事实。suite 的 timeout 从进程启动开始计时，
+不得把等待共享锁的时间伪装成测试执行时间：
 
 ```text
 build-release → compile-release
-  ├─ unit
-  ├─ behavior
-  ├─ cli-recovery
-  ├─ compat-v2-v3
-  ├─ v3-runtime
-  ├─ crash-atomicity
-  ├─ recursive-rere-smoke
-  └─ recursive-rere-full
+  ├─ Cargo serial: unit → behavior → cli-recovery → compat-v2-v3
+  │                → v3-runtime → compile-failpoints → crash-atomicity
+  ├─ parallel-safe: recursive-rere-smoke
+  └─ parallel-safe: recursive-rere-full
 ```
 
 Recursive rere suites are replay-only under `MNEMA_RERE_REPLAY_ONLY=1`.
@@ -88,7 +90,12 @@ Recording is a deliberate maintainer action documented in
 `tests/recursive/README.md`; AsyncExec only hosts replay and preserves process
 facts.
 
-每个 async run 的 RequestId 必须包含 repo、commit、lane、suite 和自动化 schema version；不同 worktree 必须使用独立 `CARGO_TARGET_DIR`。日志与 Handle/TerminalEvent 放在 `.artifacts/ci/<commit>/<run>/`，不得写入 `.mnema/`。
+每次 gate 调用生成一个 invocation identity；每个 async run 的 RequestId 必须包含
+commit、lane、suite、自动化 schema version 和该 invocation identity。同一调用内的
+重投保持幂等，不同调用（尤其是 commit 未变但工作树已变）必须产生新测试证据，
+不得复用历史 terminal 冒充本次验证。不同 worktree 必须使用独立
+`CARGO_TARGET_DIR`。日志与 Handle/TerminalEvent 放在
+`.artifacts/ci/<commit>/<run>/`，不得写入 `.mnema/`。
 
 ## Registration rule
 
