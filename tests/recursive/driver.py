@@ -82,6 +82,8 @@ class Project:
             cmd,
             input=stdin,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             capture_output=True,
             env=self.env,
             cwd=str(self.root),
